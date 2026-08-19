@@ -4,8 +4,6 @@ This console is designed to run on any Linux cloud server that has Docker and
 Docker Compose. It only manages the Codex files mounted into the container;
 each server keeps its own providers, credentials, backups, and audit log.
 
-## Quick start
-
 ## Install Docker (Ubuntu/Debian)
 
 ```bash
@@ -24,26 +22,29 @@ sudo usermod -aG docker "$USER"
 
 Log out of SSH and sign in again after changing the group.
 
+## Quick start
+
 ```bash
-git clone <your-repository-url> codex-provider-console
+git clone https://github.com/Sika-Liu/codex-provider-console.git
 cd codex-provider-console
-cp .env.example .env
+bash install.sh
 ```
 
-Edit `.env` and set `CODEX_HOME_HOST` to the server user's Codex directory.
-The directory must contain (or be able to create) `config.toml` and may contain
-`auth.json`. Set `PUID` and `PGID` to the owner of that directory:
+The installer creates `.env` from `.env.example`, defaults `CODEX_HOME_HOST` to
+the current user's `~/.codex`, and starts the service. It does not overwrite
+existing `.env` values unless `--force` is provided.
+
+To allow Docker installation through the installer on Ubuntu/Debian:
 
 ```bash
-id -u
-id -g
+bash install.sh --install-docker
 ```
 
-Start the service:
+Useful installer options:
 
 ```bash
-docker compose up -d --build
-docker compose logs -f codex-provider-console
+bash install.sh --codex-home /home/alice/.codex --port 8787
+bash install.sh --bind 127.0.0.1 --force
 ```
 
 By default the service listens only on `127.0.0.1:8787`. Access it locally with
@@ -64,3 +65,14 @@ backups, model catalogs, and the audit log. To move the console to another
 server, copy that directory securely and point the new `.env` at the copy.
 
 Do not commit `.env`, `auth.json`, provider profiles, or backup directories.
+
+## Management
+
+Run these commands from the repository directory:
+
+```bash
+bash codex-panel status
+bash codex-panel logs
+bash codex-panel restart
+bash codex-panel update
+```

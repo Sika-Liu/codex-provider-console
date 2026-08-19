@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "$PROJECT_DIR"
+
+usage() {
+  cat <<'EOF'
+Usage: bash codex-panel <command>
+
+Commands:
+  start     Build and start the console
+  stop      Stop the console
+  restart   Rebuild and restart the console
+  status    Show container status
+  logs      Follow console logs
+  update    Pull the latest Git revision and rebuild the console
+  config    Print the active .env file path
+EOF
+}
+
+case "${1:-}" in
+  start) docker compose up -d --build ;;
+  stop) docker compose down ;;
+  restart) docker compose up -d --build --force-recreate ;;
+  status) docker compose ps ;;
+  logs) docker compose logs -f --tail=100 codex-provider-console ;;
+  update)
+    git pull --ff-only
+    docker compose up -d --build
+    ;;
+  config) printf '%s\n' "$PROJECT_DIR/.env" ;;
+  -h|--help|help|'') usage ;;
+  *) echo "Unknown command: $1" >&2; usage; exit 1 ;;
+esac
