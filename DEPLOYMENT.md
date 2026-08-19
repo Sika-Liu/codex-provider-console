@@ -35,10 +35,10 @@ the current user's `~/.codex`, and starts the service. It does not overwrite
 an existing Codex directory value unless `--force` is provided. The port and
 bind address selected interactively are always applied.
 
-In an interactive SSH session, the installer asks for the panel port and keeps
-the service bound to localhost. It prints the internal address, SSH tunnel
-command, configuration path, and a reminder to configure the reverse proxy in
-the panel itself.
+In an interactive SSH session, the installer asks for the panel port, defaults
+to `0.0.0.0`, and prints the external address, internal address, SSH tunnel
+command, configuration path, and cloud firewall reminder. Reverse proxy setup
+is optional and is configured later from the panel.
 It also generates a panel administrator password and session secret. The
 credentials are stored in `.env`, which the installer restricts to mode `600`.
 
@@ -53,6 +53,7 @@ Useful installer options:
 ```bash
 bash install.sh --codex-home /home/alice/.codex --port 8787
 bash install.sh --force
+bash install.sh --bind 127.0.0.1 --force
 ```
 
 The panel login is enabled by default. When using HTTPS through a reverse proxy,
@@ -62,17 +63,18 @@ set `PANEL_COOKIE_SECURE=true` in `.env` and restart the service:
 bash codex-panel restart
 ```
 
-By default the service listens only on `127.0.0.1:8787`. Access it locally with
-an SSH tunnel:
+If you choose the localhost override, the service listens on `127.0.0.1:8787`.
+Access it locally with an SSH tunnel:
 
 ```bash
 ssh -L 8787:127.0.0.1:8787 <user>@<server>
 ```
 
-Then open `http://127.0.0.1:8787` in a browser. Configure public access from
-the panel's 反向代理 page; keep the upstream pointed at `127.0.0.1:8787` and
-put it behind authenticated HTTPS because this panel can read and replace Codex
-credentials.
+For the default public binding, open `http://<server-public-ip>:8787` after
+opening the port in the cloud security group. Alternatively, use the SSH tunnel
+shown by the installer. Configure a domain and HTTPS from the panel's 反向代理
+page only when needed; the panel can read and replace Codex credentials, so
+public deployments must retain login authentication.
 
 ## Data and portability
 
