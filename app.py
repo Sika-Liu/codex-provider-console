@@ -1,15 +1,19 @@
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
 import shutil
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
@@ -22,6 +26,14 @@ AUDIT_PATH = CODEX_HOME / "control-panel-audit.jsonl"
 PROFILE_ID = re.compile(r"^[a-zA-Z0-9_-]{1,48}$")
 
 app = FastAPI(title="Codex Provider Console", docs_url=None, redoc_url=None)
+
+AUTH_ENABLED = os.environ.get("PANEL_AUTH_ENABLED", "true").lower() not in {"0", "false", "no"}
+PANEL_USERNAME = os.environ.get("PANEL_USERNAME", "")
+PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "")
+SESSION_SECRET = os.environ.get("PANEL_SESSION_SECRET", "")
+COOKIE_SECURE = os.environ.get("PANEL_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
+SESSION_COOKIE = "codex_panel_session"
+SESSION_MAX_AGE = 12 * 60 * 60
 
 
 class ModelEntry(BaseModel):
@@ -61,6 +73,82 @@ class ProviderDiagnosticRequest(BaseModel):
     config_contents: str = ""
     auth_contents: str = ""
     test_model: str = ""
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=256)
+
+
+def auth_configured() -> bool:
+    return bool(PANEL_USERNAME and PANEL_PASSWORD and SESSION_SECRET)
+
+
+def session_token(username: str) -> str:
+    payload = f"{int(time.time())}:{username}".encode("utf-8")
+    signature = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).hexdigest().encode("ascii")
+    return base64.urlsafe_b64encode(payload + b":" + signature).decode("ascii").rstrip("=")
+
+
+def valid_session(token: str | None) -> bool:
+    if not token or not auth_configured():
+        return False
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        payload, signature = base64.urlsafe_b64decode(padded.encode("ascii")).rsplit(b":", 1)
+        expected = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).hexdigest().encode("ascii")
+        timestamp, username = payload.decode("utf-8").split(":", 1)
+        return (
+            hmac.compare_digest(signature, expected)
+            and hmac.compare_digest(username, PANEL_USERNAME)
+            and int(timestamp) + SESSION_MAX_AGE >= int(time.time())
+        )
+    except (ValueError, UnicodeDecodeError):
+        return False
+
+
+LOGIN_HTML = '''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录 · Codex 控制台</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f6f8;color:#202124;font:14px Arial,"Microsoft YaHei",sans-serif}.login{width:min(380px,calc(100vw - 36px));background:#fff;border:1px solid #dde1e6;border-radius:8px;padding:28px;box-sizing:border-box;box-shadow:0 12px 32px #0000000d}h1{margin:0;font-size:22px}p{color:#687078;line-height:1.5}label{display:block;font-weight:700;margin:17px 0 7px}input{box-sizing:border-box;width:100%;border:1px solid #cfd5da;border-radius:6px;padding:10px 11px;font:inherit}button{width:100%;border:0;border-radius:6px;background:#202124;color:#fff;padding:11px;margin-top:20px;font:inherit;font-weight:700;cursor:pointer}#message{min-height:20px;color:#bd3131;margin-top:12px}</style></head><body><main class="login"><h1>Codex 控制台</h1><p>请输入管理员账号和密码。</p><form id="login"><label>用户名<input id="username" autocomplete="username" required autofocus></label><label>密码<input id="password" type="password" autocomplete="current-password" required></label><button>登录</button><div id="message"></div></form></main><script>document.querySelector('#login').addEventListener('submit',async e=>{e.preventDefault();const r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:username.value,password:password.value})});if(r.ok)location.href='/';else{const d=await r.json().catch(()=>({}));message.textContent=d.detail||'登录失败。'}})</script></body></html>'''
+
+
+@app.middleware("http")
+async def authentication(request: Request, call_next):
+    if not AUTH_ENABLED or request.url.path in {"/login", "/logout"}:
+        return await call_next(request)
+    if not auth_configured():
+        detail = "Panel authentication is enabled but not configured. Run bash install.sh --force."
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"detail": detail}, status_code=503)
+        return HTMLResponse(detail, status_code=503)
+    if valid_session(request.cookies.get(SESSION_COOKIE)):
+        return await call_next(request)
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"detail": "Authentication required"}, status_code=401)
+    return RedirectResponse("/login", status_code=303)
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page() -> str:
+    return LOGIN_HTML
+
+
+@app.post("/login")
+def login(request: LoginRequest) -> JSONResponse:
+    if not AUTH_ENABLED:
+        return JSONResponse({"authenticated": True})
+    if not auth_configured():
+        raise HTTPException(503, "Panel authentication is not configured")
+    if not (hmac.compare_digest(request.username, PANEL_USERNAME) and hmac.compare_digest(request.password, PANEL_PASSWORD)):
+        raise HTTPException(401, "用户名或密码错误")
+    response = JSONResponse({"authenticated": True})
+    response.set_cookie(SESSION_COOKIE, session_token(PANEL_USERNAME), max_age=SESSION_MAX_AGE, httponly=True, samesite="strict", secure=COOKIE_SECURE, path="/")
+    return response
+
+
+@app.post("/logout")
+def logout() -> JSONResponse:
+    response = JSONResponse({"authenticated": False})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
 
 
 def read_profiles() -> dict[str, dict]:
@@ -613,12 +701,13 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
  </script>'''
     navigation_script = r'''<script>
  document.head.insertAdjacentHTML('beforeend', `<style>
- .console-sidebar{position:fixed;inset:0 auto 0 0;width:228px;background:#202124;color:#f7f8fa;padding:22px 14px;z-index:20;display:flex;flex-direction:column;gap:22px}.console-brand{font-size:17px;font-weight:750;padding:0 12px}.console-brand small{display:block;color:#aeb4bb;font-size:11px;font-weight:400;margin-top:5px}.console-nav{display:grid;gap:5px}.console-nav button{border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-nav button:hover,.console-nav button.active{background:#34373b;color:#fff}.console-content{margin-left:228px}.console-panel{max-width:1320px;margin:22px auto;padding:0 26px}.console-panel .list-shell{background:#fff;border:1px solid #dde1e6;border-radius:11px;padding:18px}.console-panel h2{margin:0 0 7px;font-size:18px}.console-panel .panel-note{color:#686e76;font-size:13px;margin:0 0 18px}.console-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.console-form label{display:block;color:#555c64;font-size:12px;margin-bottom:5px}.console-form input,.console-form select,.console-form textarea{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d2d6da;border-radius:7px;font:inherit;background:#fff}.console-form textarea{min-height:104px;resize:vertical}.console-form .wide{grid-column:1/-1}.console-form-actions{display:flex;gap:8px;margin-top:17px}.console-code{font:12px Consolas,monospace;background:#f4f5f6;color:#30343a;padding:12px;border-radius:7px;white-space:pre-wrap;overflow:auto}.console-muted{color:#727982;font-size:12px}
+ .console-sidebar{position:fixed;inset:0 auto 0 0;width:228px;background:#202124;color:#f7f8fa;padding:22px 14px;z-index:20;display:flex;flex-direction:column;gap:22px}.console-brand{font-size:17px;font-weight:750;padding:0 12px}.console-brand small{display:block;color:#aeb4bb;font-size:11px;font-weight:400;margin-top:5px}.console-nav{display:grid;gap:5px}.console-nav button{border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-nav button:hover,.console-nav button.active{background:#34373b;color:#fff}.console-logout{margin-top:auto;border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-logout:hover{background:#34373b;color:#fff}.console-content{margin-left:228px}.console-panel{max-width:1320px;margin:22px auto;padding:0 26px}.console-panel .list-shell{background:#fff;border:1px solid #dde1e6;border-radius:11px;padding:18px}.console-panel h2{margin:0 0 7px;font-size:18px}.console-panel .panel-note{color:#686e76;font-size:13px;margin:0 0 18px}.console-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.console-form label{display:block;color:#555c64;font-size:12px;margin-bottom:5px}.console-form input,.console-form select,.console-form textarea{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d2d6da;border-radius:7px;font:inherit;background:#fff}.console-form textarea{min-height:104px;resize:vertical}.console-form .wide{grid-column:1/-1}.console-form-actions{display:flex;gap:8px;margin-top:17px}.console-code{font:12px Consolas,monospace;background:#f4f5f6;color:#30343a;padding:12px;border-radius:7px;white-space:pre-wrap;overflow:auto}.console-muted{color:#727982;font-size:12px}
  @media(max-width:800px){.console-sidebar{width:190px}.console-content{margin-left:190px}.console-form{grid-template-columns:1fr}}
  </style>`);
- document.body.insertAdjacentHTML('afterbegin', `<aside class="console-sidebar"><div class="console-brand">Codex 控制台<small>通用服务器管理</small></div><nav class="console-nav"><button data-section="providers" onclick="openConsoleSection('providers')">供应商配置</button><button data-section="ssh" onclick="openConsoleSection('ssh')">SSH 连接</button><button data-section="proxy" onclick="openConsoleSection('proxy')">反向代理</button></nav></aside>`);
+ document.body.insertAdjacentHTML('afterbegin', `<aside class="console-sidebar"><div class="console-brand">Codex 控制台<small>通用服务器管理</small></div><nav class="console-nav"><button data-section="providers" onclick="openConsoleSection('providers')">供应商配置</button><button data-section="ssh" onclick="openConsoleSection('ssh')">SSH 连接</button><button data-section="proxy" onclick="openConsoleSection('proxy')">反向代理</button></nav><button class="console-logout" onclick="logoutConsole()">退出登录</button></aside>`);
  document.querySelector('.top')?.classList.add('console-content');document.querySelectorAll('.page').forEach(e=>e.classList.add('console-content'));
  document.body.insertAdjacentHTML('beforeend', `<section id="console-ssh" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><h2>SSH 连接</h2><p class="panel-note">保存连接参数并生成 SSH 隧道命令。私钥内容不会上传或保存。</p><div class="console-form"><div><label>服务器地址</label><input id="ssh-host" placeholder="例如 203.0.113.10"></div><div><label>SSH 端口</label><input id="ssh-port" type="number" value="22"></div><div><label>用户名</label><input id="ssh-user" placeholder="例如 ubuntu"></div><div><label>本地访问端口</label><input id="ssh-local-port" type="number" value="8787"></div><div class="wide"><label>隧道命令</label><div id="ssh-command" class="console-code">填写服务器地址和用户名后生成</div><div class="console-muted">执行后，在本机打开 http://127.0.0.1:8787</div></div></div><div class="console-form-actions"><button class="btn" onclick="saveConsoleSettings()">保存 SSH 配置</button></div><div id="ssh-notice" class="notice"></div></div></section><section id="console-proxy" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><h2>反向代理</h2><p class="panel-note">为域名访问生成 Nginx 配置片段。建议启用 HTTPS 和访问认证后再公开服务。</p><div class="console-form"><div><label>域名</label><input id="proxy-domain" placeholder="console.example.com"></div><div><label>上游地址</label><input id="proxy-upstream" value="127.0.0.1:8787"></div><div><label>TLS 证书路径</label><input id="proxy-cert" placeholder="/etc/letsencrypt/live/example/fullchain.pem"></div><div><label>TLS 私钥路径</label><input id="proxy-key" placeholder="/etc/letsencrypt/live/example/privkey.pem"></div><div class="wide"><label>Nginx 配置预览</label><pre id="proxy-config" class="console-code">填写域名后生成</pre></div></div><div class="console-form-actions"><button class="btn" onclick="saveConsoleSettings()">保存反向代理配置</button></div><div id="proxy-notice" class="notice"></div></div></section>`);
+ async function logoutConsole(){await fetch('/logout',{method:'POST'});location.href='/login'}
  function openConsoleSection(section){document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';document.querySelector('#console-'+(section==='ssh'?'ssh':'proxy')).style.display='block'}localStorage.setItem('console-section',section)}
  function updateSshCommand(){const host=$('#ssh-host')?.value.trim(),user=$('#ssh-user')?.value.trim(),port=$('#ssh-port')?.value||22,local=$('#ssh-local-port')?.value||8787;$('#ssh-command').textContent=host&&user?`ssh -N -L ${local}:127.0.0.1:8787 -p ${port} ${user}@${host}`:'填写服务器地址和用户名后生成'}
  function updateProxyConfig(){const domain=$('#proxy-domain')?.value.trim(),upstream=$('#proxy-upstream')?.value.trim()||'127.0.0.1:8787',cert=$('#proxy-cert')?.value.trim(),key=$('#proxy-key')?.value.trim();$('#proxy-config').textContent=domain?`server {\n    listen 443 ssl;\n    server_name ${domain};\n    ssl_certificate ${cert||'/path/to/fullchain.pem'};\n    ssl_certificate_key ${key||'/path/to/privkey.pem'};\n    location / {\n        proxy_pass http://${upstream};\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    }\n}`:'填写域名后生成'}

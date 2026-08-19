@@ -38,6 +38,8 @@ bind address selected interactively are always applied.
 In an interactive SSH session, the installer asks for the panel port and whether
 to expose the service publicly. It then prints the external address, internal
 address, SSH tunnel command, configuration path, and cloud firewall reminder.
+It also generates a panel administrator password and session secret. The
+credentials are stored in `.env`, which the installer restricts to mode `600`.
 
 To allow Docker installation through the installer on Ubuntu/Debian:
 
@@ -51,6 +53,13 @@ Useful installer options:
 bash install.sh --codex-home /home/alice/.codex --port 8787
 bash install.sh --bind 127.0.0.1 --force
 bash install.sh --public --port 8787
+```
+
+The panel login is enabled by default. When using HTTPS through a reverse proxy,
+set `PANEL_COOKIE_SECURE=true` in `.env` and restart the service:
+
+```bash
+bash codex-panel restart
 ```
 
 By default the service listens only on `127.0.0.1:8787`. Access it locally with

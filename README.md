@@ -18,6 +18,7 @@ bash install.sh
 - 是否公开监听到公网。
 
 完成后会输出公网地址、内网地址、SSH 隧道命令、配置文件路径和安全组提示。
+首次安装还会生成管理员用户名、随机密码和会话密钥，并在结果中显示一次。登录后可从左侧菜单退出登录。
 
 缺少 Docker 时，先安装 Docker，或明确允许脚本在 Ubuntu/Debian 上安装：
 
@@ -35,6 +36,12 @@ bash install.sh --codex-home /home/ubuntu/.codex --port 8787
 
 ```bash
 bash install.sh --public --port 8787
+```
+
+若通过 HTTPS 反向代理访问，请将 `.env` 中的 `PANEL_COOKIE_SECURE` 改为 `true`，然后执行：
+
+```bash
+bash codex-panel restart
 ```
 
 通过 SSH 隧道访问：

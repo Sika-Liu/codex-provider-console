@@ -11,6 +11,9 @@ PORT_SET=false
 BIND_SET=false
 INSTALL_DOCKER=false
 FORCE=false
+PANEL_USERNAME="admin"
+PANEL_PASSWORD=""
+PANEL_SESSION_SECRET=""
 
 usage() {
   cat <<'EOF'
@@ -106,6 +109,10 @@ install_docker() {
   esac
 }
 
+random_hex() {
+  od -An -N "$1" -tx1 /dev/urandom | tr -d ' \n'
+}
+
 if ! command -v docker >/dev/null 2>&1; then
   if [[ "$INSTALL_DOCKER" == true ]]; then
     install_docker
@@ -159,6 +166,19 @@ set_env PANEL_PORT "$PANEL_PORT" "$PORT_SET"
 set_env PUID "$(id -u)"
 set_env PGID "$(id -g)"
 
+existing_username=$(sed -n 's/^PANEL_USERNAME=//p' "$ENV_FILE" | tail -n 1)
+existing_password=$(sed -n 's/^PANEL_PASSWORD=//p' "$ENV_FILE" | tail -n 1)
+existing_secret=$(sed -n 's/^PANEL_SESSION_SECRET=//p' "$ENV_FILE" | tail -n 1)
+PANEL_USERNAME="${existing_username:-$PANEL_USERNAME}"
+PANEL_PASSWORD="${existing_password:-$(random_hex 18)}"
+PANEL_SESSION_SECRET="${existing_secret:-$(random_hex 32)}"
+set_env PANEL_AUTH_ENABLED "true" true
+set_env PANEL_USERNAME "$PANEL_USERNAME"
+set_env PANEL_PASSWORD "$PANEL_PASSWORD"
+set_env PANEL_SESSION_SECRET "$PANEL_SESSION_SECRET"
+set_env PANEL_COOKIE_SECURE "false"
+chmod 600 "$ENV_FILE"
+
 docker compose -f "$PROJECT_DIR/compose.yml" up -d --build
 
 local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -187,6 +207,8 @@ Listening address: ${PANEL_BIND}:${PANEL_PORT}
 SSH tunnel: ssh -N -L ${PANEL_PORT}:127.0.0.1:${PANEL_PORT} $(whoami)@<server-ip>
 Config file: ${ENV_FILE}
 Codex data: ${CODEX_HOME_HOST}
+Username: ${PANEL_USERNAME}
+Password: ${PANEL_PASSWORD}
 
 ${exposure_note}
 

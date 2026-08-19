@@ -9,6 +9,11 @@ services:
       - "${CODEX_HOME_HOST:-./codex-data}:/codex"
     environment:
       CODEX_HOME: /codex
+      PANEL_AUTH_ENABLED: "${PANEL_AUTH_ENABLED:-true}"
+      PANEL_USERNAME: "${PANEL_USERNAME:-}"
+      PANEL_PASSWORD: "${PANEL_PASSWORD:-}"
+      PANEL_SESSION_SECRET: "${PANEL_SESSION_SECRET:-}"
+      PANEL_COOKIE_SECURE: "${PANEL_COOKIE_SECURE:-false}"
     security_opt:
       - no-new-privileges:true
     cap_drop:
