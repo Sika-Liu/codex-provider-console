@@ -1,0 +1,15 @@
+services:
+  codex-provider-console:
+    build: .
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "${PANEL_BIND:-127.0.0.1}:${PANEL_PORT:-8787}:8787"
+    volumes:
+      - "${CODEX_HOME_HOST:-./codex-data}:/codex"
+    environment:
+      CODEX_HOME: /codex
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
