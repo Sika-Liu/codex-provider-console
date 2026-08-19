@@ -6,6 +6,24 @@ each server keeps its own providers, credentials, backups, and audit log.
 
 ## Quick start
 
+## Install Docker (Ubuntu/Debian)
+
+```bash
+sudo apt update
+sudo apt install -y docker.io docker-compose-plugin git
+sudo systemctl enable --now docker
+sudo docker version
+sudo docker compose version
+```
+
+Optional: allow the current user to run Docker without `sudo`:
+
+```bash
+sudo usermod -aG docker "$USER"
+```
+
+Log out of SSH and sign in again after changing the group.
+
 ```bash
 git clone <your-repository-url> codex-provider-console
 cd codex-provider-console

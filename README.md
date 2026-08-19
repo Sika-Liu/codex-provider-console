@@ -2,6 +2,24 @@
 
 通用的 Codex 供应商控制台，可部署到任意安装了 Docker 的 Linux 云服务器。
 
+## 安装 Docker（Ubuntu/Debian）
+
+```bash
+sudo apt update
+sudo apt install -y docker.io docker-compose-plugin git
+sudo systemctl enable --now docker
+sudo docker version
+sudo docker compose version
+```
+
+如果希望当前用户直接运行 Docker：
+
+```bash
+sudo usermod -aG docker "$USER"
+```
+
+执行后退出 SSH 并重新登录一次。
+
 ## 快速部署
 
 ```bash
