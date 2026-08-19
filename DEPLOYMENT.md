@@ -35,9 +35,10 @@ the current user's `~/.codex`, and starts the service. It does not overwrite
 an existing Codex directory value unless `--force` is provided. The port and
 bind address selected interactively are always applied.
 
-In an interactive SSH session, the installer asks for the panel port and whether
-to expose the service publicly. It then prints the external address, internal
-address, SSH tunnel command, configuration path, and cloud firewall reminder.
+In an interactive SSH session, the installer asks for the panel port and keeps
+the service bound to localhost. It prints the internal address, SSH tunnel
+command, configuration path, and a reminder to configure the reverse proxy in
+the panel itself.
 It also generates a panel administrator password and session secret. The
 credentials are stored in `.env`, which the installer restricts to mode `600`.
 
@@ -51,8 +52,7 @@ Useful installer options:
 
 ```bash
 bash install.sh --codex-home /home/alice/.codex --port 8787
-bash install.sh --bind 127.0.0.1 --force
-bash install.sh --public --port 8787
+bash install.sh --force
 ```
 
 The panel login is enabled by default. When using HTTPS through a reverse proxy,
@@ -69,9 +69,10 @@ an SSH tunnel:
 ssh -L 8787:127.0.0.1:8787 <user>@<server>
 ```
 
-Then open `http://127.0.0.1:8787` in a browser. For public access, put it
-behind an authenticated HTTPS reverse proxy and change `PANEL_BIND` only when
-you understand the exposure: this panel can read and replace Codex credentials.
+Then open `http://127.0.0.1:8787` in a browser. Configure public access from
+the panel's 反向代理 page; keep the upstream pointed at `127.0.0.1:8787` and
+put it behind authenticated HTTPS because this panel can read and replace Codex
+credentials.
 
 ## Data and portability
 

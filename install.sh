@@ -8,7 +8,6 @@ CODEX_HOME_HOST="${HOME}/.codex"
 PANEL_BIND="127.0.0.1"
 PANEL_PORT="8787"
 PORT_SET=false
-BIND_SET=false
 INSTALL_DOCKER=false
 FORCE=false
 PANEL_USERNAME="admin"
@@ -21,9 +20,7 @@ Usage: bash install.sh [options]
 
 Options:
   --codex-home <path>   Host directory mounted as /codex (default: ~/.codex)
-  --bind <address>      Bind address (default: 127.0.0.1)
   --port <port>         Host port (default: 8787)
-  --public              Bind to 0.0.0.0 so the panel is reachable by IP
   --install-docker      Install Docker on Ubuntu/Debian when it is missing
   --force               Replace matching settings in an existing .env file
   -h, --help            Show this help
@@ -40,9 +37,7 @@ require_value() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --codex-home) require_value "$1" "${2:-}"; CODEX_HOME_HOST="$2"; shift ;;
-    --bind) require_value "$1" "${2:-}"; PANEL_BIND="$2"; BIND_SET=true; shift ;;
     --port) require_value "$1" "${2:-}"; PANEL_PORT="$2"; PORT_SET=true; shift ;;
-    --public) PANEL_BIND="0.0.0.0"; BIND_SET=true ;;
     --install-docker) INSTALL_DOCKER=true ;;
     --force) FORCE=true ;;
     -h|--help) usage; exit 0 ;;
@@ -54,9 +49,7 @@ done
 [[ "$(uname -s)" == "Linux" ]] || { echo "This installer supports Linux servers only." >&2; exit 1; }
 if [[ -f "$ENV_FILE" ]]; then
   existing_port=$(sed -n 's/^PANEL_PORT=//p' "$ENV_FILE" | tail -n 1)
-  existing_bind=$(sed -n 's/^PANEL_BIND=//p' "$ENV_FILE" | tail -n 1)
   [[ "$PORT_SET" == true || -z "$existing_port" ]] || PANEL_PORT="$existing_port"
-  [[ "$BIND_SET" == true || -z "$existing_bind" ]] || PANEL_BIND="$existing_bind"
 fi
 
 if [[ -t 0 && "$PORT_SET" == false ]]; then
@@ -65,17 +58,8 @@ if [[ -t 0 && "$PORT_SET" == false ]]; then
   PORT_SET=true
 fi
 
-if [[ -t 0 && "$BIND_SET" == false ]]; then
-  read -r -p "Expose the panel to the public network? [y/N]: " expose_public
-  case "${expose_public:-n}" in
-    y|Y|yes|YES) PANEL_BIND="0.0.0.0" ;;
-    *) PANEL_BIND="127.0.0.1" ;;
-  esac
-  BIND_SET=true
-fi
-
 [[ "$PANEL_PORT" =~ ^[1-9][0-9]{0,4}$ && "$PANEL_PORT" -le 65535 ]] || { echo "Invalid port: $PANEL_PORT" >&2; exit 1; }
-[[ "$PANEL_BIND" == "127.0.0.1" || "$PANEL_BIND" == "0.0.0.0" || "$PANEL_BIND" == "::1" || "$PANEL_BIND" == "::" ]] || { echo "Unsupported bind address: $PANEL_BIND" >&2; exit 1; }
+PANEL_BIND="127.0.0.1"
 
 port_in_use() {
   if command -v ss >/dev/null 2>&1; then
@@ -161,7 +145,7 @@ set_env() {
 }
 
 set_env CODEX_HOME_HOST "$CODEX_HOME_HOST"
-set_env PANEL_BIND "$PANEL_BIND" "$BIND_SET"
+set_env PANEL_BIND "$PANEL_BIND" true
 set_env PANEL_PORT "$PANEL_PORT" "$PORT_SET"
 set_env PUID "$(id -u)"
 set_env PGID "$(id -g)"
@@ -181,20 +165,9 @@ chmod 600 "$ENV_FILE"
 
 docker compose -f "$PROJECT_DIR/compose.yml" up -d --build
 
-local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-local_ip=${local_ip:-127.0.0.1}
-public_ip=$(curl -4fsS --connect-timeout 3 --max-time 5 https://api.ipify.org 2>/dev/null || true)
-public_ip=${public_ip:-N/A}
-
-if [[ "$PANEL_BIND" == "0.0.0.0" || "$PANEL_BIND" == "::" ]]; then
-  external_address="http://${public_ip}:${PANEL_PORT}"
-  internal_address="http://${local_ip}:${PANEL_PORT}"
-  exposure_note="Open TCP port ${PANEL_PORT} in the cloud security group and host firewall before accessing it externally."
-else
-  external_address="Disabled (localhost-only binding)"
-  internal_address="http://127.0.0.1:${PANEL_PORT}"
-  exposure_note="Use the SSH tunnel below, or rerun with --public only behind HTTPS and authentication."
-fi
+external_address="Configure in panel > 反向代理"
+internal_address="http://127.0.0.1:${PANEL_PORT}"
+exposure_note="The service stays localhost-only. Configure domain, HTTPS, and upstream settings in the panel's 反向代理 page."
 
 cat <<EOF
 
