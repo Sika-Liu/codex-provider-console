@@ -7,6 +7,8 @@ CREATED_ENV=false
 CODEX_HOME_HOST="${HOME}/.codex"
 PANEL_BIND="127.0.0.1"
 PANEL_PORT="8787"
+PORT_SET=false
+BIND_SET=false
 INSTALL_DOCKER=false
 FORCE=false
 
@@ -18,6 +20,7 @@ Options:
   --codex-home <path>   Host directory mounted as /codex (default: ~/.codex)
   --bind <address>      Bind address (default: 127.0.0.1)
   --port <port>         Host port (default: 8787)
+  --public              Bind to 0.0.0.0 so the panel is reachable by IP
   --install-docker      Install Docker on Ubuntu/Debian when it is missing
   --force               Replace matching settings in an existing .env file
   -h, --help            Show this help
@@ -34,8 +37,9 @@ require_value() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --codex-home) require_value "$1" "${2:-}"; CODEX_HOME_HOST="$2"; shift ;;
-    --bind) require_value "$1" "${2:-}"; PANEL_BIND="$2"; shift ;;
-    --port) require_value "$1" "${2:-}"; PANEL_PORT="$2"; shift ;;
+    --bind) require_value "$1" "${2:-}"; PANEL_BIND="$2"; BIND_SET=true; shift ;;
+    --port) require_value "$1" "${2:-}"; PANEL_PORT="$2"; PORT_SET=true; shift ;;
+    --public) PANEL_BIND="0.0.0.0"; BIND_SET=true ;;
     --install-docker) INSTALL_DOCKER=true ;;
     --force) FORCE=true ;;
     -h|--help) usage; exit 0 ;;
@@ -45,7 +49,45 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$(uname -s)" == "Linux" ]] || { echo "This installer supports Linux servers only." >&2; exit 1; }
+if [[ -f "$ENV_FILE" ]]; then
+  existing_port=$(sed -n 's/^PANEL_PORT=//p' "$ENV_FILE" | tail -n 1)
+  existing_bind=$(sed -n 's/^PANEL_BIND=//p' "$ENV_FILE" | tail -n 1)
+  [[ "$PORT_SET" == true || -z "$existing_port" ]] || PANEL_PORT="$existing_port"
+  [[ "$BIND_SET" == true || -z "$existing_bind" ]] || PANEL_BIND="$existing_bind"
+fi
+
+if [[ -t 0 && "$PORT_SET" == false ]]; then
+  read -r -p "Panel port [${PANEL_PORT}]: " requested_port
+  PANEL_PORT="${requested_port:-$PANEL_PORT}"
+  PORT_SET=true
+fi
+
+if [[ -t 0 && "$BIND_SET" == false ]]; then
+  read -r -p "Expose the panel to the public network? [y/N]: " expose_public
+  case "${expose_public:-n}" in
+    y|Y|yes|YES) PANEL_BIND="0.0.0.0" ;;
+    *) PANEL_BIND="127.0.0.1" ;;
+  esac
+  BIND_SET=true
+fi
+
 [[ "$PANEL_PORT" =~ ^[1-9][0-9]{0,4}$ && "$PANEL_PORT" -le 65535 ]] || { echo "Invalid port: $PANEL_PORT" >&2; exit 1; }
+[[ "$PANEL_BIND" == "127.0.0.1" || "$PANEL_BIND" == "0.0.0.0" || "$PANEL_BIND" == "::1" || "$PANEL_BIND" == "::" ]] || { echo "Unsupported bind address: $PANEL_BIND" >&2; exit 1; }
+
+port_in_use() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn | awk '{print $4}' | grep -Eq "[:.]${PANEL_PORT}$"
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltn | awk '{print $4}' | grep -Eq "[:.]${PANEL_PORT}$"
+  else
+    return 1
+  fi
+}
+
+if port_in_use; then
+  echo "Port ${PANEL_PORT} is already in use. Choose another port with --port." >&2
+  exit 1
+fi
 
 install_docker() {
   [[ -r /etc/os-release ]] && . /etc/os-release || true
@@ -101,8 +143,9 @@ fi
 set_env() {
   local key="$1"
   local value="$2"
+  local replace="${3:-false}"
   if grep -q "^${key}=" "$ENV_FILE"; then
-    if [[ "$FORCE" == true || "$CREATED_ENV" == true ]]; then
+    if [[ "$FORCE" == true || "$CREATED_ENV" == true || "$replace" == true ]]; then
       sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
     fi
   else
@@ -111,23 +154,46 @@ set_env() {
 }
 
 set_env CODEX_HOME_HOST "$CODEX_HOME_HOST"
-set_env PANEL_BIND "$PANEL_BIND"
-set_env PANEL_PORT "$PANEL_PORT"
+set_env PANEL_BIND "$PANEL_BIND" "$BIND_SET"
+set_env PANEL_PORT "$PANEL_PORT" "$PORT_SET"
 set_env PUID "$(id -u)"
 set_env PGID "$(id -g)"
 
 docker compose -f "$PROJECT_DIR/compose.yml" up -d --build
 
+local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+local_ip=${local_ip:-127.0.0.1}
+public_ip=$(curl -4fsS --connect-timeout 3 --max-time 5 https://api.ipify.org 2>/dev/null || true)
+public_ip=${public_ip:-N/A}
+
+if [[ "$PANEL_BIND" == "0.0.0.0" || "$PANEL_BIND" == "::" ]]; then
+  external_address="http://${public_ip}:${PANEL_PORT}"
+  internal_address="http://${local_ip}:${PANEL_PORT}"
+  exposure_note="Open TCP port ${PANEL_PORT} in the cloud security group and host firewall before accessing it externally."
+else
+  external_address="Disabled (localhost-only binding)"
+  internal_address="http://127.0.0.1:${PANEL_PORT}"
+  exposure_note="Use the SSH tunnel below, or rerun with --public only behind HTTPS and authentication."
+fi
+
 cat <<EOF
 
-Codex Provider Console is running.
+===============================================================
+Codex Provider Console installed successfully
+===============================================================
+External address: ${external_address}
+Internal address: ${internal_address}
+Listening address: ${PANEL_BIND}:${PANEL_PORT}
+SSH tunnel: ssh -N -L ${PANEL_PORT}:127.0.0.1:${PANEL_PORT} $(whoami)@<server-ip>
+Config file: ${ENV_FILE}
+Codex data: ${CODEX_HOME_HOST}
 
-Server access:  http://${PANEL_BIND}:${PANEL_PORT}
-SSH tunnel:     ssh -N -L ${PANEL_PORT}:127.0.0.1:${PANEL_PORT} $(whoami)@<server-ip>
-Local browser:  http://127.0.0.1:${PANEL_PORT}
+${exposure_note}
 
-Management commands:
+Management:
   bash codex-panel status
   bash codex-panel logs
+  bash codex-panel restart
   bash codex-panel update
+===============================================================
 EOF

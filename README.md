@@ -12,6 +12,13 @@ bash install.sh
 
 安装脚本会检查 Docker、创建 `.env`、使用当前用户的 `~/.codex` 目录，并启动服务。默认只监听 `127.0.0.1:8787`，不会直接开放公网端口。
 
+安装时会交互式询问：
+
+- 控制台端口；
+- 是否公开监听到公网。
+
+完成后会输出公网地址、内网地址、SSH 隧道命令、配置文件路径和安全组提示。
+
 缺少 Docker 时，先安装 Docker，或明确允许脚本在 Ubuntu/Debian 上安装：
 
 ```bash
@@ -22,6 +29,12 @@ bash install.sh --install-docker
 
 ```bash
 bash install.sh --codex-home /home/ubuntu/.codex --port 8787
+```
+
+若已配置 HTTPS、认证和云防火墙，才允许公网监听：
+
+```bash
+bash install.sh --public --port 8787
 ```
 
 通过 SSH 隧道访问：

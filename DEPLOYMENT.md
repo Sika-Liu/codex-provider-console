@@ -32,7 +32,12 @@ bash install.sh
 
 The installer creates `.env` from `.env.example`, defaults `CODEX_HOME_HOST` to
 the current user's `~/.codex`, and starts the service. It does not overwrite
-existing `.env` values unless `--force` is provided.
+an existing Codex directory value unless `--force` is provided. The port and
+bind address selected interactively are always applied.
+
+In an interactive SSH session, the installer asks for the panel port and whether
+to expose the service publicly. It then prints the external address, internal
+address, SSH tunnel command, configuration path, and cloud firewall reminder.
 
 To allow Docker installation through the installer on Ubuntu/Debian:
 
@@ -45,6 +50,7 @@ Useful installer options:
 ```bash
 bash install.sh --codex-home /home/alice/.codex --port 8787
 bash install.sh --bind 127.0.0.1 --force
+bash install.sh --public --port 8787
 ```
 
 By default the service listens only on `127.0.0.1:8787`. Access it locally with
