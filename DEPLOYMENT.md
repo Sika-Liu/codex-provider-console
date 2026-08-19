@@ -76,6 +76,11 @@ shown by the installer. Configure a domain and HTTPS from the panel's 反向代�
 page only when needed; the panel can read and replace Codex credentials, so
 public deployments must retain login authentication.
 
+After signing in, use the left-side **健康检查** page before running Codex. It
+checks the mounted Codex directory, write permissions, configuration and auth
+files, panel authentication, the active provider, a real upstream request, and
+available disk space.
+
 ## Data and portability
 
 All state is stored under `CODEX_HOME_HOST`, including provider profiles,
@@ -93,4 +98,8 @@ bash codex-panel status
 bash codex-panel logs
 bash codex-panel restart
 bash codex-panel update
+bash codex-panel help
+bash codex-panel uninstall
 ```
+
+`uninstall` 会要求确认，然后停止并移除 Docker 容器，并删除项目目录、`.env` 以及 `CODEX_HOME_HOST` 指向的 Codex 数据目录。该操作不可恢复，请先备份需要保留的内容。

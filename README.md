@@ -15,6 +15,8 @@ bash install.sh
 安装时会交互式询问控制台端口。服务默认监听 `0.0.0.0`，完成后会输出公网地址、内网地址、SSH 隧道命令、配置文件路径和安全组提示，行为与 1Panel 类似。
 首次安装还会生成管理员用户名、随机密码和会话密钥，并在结果中显示一次。登录后可从左侧菜单退出登录。
 
+登录控制台后打开左侧“健康检查”，可检查 Codex 数据目录、写入权限、`config.toml`、`auth.json`、控制台认证、当前供应商、供应商真实请求和磁盘空间。
+
 缺少 Docker 时，先安装 Docker，或明确允许脚本在 Ubuntu/Debian 上安装：
 
 ```bash
@@ -48,6 +50,10 @@ bash codex-panel status
 bash codex-panel logs
 bash codex-panel restart
 bash codex-panel update
+bash codex-panel help
+bash codex-panel uninstall
 ```
+
+`uninstall` 会要求确认，然后停止并移除 Docker 容器，删除项目目录、`.env` 和 `CODEX_HOME_HOST` 指向的 Codex 数据。该操作不可恢复，请先备份需要保留的内容。
 
 完整说明请查看 [`DEPLOYMENT.md`](DEPLOYMENT.md)。公网访问时，请放在带 HTTPS 和登录认证的 Nginx/Caddy 反向代理后面。

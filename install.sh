@@ -206,5 +206,7 @@ Management:
   bash codex-panel logs
   bash codex-panel restart
   bash codex-panel update
+  bash codex-panel help
+  bash codex-panel uninstall
 ===============================================================
 EOF

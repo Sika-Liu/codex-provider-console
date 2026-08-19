@@ -468,6 +468,67 @@ def preflight() -> dict:
     }
 
 
+def health_check() -> dict:
+    checks: list[dict[str, str]] = []
+
+    def add(name: str, status: str, detail: str) -> None:
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    add("Codex 数据目录", "pass" if CODEX_HOME.exists() else "fail", str(CODEX_HOME) if CODEX_HOME.exists() else f"目录不存在：{CODEX_HOME}")
+    add("目录写入权限", "pass" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "fail", "可写" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "控制台无法写入 Codex 数据目录")
+
+    config = config_text()
+    if CONFIG_PATH.exists():
+        add("config.toml", "pass" if config.strip() else "warning", "已找到配置文件" if config.strip() else "配置文件为空")
+        provider_match = re.search(r"^\s*model_provider\s*=\s*['\"]([^'\"]+)['\"]", config, re.M)
+        model_match = re.search(r"^\s*model\s*=\s*['\"]([^'\"]+)['\"]", config, re.M)
+        add("Codex 关键配置", "pass" if provider_match and model_match else "warning", f"供应商：{provider_match.group(1)}，模型：{model_match.group(1)}" if provider_match and model_match else "缺少 model_provider 或 model；激活供应商后会自动补齐")
+    else:
+        add("config.toml", "warning", "尚未生成；保存并激活供应商后会创建")
+
+    if AUTH_PATH.exists():
+        try:
+            parsed_auth = json.loads(AUTH_PATH.read_text(encoding="utf-8"))
+            add("auth.json", "pass" if isinstance(parsed_auth, dict) else "fail", "JSON 格式有效" if isinstance(parsed_auth, dict) else "必须是 JSON 对象")
+        except (OSError, json.JSONDecodeError):
+            add("auth.json", "fail", "文件不可读或不是有效 JSON")
+    else:
+        add("auth.json", "warning", "未找到；纯 API 供应商不一定需要该文件")
+
+    if not auth_configured() and AUTH_ENABLED:
+        add("控制台认证", "fail", "认证已启用但管理员账号、密码或会话密钥未配置")
+    else:
+        add("控制台认证", "pass", "认证配置完整" if AUTH_ENABLED else "认证已关闭")
+
+    profiles = read_profiles()
+    active_id = active_provider()
+    active = profiles.get(active_id) if active_id else None
+    if not active:
+        add("当前供应商", "warning", "尚未激活供应商；请先保存并激活一个供应商")
+    else:
+        add("当前供应商", "pass", f"{active.get('name', active_id)} ({active_id})")
+        diagnostic = diagnose_profile(active)
+        for item in diagnostic.get("checks", []):
+            add(f"供应商 · {item['name']}", item["status"], item["detail"])
+
+    try:
+        usage = shutil.disk_usage(CODEX_HOME)
+        free_gb = usage.free / (1024 ** 3)
+        add("磁盘空间", "pass" if free_gb >= 1 else "warning", f"剩余 {free_gb:.1f} GB")
+    except OSError as exc:
+        add("磁盘空间", "warning", f"无法读取磁盘空间：{exc}")
+
+    failed = sum(item["status"] == "fail" for item in checks)
+    warnings = sum(item["status"] == "warning" for item in checks)
+    audit("health_checked", failed=failed, warnings=warnings)
+    return {
+        "ok": failed == 0,
+        "passed": failed == 0 and warnings == 0,
+        "checks": checks,
+        "summary": "环境满足使用条件。" if failed == 0 and warnings == 0 else f"发现 {failed} 项失败、{warnings} 项提醒。",
+    }
+
+
 def switch_provider(provider_id: str, verify: bool = True, model_override: str | None = None) -> dict:
     if not panel_settings()["provider_switching_enabled"]:
         raise HTTPException(409, "Provider switching is disabled in the control panel")
@@ -617,6 +678,11 @@ def get_preflight() -> dict:
     return preflight()
 
 
+@app.get("/api/health")
+def get_health() -> dict:
+    return health_check()
+
+
 @app.post("/api/providers/{provider_id}/capture-auth")
 def capture_chatgpt_auth(provider_id: str) -> dict:
     profiles = read_profiles()
@@ -701,14 +767,15 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
  </script>'''
     navigation_script = r'''<script>
  document.head.insertAdjacentHTML('beforeend', `<style>
- .console-sidebar{position:fixed;inset:0 auto 0 0;width:228px;background:#202124;color:#f7f8fa;padding:22px 14px;z-index:20;display:flex;flex-direction:column;gap:22px}.console-brand{font-size:17px;font-weight:750;padding:0 12px}.console-brand small{display:block;color:#aeb4bb;font-size:11px;font-weight:400;margin-top:5px}.console-nav{display:grid;gap:5px}.console-nav button{border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-nav button:hover,.console-nav button.active{background:#34373b;color:#fff}.console-logout{margin-top:auto;border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-logout:hover{background:#34373b;color:#fff}.console-content{margin-left:228px}.console-panel{max-width:1320px;margin:22px auto;padding:0 26px}.console-panel .list-shell{background:#fff;border:1px solid #dde1e6;border-radius:11px;padding:18px}.console-panel h2{margin:0 0 7px;font-size:18px}.console-panel .panel-note{color:#686e76;font-size:13px;margin:0 0 18px}.console-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.console-form label{display:block;color:#555c64;font-size:12px;margin-bottom:5px}.console-form input,.console-form select,.console-form textarea{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d2d6da;border-radius:7px;font:inherit;background:#fff}.console-form textarea{min-height:104px;resize:vertical}.console-form .wide{grid-column:1/-1}.console-form-actions{display:flex;gap:8px;margin-top:17px}.console-code{font:12px Consolas,monospace;background:#f4f5f6;color:#30343a;padding:12px;border-radius:7px;white-space:pre-wrap;overflow:auto}.console-muted{color:#727982;font-size:12px}
+ .console-sidebar{position:fixed;inset:0 auto 0 0;width:228px;background:#202124;color:#f7f8fa;padding:22px 14px;z-index:20;display:flex;flex-direction:column;gap:22px}.console-brand{font-size:17px;font-weight:750;padding:0 12px}.console-brand small{display:block;color:#aeb4bb;font-size:11px;font-weight:400;margin-top:5px}.console-nav{display:grid;gap:5px}.console-nav button{border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-nav button:hover,.console-nav button.active{background:#34373b;color:#fff}.console-logout{margin-top:auto;border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-logout:hover{background:#34373b;color:#fff}.console-content{margin-left:228px}.console-panel{max-width:1320px;margin:22px auto;padding:0 26px}.console-panel .list-shell{background:#fff;border:1px solid #dde1e6;border-radius:11px;padding:18px}.console-panel h2{margin:0 0 7px;font-size:18px}.console-panel .panel-note{color:#686e76;font-size:13px;margin:0 0 18px}.console-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.console-form label{display:block;color:#555c64;font-size:12px;margin-bottom:5px}.console-form input,.console-form select,.console-form textarea{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d2d6da;border-radius:7px;font:inherit;background:#fff}.console-form textarea{min-height:104px;resize:vertical}.console-form .wide{grid-column:1/-1}.console-form-actions{display:flex;gap:8px;margin-top:17px}.console-code{font:12px Consolas,monospace;background:#f4f5f6;color:#30343a;padding:12px;border-radius:7px;white-space:pre-wrap;overflow:auto}.console-muted{color:#727982;font-size:12px}.console-health-summary{margin:8px 0 14px;padding:11px 13px;background:#f4f5f6;border-radius:7px;color:#4b525a}.health-check{border:1px solid #dfe3e7;border-left:4px solid #2f9e63;border-radius:7px;padding:10px 12px;margin-top:8px}.health-check.warning{border-left-color:#d18b16;background:#fffaf0}.health-check.fail{border-left-color:#d64545;background:#fff5f5}.health-check b,.health-check small{display:block}.health-check small{margin-top:4px;color:#686e76;line-height:1.45}
  @media(max-width:800px){.console-sidebar{width:190px}.console-content{margin-left:190px}.console-form{grid-template-columns:1fr}}
  </style>`);
- document.body.insertAdjacentHTML('afterbegin', `<aside class="console-sidebar"><div class="console-brand">Codex 控制台<small>通用服务器管理</small></div><nav class="console-nav"><button data-section="providers" onclick="openConsoleSection('providers')">供应商配置</button><button data-section="ssh" onclick="openConsoleSection('ssh')">SSH 连接</button><button data-section="proxy" onclick="openConsoleSection('proxy')">反向代理</button></nav><button class="console-logout" onclick="logoutConsole()">退出登录</button></aside>`);
+ document.body.insertAdjacentHTML('afterbegin', `<aside class="console-sidebar"><div class="console-brand">Codex 控制台<small>通用服务器管理</small></div><nav class="console-nav"><button data-section="providers" onclick="openConsoleSection('providers')">供应商配置</button><button data-section="health" onclick="openConsoleSection('health')">健康检查</button><button data-section="ssh" onclick="openConsoleSection('ssh')">SSH 连接</button><button data-section="proxy" onclick="openConsoleSection('proxy')">反向代理</button></nav><button class="console-logout" onclick="logoutConsole()">退出登录</button></aside>`);
  document.querySelector('.top')?.classList.add('console-content');document.querySelectorAll('.page').forEach(e=>e.classList.add('console-content'));
- document.body.insertAdjacentHTML('beforeend', `<section id="console-ssh" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><h2>SSH 连接</h2><p class="panel-note">保存连接参数并生成 SSH 隧道命令。私钥内容不会上传或保存。</p><div class="console-form"><div><label>服务器地址</label><input id="ssh-host" placeholder="例如 203.0.113.10"></div><div><label>SSH 端口</label><input id="ssh-port" type="number" value="22"></div><div><label>用户名</label><input id="ssh-user" placeholder="例如 ubuntu"></div><div><label>本地访问端口</label><input id="ssh-local-port" type="number" value="8787"></div><div class="wide"><label>隧道命令</label><div id="ssh-command" class="console-code">填写服务器地址和用户名后生成</div><div class="console-muted">执行后，在本机打开 http://127.0.0.1:8787</div></div></div><div class="console-form-actions"><button class="btn" onclick="saveConsoleSettings()">保存 SSH 配置</button></div><div id="ssh-notice" class="notice"></div></div></section><section id="console-proxy" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><h2>反向代理</h2><p class="panel-note">为域名访问生成 Nginx 配置片段。建议启用 HTTPS 和访问认证后再公开服务。</p><div class="console-form"><div><label>域名</label><input id="proxy-domain" placeholder="console.example.com"></div><div><label>上游地址</label><input id="proxy-upstream" value="127.0.0.1:8787"></div><div><label>TLS 证书路径</label><input id="proxy-cert" placeholder="/etc/letsencrypt/live/example/fullchain.pem"></div><div><label>TLS 私钥路径</label><input id="proxy-key" placeholder="/etc/letsencrypt/live/example/privkey.pem"></div><div class="wide"><label>Nginx 配置预览</label><pre id="proxy-config" class="console-code">填写域名后生成</pre></div></div><div class="console-form-actions"><button class="btn" onclick="saveConsoleSettings()">保存反向代理配置</button></div><div id="proxy-notice" class="notice"></div></div></section>`);
+ document.body.insertAdjacentHTML('beforeend', `<section id="console-health" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>健康检查</h2><p class="panel-note">检查 Codex 数据目录、配置文件、认证、当前供应商和磁盘空间，确认服务器是否满足使用条件。</p></div><button class="btn" onclick="runHealth()">立即检查</button></div><div id="health-summary" class="console-health-summary">尚未执行检查。</div><div id="health-checks"></div></div></section><section id="console-ssh" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><h2>SSH 连接</h2><p class="panel-note">保存连接参数并生成 SSH 隧道命令。私钥内容不会上传或保存。</p><div class="console-form"><div><label>服务器地址</label><input id="ssh-host" placeholder="例如 203.0.113.10"></div><div><label>SSH 端口</label><input id="ssh-port" type="number" value="22"></div><div><label>用户名</label><input id="ssh-user" placeholder="例如 ubuntu"></div><div><label>本地访问端口</label><input id="ssh-local-port" type="number" value="8787"></div><div class="wide"><label>隧道命令</label><div id="ssh-command" class="console-code">填写服务器地址和用户名后生成</div><div class="console-muted">执行后，在本机打开 http://127.0.0.1:8787</div></div></div><div class="console-form-actions"><button class="btn" onclick="saveConsoleSettings()">保存 SSH 配置</button></div><div id="ssh-notice" class="notice"></div></div></section><section id="console-proxy" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><h2>反向代理</h2><p class="panel-note">为域名访问生成 Nginx 配置片段。建议启用 HTTPS 和访问认证后再公开服务。</p><div class="console-form"><div><label>域名</label><input id="proxy-domain" placeholder="console.example.com"></div><div><label>上游地址</label><input id="proxy-upstream" value="127.0.0.1:8787"></div><div><label>TLS 证书路径</label><input id="proxy-cert" placeholder="/etc/letsencrypt/live/example/fullchain.pem"></div><div><label>TLS 私钥路径</label><input id="proxy-key" placeholder="/etc/letsencrypt/live/example/privkey.pem"></div><div class="wide"><label>Nginx 配置预览</label><pre id="proxy-config" class="console-code">填写域名后生成</pre></div></div><div class="console-form-actions"><button class="btn" onclick="saveConsoleSettings()">保存反向代理配置</button></div><div id="proxy-notice" class="notice"></div></div></section>`);
  async function logoutConsole(){await fetch('/logout',{method:'POST'});location.href='/login'}
- function openConsoleSection(section){document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';document.querySelector('#console-'+(section==='ssh'?'ssh':'proxy')).style.display='block'}localStorage.setItem('console-section',section)}
+ function openConsoleSection(section){document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';document.querySelector('#console-'+section).style.display='block';if(section==='health')runHealth()}localStorage.setItem('console-section',section)}
+ async function runHealth(){const summary=$('#health-summary'),list=$('#health-checks');summary.textContent='正在检查服务器环境和供应商连通性…';list.innerHTML='';try{const d=await api('/api/health');summary.textContent=d.summary;list.innerHTML=(d.checks||[]).map(item=>`<div class="health-check ${item.status}"><b>${item.status==='pass'?'通过':item.status==='warning'?'提醒':'失败'} · ${esc(item.name)}</b><small>${esc(item.detail)}</small></div>`).join('')}catch(e){summary.textContent='健康检查失败：'+e.message}}
  function updateSshCommand(){const host=$('#ssh-host')?.value.trim(),user=$('#ssh-user')?.value.trim(),port=$('#ssh-port')?.value||22,local=$('#ssh-local-port')?.value||8787;$('#ssh-command').textContent=host&&user?`ssh -N -L ${local}:127.0.0.1:8787 -p ${port} ${user}@${host}`:'填写服务器地址和用户名后生成'}
  function updateProxyConfig(){const domain=$('#proxy-domain')?.value.trim(),upstream=$('#proxy-upstream')?.value.trim()||'127.0.0.1:8787',cert=$('#proxy-cert')?.value.trim(),key=$('#proxy-key')?.value.trim();$('#proxy-config').textContent=domain?`server {\n    listen 443 ssl;\n    server_name ${domain};\n    ssl_certificate ${cert||'/path/to/fullchain.pem'};\n    ssl_certificate_key ${key||'/path/to/privkey.pem'};\n    location / {\n        proxy_pass http://${upstream};\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    }\n}`:'填写域名后生成'}
  ['ssh-host','ssh-port','ssh-user','ssh-local-port'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateSshCommand));['proxy-domain','proxy-upstream','proxy-cert','proxy-key'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateProxyConfig));

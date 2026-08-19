@@ -16,6 +16,8 @@ Commands:
   logs      Follow console logs
   update    Pull the latest Git revision and rebuild the console
   config    Print the active .env file path
+  uninstall Stop and remove the console, source, config, and Codex data
+  help      Show this command reference
 EOF
 }
 
@@ -30,6 +32,25 @@ case "${1:-}" in
     docker compose up -d --build
     ;;
   config) printf '%s\n' "$PROJECT_DIR/.env" ;;
+  uninstall)
+    if [[ -z "${CODEX_HOME_HOST:-}" && -f "$PROJECT_DIR/.env" ]]; then
+      CODEX_HOME_HOST=$(sed -n 's/^CODEX_HOME_HOST=//p' "$PROJECT_DIR/.env" | tail -n 1)
+      CODEX_HOME_HOST=${CODEX_HOME_HOST#\"}
+      CODEX_HOME_HOST=${CODEX_HOME_HOST%\"}
+      CODEX_HOME_HOST=${CODEX_HOME_HOST#\'}
+      CODEX_HOME_HOST=${CODEX_HOME_HOST%\'}
+    fi
+    CODEX_HOME_HOST="${CODEX_HOME_HOST:-$PROJECT_DIR/codex-data}"
+    read -r -p "This permanently deletes the console, .env, and Codex data. Continue? [y/N]: " confirm
+    case "${confirm:-n}" in
+      y|Y|yes|YES)
+        docker compose down --remove-orphans
+        rm -rf -- "$CODEX_HOME_HOST" "$PROJECT_DIR"
+        echo "Codex Provider Console and all associated data were removed."
+        ;;
+      *) echo "Uninstall cancelled." ;;
+    esac
+    ;;
   -h|--help|help|'') usage ;;
   *) echo "Unknown command: $1" >&2; usage; exit 1 ;;
 esac
