@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
+CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
 CONFIG_PATH = CODEX_HOME / "config.toml"
 PROFILE_PATH = CODEX_HOME / "control-panel-profiles.json"
 SETTINGS_PATH = CODEX_HOME / "control-panel-settings.json"
@@ -475,6 +476,8 @@ def health_check() -> dict:
         checks.append({"name": name, "status": status, "detail": detail})
 
     add("Codex 数据目录", "pass" if CODEX_HOME.exists() else "fail", str(CODEX_HOME) if CODEX_HOME.exists() else f"目录不存在：{CODEX_HOME}")
+    cli_installed = CODEX_CLI_VERSION not in {"", "not_installed", "unknown"}
+    add("Codex CLI", "pass" if cli_installed else "fail", CODEX_CLI_VERSION if cli_installed else "宿主机未检测到 Codex CLI；请先安装后重新运行 install.sh --force")
     add("目录写入权限", "pass" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "fail", "可写" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "控制台无法写入 Codex 数据目录")
 
     config = config_text()

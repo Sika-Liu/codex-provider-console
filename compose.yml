@@ -14,6 +14,7 @@ services:
       PANEL_PASSWORD: "${PANEL_PASSWORD:-}"
       PANEL_SESSION_SECRET: "${PANEL_SESSION_SECRET:-}"
       PANEL_COOKIE_SECURE: "${PANEL_COOKIE_SECURE:-false}"
+      CODEX_CLI_VERSION: "${CODEX_CLI_VERSION:-not_installed}"
     security_opt:
       - no-new-privileges:true
     cap_drop:

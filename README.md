@@ -23,6 +23,14 @@ bash install.sh
 bash install.sh --install-docker
 ```
 
+缺少 Codex CLI 时，安装脚本会询问是否使用官方安装脚本安装；也可以直接执行：
+
+```bash
+bash install.sh --install-codex
+```
+
+该选项要求服务器已安装 `curl`。官方安装脚本会将 Codex CLI 安装到服务器。
+
 自定义 Codex 目录或端口：
 
 ```bash

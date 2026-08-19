@@ -48,6 +48,16 @@ To allow Docker installation through the installer on Ubuntu/Debian:
 bash install.sh --install-docker
 ```
 
+If Codex CLI is missing, the installer asks whether to install it with the
+official standalone installer. For
+non-interactive setup, use:
+
+```bash
+bash install.sh --install-codex
+```
+
+`curl` must already be available on the server.
+
 Useful installer options:
 
 ```bash
