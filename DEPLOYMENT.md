@@ -24,6 +24,14 @@ Log out of SSH and sign in again after changing the group.
 
 ## Quick start
 
+Before deployment, update the server manually. If a new kernel is installed,
+reboot the server when prompted before continuing:
+
+```bash
+sudo apt update
+sudo apt upgrade -y
+```
+
 ```bash
 git clone https://github.com/Sika-Liu/codex-provider-console.git
 cd codex-provider-console
@@ -47,6 +55,11 @@ To allow Docker installation through the installer on Ubuntu/Debian:
 ```bash
 bash install.sh --install-docker
 ```
+
+When run interactively, `bash install.sh` asks whether to install Docker if it
+is missing. Answer `y` to install it and continue deployment. The installer runs
+`apt update` when needed, but does not run `apt upgrade` automatically because
+that can upgrade the kernel and require a reboot.
 
 If Codex CLI is missing, the installer asks whether to install it with the
 official standalone installer. For

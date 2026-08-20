@@ -89,10 +89,20 @@ install_docker() {
   [[ -r /etc/os-release ]] && . /etc/os-release || true
   case "${ID:-}" in
     ubuntu|debian)
+      if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        apt_cmd=(apt-get)
+        systemctl_cmd=(systemctl)
+      else
+        apt_cmd=(sudo apt-get)
+        systemctl_cmd=(sudo systemctl)
+      fi
       echo "Installing Docker packages with apt."
-      sudo apt update
-      sudo apt install -y docker.io docker-compose-plugin
-      sudo systemctl enable --now docker
+      "${apt_cmd[@]}" update
+      "${apt_cmd[@]}" install -y docker.io
+      if ! docker compose version >/dev/null 2>&1; then
+        "${apt_cmd[@]}" install -y docker-compose-v2 2>/dev/null || "${apt_cmd[@]}" install -y docker-compose-plugin
+      fi
+      "${systemctl_cmd[@]}" enable --now docker
       ;;
     *)
       echo "Automatic Docker installation is only supported on Ubuntu/Debian." >&2
@@ -107,14 +117,25 @@ random_hex() {
 }
 
 if ! command -v docker >/dev/null 2>&1; then
+  docker_choice="n"
   if [[ "$INSTALL_DOCKER" == true ]]; then
-    install_docker
-  else
-    cat >&2 <<'EOF'
+    docker_choice="y"
+  elif [[ -t 0 ]]; then
+    read -r -p "Docker is not installed. Install it now and continue deployment? [y/N]: " docker_choice
+  fi
+  case "${docker_choice:-n}" in
+    y|Y|yes|YES) install_docker ;;
+    *)
+      cat >&2 <<'EOF'
 Docker is required but was not found.
-Install Docker first, or explicitly allow this installer to install it:
+Run this installer again and confirm Docker installation, or use:
   bash install.sh --install-docker
 EOF
+      exit 1
+      ;;
+  esac
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker installation did not complete successfully." >&2
     exit 1
   fi
 fi
@@ -188,8 +209,16 @@ existing_username=$(sed -n 's/^PANEL_USERNAME=//p' "$ENV_FILE" | tail -n 1)
 existing_password=$(sed -n 's/^PANEL_PASSWORD=//p' "$ENV_FILE" | tail -n 1)
 existing_secret=$(sed -n 's/^PANEL_SESSION_SECRET=//p' "$ENV_FILE" | tail -n 1)
 PANEL_USERNAME="${existing_username:-$PANEL_USERNAME}"
-PANEL_PASSWORD="${existing_password:-$(random_hex 18)}"
-PANEL_SESSION_SECRET="${existing_secret:-$(random_hex 32)}"
+if [[ -z "$existing_password" || "$existing_password" == "change-this-password" ]]; then
+  PANEL_PASSWORD=$(random_hex 18)
+else
+  PANEL_PASSWORD="$existing_password"
+fi
+if [[ -z "$existing_secret" || "$existing_secret" == "change-this-session-secret" ]]; then
+  PANEL_SESSION_SECRET=$(random_hex 32)
+else
+  PANEL_SESSION_SECRET="$existing_secret"
+fi
 set_env PANEL_AUTH_ENABLED "true" true
 set_env PANEL_USERNAME "$PANEL_USERNAME"
 set_env PANEL_PASSWORD "$PANEL_PASSWORD"

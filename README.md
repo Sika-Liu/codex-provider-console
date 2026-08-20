@@ -4,6 +4,15 @@
 
 ## 快速部署
 
+### 部署前准备
+
+请先手动更新服务器系统。升级过程中可能安装新内核，完成后如系统提示请先重启服务器：
+
+```bash
+sudo apt update
+sudo apt upgrade -y
+```
+
 ```bash
 git clone https://github.com/Sika-Liu/codex-provider-console.git
 cd codex-provider-console
@@ -22,6 +31,8 @@ bash install.sh
 ```bash
 bash install.sh --install-docker
 ```
+
+交互式执行 `bash install.sh` 时，如果检测不到 Docker，脚本会询问是否安装；输入 `y` 后会继续完成部署。脚本会执行 `apt update`，不会自动执行可能触发系统重启的 `apt upgrade`。
 
 缺少 Codex CLI 时，安装脚本会询问是否使用官方安装脚本安装；也可以直接执行：
 
