@@ -25,7 +25,7 @@ Options:
   --codex-home <path>   Host directory mounted as /codex (default: ~/.codex)
   --bind <address>      Advanced override (default: 0.0.0.0)
   --port <port>         Host port (default: 8787)
-  --install-docker      Install Docker on Ubuntu/Debian when it is missing
+  --install-docker      Install Docker when it is missing (common Linux distros)
   --install-codex       Install Codex CLI with the official installer when missing
   --force               Replace matching settings in an existing .env file
   -h, --help            Show this help
@@ -87,8 +87,10 @@ fi
 
 install_docker() {
   [[ -r /etc/os-release ]] && . /etc/os-release || true
-  case "${ID:-}" in
-    ubuntu|debian)
+  local distro="${ID:-}"
+  local like="${ID_LIKE:-}"
+  case "$distro:$like" in
+    ubuntu:*|debian:*|*:debian)
       if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
         apt_cmd=(apt-get)
         systemctl_cmd=(systemctl)
@@ -104,9 +106,33 @@ install_docker() {
       fi
       "${systemctl_cmd[@]}" enable --now docker
       ;;
+    centos:*|rhel:*|rocky:*|almalinux:*|fedora:*|ol:*|*:rhel|*:fedora)
+      if ! command -v curl >/dev/null 2>&1; then
+        if command -v dnf >/dev/null 2>&1; then
+          dnf_cmd=(dnf)
+        elif command -v yum >/dev/null 2>&1; then
+          dnf_cmd=(yum)
+        else
+          echo "Neither dnf nor yum is available; install Docker manually." >&2
+          exit 1
+        fi
+        if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+          "${dnf_cmd[@]}" install -y curl
+        else
+          sudo "${dnf_cmd[@]}" install -y curl
+        fi
+      fi
+      echo "Installing Docker with the official Docker installer for ${distro:-RHEL-like}."
+      curl -fsSL https://get.docker.com | sh
+      if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        systemctl enable --now docker
+      else
+        sudo systemctl enable --now docker
+      fi
+      ;;
     *)
-      echo "Automatic Docker installation is only supported on Ubuntu/Debian." >&2
-      echo "Install Docker and the Docker Compose plugin, then run this script again." >&2
+      echo "Automatic Docker installation is not configured for ${distro:-this distribution}." >&2
+      echo "Install Docker Engine and the Docker Compose v2 plugin, then run this script again." >&2
       exit 1
       ;;
   esac

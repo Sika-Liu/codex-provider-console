@@ -4,7 +4,9 @@ This console is designed to run on any Linux cloud server that has Docker and
 Docker Compose. It only manages the Codex files mounted into the container;
 each server keeps its own providers, credentials, backups, and audit log.
 
-## Install Docker (Ubuntu/Debian)
+## Install Docker manually
+
+Ubuntu/Debian：
 
 ```bash
 sudo apt update
@@ -12,6 +14,21 @@ sudo apt install -y docker.io docker-compose-plugin git
 sudo systemctl enable --now docker
 sudo docker version
 sudo docker compose version
+```
+
+CentOS/RHEL/Rocky/AlmaLinux/Fedora：
+
+```bash
+curl -fsSL https://get.docker.com | sh
+sudo systemctl enable --now docker
+sudo docker version
+sudo docker compose version
+```
+
+也可以直接让安装脚本在支持的发行版上安装 Docker：
+
+```bash
+bash install.sh --install-docker
 ```
 
 Optional: allow the current user to run Docker without `sudo`:
@@ -50,16 +67,17 @@ is optional and is configured later from the panel.
 It also generates a panel administrator password and session secret. The
 credentials are stored in `.env`, which the installer restricts to mode `600`.
 
-To allow Docker installation through the installer on Ubuntu/Debian:
+To allow Docker installation through the installer on common Linux distributions:
 
 ```bash
 bash install.sh --install-docker
 ```
 
 When run interactively, `bash install.sh` asks whether to install Docker if it
-is missing. Answer `y` to install it and continue deployment. The installer runs
-`apt update` when needed, but does not run `apt upgrade` automatically because
-that can upgrade the kernel and require a reboot.
+is missing. Answer `y` to install it and continue deployment. Debian/Ubuntu use
+the distribution packages; CentOS/RHEL/Rocky/AlmaLinux/Fedora use Docker's
+official installer. The installer does not run a full system upgrade
+automatically because that can upgrade the kernel and require a reboot.
 
 If Codex CLI is missing, the installer asks whether to install it with the
 official standalone installer. For

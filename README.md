@@ -1,16 +1,22 @@
 # Codex Provider Console
 
-通用的 Codex 供应商控制台，可部署到任意安装了 Docker 的 Linux 云服务器。
+通用的 Codex 供应商控制台，可部署到安装了 Docker 的 Linux 云服务器（Ubuntu、Debian、CentOS、RHEL、Rocky、AlmaLinux 等）。
 
 ## 快速部署
 
 ### 部署前准备
 
-请先手动更新服务器系统。升级过程中可能安装新内核，完成后如系统提示请先重启服务器：
+请先手动更新服务器系统。Debian/Ubuntu 使用：
 
 ```bash
 sudo apt update
 sudo apt upgrade -y
+```
+
+CentOS/RHEL/Rocky/AlmaLinux 使用：
+
+```bash
+sudo dnf upgrade -y    # CentOS 7 可使用 yum update -y
 ```
 
 ```bash
@@ -26,13 +32,13 @@ bash install.sh
 
 登录控制台后打开左侧“健康检查”，可检查 Codex 数据目录、写入权限、`config.toml`、`auth.json`、控制台认证、当前供应商、供应商真实请求和磁盘空间。
 
-缺少 Docker 时，先安装 Docker，或明确允许脚本在 Ubuntu/Debian 上安装：
+缺少 Docker 时，先安装 Docker，或明确允许脚本自动安装：
 
 ```bash
 bash install.sh --install-docker
 ```
 
-交互式执行 `bash install.sh` 时，如果检测不到 Docker，脚本会询问是否安装；输入 `y` 后会继续完成部署。脚本会执行 `apt update`，不会自动执行可能触发系统重启的 `apt upgrade`。
+交互式执行 `bash install.sh` 时，如果检测不到 Docker，脚本会询问是否安装；输入 `y` 后会继续完成部署。Debian/Ubuntu 会使用系统包管理器，CentOS/RHEL 系列会使用 Docker 官方安装脚本。脚本不会自动执行可能触发系统重启的系统升级。
 
 缺少 Codex CLI 时，安装脚本会询问是否使用官方安装脚本安装；也可以直接执行：
 
