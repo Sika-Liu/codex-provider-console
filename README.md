@@ -46,7 +46,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-cons
 
 交互式一键安装时，如果检测不到 Docker，脚本会询问是否安装；输入 `y` 后会继续完成部署。Debian/Ubuntu 会使用系统包管理器，CentOS/RHEL 系列会使用 Docker 官方安装脚本。脚本不会自动执行可能触发系统重启的系统升级。
 
-缺少 Codex CLI 时，安装脚本会询问是否使用官方安装脚本安装；也可以直接执行：
+缺少 Codex CLI 时，安装脚本会询问是否安装。确认后会以非交互方式运行官方安装器，安装完成后自动继续部署面板，不会启动 Codex CLI 或要求额外执行命令。也可以直接执行：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-codex
