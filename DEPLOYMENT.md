@@ -50,6 +50,14 @@ sudo apt upgrade -y
 ```
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh | bash
+```
+
+The one-command installer clones the project to `~/codex-provider-console` and
+starts `install.sh` automatically. It requires `curl` and `git`, and refuses to
+overwrite an existing project directory or its data. For a traditional install:
+
+```bash
 git clone https://github.com/Sika-Liu/codex-provider-console.git
 cd codex-provider-console
 bash install.sh

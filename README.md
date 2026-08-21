@@ -20,12 +20,18 @@ sudo dnf upgrade -y    # CentOS 7 可使用 yum update -y
 ```
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh | bash
+```
+
+该命令会克隆项目到当前用户的 `~/codex-provider-console`，然后自动运行安装脚本，不需要手动执行 `cd` 或 `bash install.sh`。服务器需要预先安装 `curl` 和 `git`。安装脚本会检查 Docker、创建 `.env`、使用当前用户的 `~/.codex` 目录，并启动服务。默认监听 `0.0.0.0:8787`，便于直接通过服务器公网 IP 访问。
+
+也可采用传统方式：
+
+```bash
 git clone https://github.com/Sika-Liu/codex-provider-console.git
 cd codex-provider-console
 bash install.sh
 ```
-
-安装脚本会检查 Docker、创建 `.env`、使用当前用户的 `~/.codex` 目录，并启动服务。默认监听 `0.0.0.0:8787`，便于直接通过服务器公网 IP 访问。
 
 安装时会交互式询问控制台端口。服务默认监听 `0.0.0.0`，完成后会输出公网地址、内网地址、SSH 隧道命令、配置文件路径和安全组提示，行为与 1Panel 类似。
 首次安装还会生成管理员用户名、随机密码和会话密钥，并在结果中显示一次。登录后可从左侧菜单退出登录。
