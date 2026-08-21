@@ -85,7 +85,7 @@ codex-panel help
 codex-panel uninstall
 ```
 
-安装完成后会创建 `codex-panel` 命令，可在任意目录使用。执行 `uninstall` 后，先确认移除面板容器、项目目录、`.env`、本项目 Docker 镜像和该命令；随后会分别询问是否删除 Codex CLI 与 Codex 数据、是否卸载 Docker Engine 与全部 Docker 数据。后两项默认 `N`。选择卸载 Docker 会影响服务器上的其他 Docker 服务，请仅在确认无其他依赖时选择 `y`。
+安装完成后会创建 `codex-panel` 命令，可在任意目录使用。执行 `uninstall` 后，先确认移除面板容器、项目目录、`.env`、本项目 Docker 镜像和该命令；随后会询问是否删除 Codex CLI 与 Codex 数据，默认 `N`。卸载脚本绝不会卸载 Docker Engine 或删除其他 Docker 服务的数据。
 
 ### 卸载后确认
 
