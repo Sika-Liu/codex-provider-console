@@ -207,6 +207,22 @@ fi
 
 mkdir -p "$CODEX_HOME_HOST"
 
+install_management_command() {
+  local command_dir="$HOME/.local/bin"
+  local command_path="$command_dir/codex-panel"
+  local profile="$HOME/.bashrc"
+
+  mkdir -p "$command_dir"
+  printf '#!/usr/bin/env bash\nexec bash %q "$@"\n' "$PROJECT_DIR/codex-panel" > "$command_path"
+  chmod 755 "$command_path"
+  export PATH="$command_dir:$PATH"
+  if ! grep -Fqx 'export PATH="$HOME/.local/bin:$PATH"' "$profile" 2>/dev/null; then
+    printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$profile"
+  fi
+}
+
+install_management_command
+
 if [[ ! -f "$ENV_FILE" ]]; then
   cp "$PROJECT_DIR/.env.example" "$ENV_FILE"
   CREATED_ENV=true
@@ -281,6 +297,7 @@ Listening address: ${PANEL_BIND}:${PANEL_PORT}
 SSH tunnel: ssh -N -L ${PANEL_PORT}:127.0.0.1:${PANEL_PORT} $(whoami)@<server-ip>
 Config file: ${ENV_FILE}
 Codex data: ${CODEX_HOME_HOST}
+Management command: codex-panel
 Username: ${PANEL_USERNAME}
 Password: ${PANEL_PASSWORD}
 Codex CLI: ${CODEX_CLI_VERSION}
@@ -288,11 +305,11 @@ Codex CLI: ${CODEX_CLI_VERSION}
 ${exposure_note}
 
 Management:
-  bash codex-panel status
-  bash codex-panel logs
-  bash codex-panel restart
-  bash codex-panel update
-  bash codex-panel help
-  bash codex-panel uninstall
+  codex-panel status
+  codex-panel logs
+  codex-panel restart
+  codex-panel update
+  codex-panel help
+  codex-panel uninstall
 ===============================================================
 EOF
