@@ -6,7 +6,7 @@ cd "$PROJECT_DIR"
 
 usage() {
   cat <<'EOF'
-Usage: bash codex-panel <command>
+Usage: codex-panel <command>
 
 Commands:
   start     Build and start the console
