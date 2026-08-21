@@ -85,7 +85,7 @@ codex-panel help
 codex-panel uninstall
 ```
 
-安装完成后会创建 `codex-panel` 命令，可在任意目录使用。`uninstall` 会要求确认，然后停止并移除 Docker 容器，删除项目目录、`.env` 和 `CODEX_HOME_HOST` 指向的 Codex 数据，并移除该命令。若 Docker 已被卸载，脚本会跳过容器清理，仍会删除项目和 Codex 数据。该操作不可恢复，请先备份需要保留的内容。
+安装完成后会创建 `codex-panel` 命令，可在任意目录使用。执行 `uninstall` 后，先确认移除面板容器、项目目录、`.env`、本项目 Docker 镜像和该命令；随后会分别询问是否删除 Codex CLI 与 Codex 数据、是否卸载 Docker Engine 与全部 Docker 数据。后两项默认 `N`。选择卸载 Docker 会影响服务器上的其他 Docker 服务，请仅在确认无其他依赖时选择 `y`。
 
 ### 卸载后确认
 
@@ -96,7 +96,7 @@ test ! -e "$HOME/codex-provider-console" && echo "项目目录已删除"
 test ! -e "$HOME/.codex" && echo "Codex 数据已删除"
 ```
 
-两条提示都出现即表示项目文件与 Codex 数据已清除。若已安装 Docker，再检查是否有项目容器、网络或镜像残留：
+第一条提示出现即表示项目文件已清除。仅在卸载时选择删除 Codex 后，第二条才应出现。若卸载时保留了 Docker，可再检查是否有项目容器、网络或镜像残留：
 
 ```bash
 docker ps -a
