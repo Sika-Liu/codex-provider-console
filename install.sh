@@ -177,7 +177,8 @@ install_codex() {
     return 1
   fi
   echo "Installing Codex CLI with the official installer."
-  curl -fsSL https://chatgpt.com/codex/install.sh | sh
+  curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh
+  export PATH="$HOME/.local/bin:$PATH"
 }
 
 if ! command -v codex >/dev/null 2>&1; then
