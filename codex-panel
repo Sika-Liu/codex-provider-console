@@ -44,7 +44,11 @@ case "${1:-}" in
     read -r -p "This permanently deletes the console, .env, and Codex data. Continue? [y/N]: " confirm
     case "${confirm:-n}" in
       y|Y|yes|YES)
-        docker compose down --remove-orphans
+        if command -v docker >/dev/null 2>&1; then
+          docker compose down --remove-orphans
+        else
+          echo "Docker is not installed; skipping container cleanup."
+        fi
         rm -rf -- "$CODEX_HOME_HOST" "$PROJECT_DIR"
         echo "Codex Provider Console and all associated data were removed."
         ;;

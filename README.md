@@ -85,6 +85,25 @@ bash codex-panel help
 bash codex-panel uninstall
 ```
 
-`uninstall` 会要求确认，然后停止并移除 Docker 容器，删除项目目录、`.env` 和 `CODEX_HOME_HOST` 指向的 Codex 数据。该操作不可恢复，请先备份需要保留的内容。
+`uninstall` 会要求确认，然后停止并移除 Docker 容器，删除项目目录、`.env` 和 `CODEX_HOME_HOST` 指向的 Codex 数据。若 Docker 已被卸载，脚本会跳过容器清理，仍会删除项目和 Codex 数据。该操作不可恢复，请先备份需要保留的内容。
+
+### 卸载后确认
+
+在服务器上执行以下命令：
+
+```bash
+test ! -e "$HOME/codex-provider-console" && echo "项目目录已删除"
+test ! -e "$HOME/.codex" && echo "Codex 数据已删除"
+```
+
+两条提示都出现即表示项目文件与 Codex 数据已清除。若已安装 Docker，再检查是否有项目容器、网络或镜像残留：
+
+```bash
+docker ps -a
+docker network ls | grep codex-provider-console
+docker images | grep codex-provider-console
+```
+
+若 `which docker` 没有任何输出，表示 Docker 未安装；因此不会存在该项目的 Docker 容器、网络或镜像残留。
 
 完整说明请查看 [`DEPLOYMENT.md`](DEPLOYMENT.md)。公网访问时，请放在带 HTTPS 和登录认证的 Nginx/Caddy 反向代理后面。
