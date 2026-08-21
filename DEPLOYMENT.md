@@ -91,7 +91,8 @@ official installer. The installer does not run a full system upgrade
 automatically because that can upgrade the kernel and require a reboot.
 
 If Codex CLI is missing, the installer asks whether to install it with the
-official standalone installer. For
+official standalone installer. It runs the official installer non-interactively,
+then continues panel deployment without launching an interactive Codex session. For
 non-interactive setup, use:
 
 ```bash
