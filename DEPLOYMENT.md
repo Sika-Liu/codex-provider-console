@@ -153,7 +153,7 @@ codex-panel help
 codex-panel uninstall
 ```
 
-Installation creates the `codex-panel` command so it can be used from any directory. `uninstall` 会要求确认，然后停止并移除 Docker 容器，并删除项目目录、`.env` 以及 `CODEX_HOME_HOST` 指向的 Codex 数据目录，同时移除该命令。若 Docker 已被卸载，脚本会跳过容器清理，仍会删除项目和 Codex 数据。该操作不可恢复，请先备份需要保留的内容。
+Installation creates the `codex-panel` command so it can be used from any directory. `uninstall` first asks to remove the panel containers, project directory, `.env`, project image, and this command. It then separately asks whether to remove the Codex CLI and Codex data, and whether to remove Docker Engine and all Docker data. Both optional removals default to `N`. Removing Docker affects every Docker workload on the server, so choose `y` only after confirming no other services depend on it.
 
 ## Verify uninstall
 
@@ -164,8 +164,9 @@ test ! -e "$HOME/codex-provider-console" && echo "Project directory removed"
 test ! -e "$HOME/.codex" && echo "Codex data removed"
 ```
 
-If both messages are printed, the project files and Codex data are removed. On
-servers with Docker installed, check for remaining project resources:
+The first message confirms that the project files are removed. The second only
+appears when Codex removal was selected. If Docker was kept, check for remaining
+project resources:
 
 ```bash
 docker ps -a
