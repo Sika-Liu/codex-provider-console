@@ -28,7 +28,7 @@ sudo docker compose version
 也可以直接让安装脚本在支持的发行版上安装 Docker：
 
 ```bash
-bash install.sh --install-docker
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-docker
 ```
 
 Optional: allow the current user to run Docker without `sudo`:
@@ -50,18 +50,21 @@ sudo apt upgrade -y
 ```
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh | bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
 ```
 
 The one-command installer clones the project to `~/codex-provider-console` and
-starts `install.sh` automatically. It requires `curl` and `git`, and refuses to
-overwrite an existing project directory or its data. For a traditional install:
+starts `install.sh` automatically and refuses to overwrite an existing project
+directory or its data. When started with `wget` or a local copy, it asks whether
+to install missing `curl` and `git` tools. If `curl` is not installed but `wget`
+is available, use:
 
 ```bash
-git clone https://github.com/Sika-Liu/codex-provider-console.git
-cd codex-provider-console
-bash install.sh
+bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
 ```
+
+If neither `curl` nor `wget` is present, install one download tool first; a
+network installer cannot run before a downloader is available.
 
 The installer creates `.env` from `.env.example`, defaults `CODEX_HOME_HOST` to
 the current user's `~/.codex`, and starts the service. It does not overwrite
@@ -78,10 +81,10 @@ credentials are stored in `.env`, which the installer restricts to mode `600`.
 To allow Docker installation through the installer on common Linux distributions:
 
 ```bash
-bash install.sh --install-docker
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-docker
 ```
 
-When run interactively, `bash install.sh` asks whether to install Docker if it
+When run interactively, the one-command installer asks whether to install Docker if it
 is missing. Answer `y` to install it and continue deployment. Debian/Ubuntu use
 the distribution packages; CentOS/RHEL/Rocky/AlmaLinux/Fedora use Docker's
 official installer. The installer does not run a full system upgrade
@@ -92,7 +95,7 @@ official standalone installer. For
 non-interactive setup, use:
 
 ```bash
-bash install.sh --install-codex
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-codex
 ```
 
 `curl` must already be available on the server.
@@ -100,9 +103,7 @@ bash install.sh --install-codex
 Useful installer options:
 
 ```bash
-bash install.sh --codex-home /home/alice/.codex --port 8787
-bash install.sh --force
-bash install.sh --bind 127.0.0.1 --force
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --codex-home /home/alice/.codex --port 8787
 ```
 
 The panel login is enabled by default. When using HTTPS through a reverse proxy,

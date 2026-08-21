@@ -20,18 +20,18 @@ sudo dnf upgrade -y    # CentOS 7 可使用 yum update -y
 ```
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh | bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
 ```
 
-该命令会克隆项目到当前用户的 `~/codex-provider-console`，然后自动运行安装脚本，不需要手动执行 `cd` 或 `bash install.sh`。服务器需要预先安装 `curl` 和 `git`。安装脚本会检查 Docker、创建 `.env`、使用当前用户的 `~/.codex` 目录，并启动服务。默认监听 `0.0.0.0:8787`，便于直接通过服务器公网 IP 访问。
+该命令会克隆项目到当前用户的 `~/codex-provider-console`，然后自动运行安装脚本。安装脚本会检查 Docker、创建 `.env`、使用当前用户的 `~/.codex` 目录，并启动服务。默认监听 `0.0.0.0:8787`，便于直接通过服务器公网 IP 访问。
 
-也可采用传统方式：
+如果服务器没有 `curl` 但有 `wget`，执行：
 
 ```bash
-git clone https://github.com/Sika-Liu/codex-provider-console.git
-cd codex-provider-console
-bash install.sh
+bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
 ```
+
+引导脚本发现缺少 `curl` 或 `git` 时会询问是否安装，例如 `curl is not installed. Install curl now? [y/N]:`。若 `curl` 和 `wget` 都不存在，无法从网络下载引导脚本，需先通过系统包管理器安装其中任一个下载工具。
 
 安装时会交互式询问控制台端口。服务默认监听 `0.0.0.0`，完成后会输出公网地址、内网地址、SSH 隧道命令、配置文件路径和安全组提示，行为与 1Panel 类似。
 首次安装还会生成管理员用户名、随机密码和会话密钥，并在结果中显示一次。登录后可从左侧菜单退出登录。
@@ -41,15 +41,15 @@ bash install.sh
 缺少 Docker 时，先安装 Docker，或明确允许脚本自动安装：
 
 ```bash
-bash install.sh --install-docker
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-docker
 ```
 
-交互式执行 `bash install.sh` 时，如果检测不到 Docker，脚本会询问是否安装；输入 `y` 后会继续完成部署。Debian/Ubuntu 会使用系统包管理器，CentOS/RHEL 系列会使用 Docker 官方安装脚本。脚本不会自动执行可能触发系统重启的系统升级。
+交互式一键安装时，如果检测不到 Docker，脚本会询问是否安装；输入 `y` 后会继续完成部署。Debian/Ubuntu 会使用系统包管理器，CentOS/RHEL 系列会使用 Docker 官方安装脚本。脚本不会自动执行可能触发系统重启的系统升级。
 
 缺少 Codex CLI 时，安装脚本会询问是否使用官方安装脚本安装；也可以直接执行：
 
 ```bash
-bash install.sh --install-codex
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-codex
 ```
 
 该选项要求服务器已安装 `curl`。官方安装脚本会将 Codex CLI 安装到服务器。
@@ -57,7 +57,7 @@ bash install.sh --install-codex
 自定义 Codex 目录或端口：
 
 ```bash
-bash install.sh --codex-home /home/ubuntu/.codex --port 8787
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --codex-home /home/ubuntu/.codex --port 8787
 ```
 
 反向代理不是部署必选项。直接使用公网 IP 访问即可；如需域名和 HTTPS，登录控制台后打开左侧“反向代理”，填写域名、上游地址和证书路径。通过 HTTPS 反向代理访问时，将 `.env` 中的 `PANEL_COOKIE_SECURE` 改为 `true`，然后执行：
