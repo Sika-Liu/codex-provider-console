@@ -49,6 +49,7 @@ case "${1:-}" in
         else
           echo "Docker is not installed; skipping container cleanup."
         fi
+        rm -f -- "$HOME/.local/bin/codex-panel"
         rm -rf -- "$CODEX_HOME_HOST" "$PROJECT_DIR"
         echo "Codex Provider Console and all associated data were removed."
         ;;
