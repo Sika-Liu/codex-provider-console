@@ -111,7 +111,7 @@ The panel login is enabled by default. When using HTTPS through a reverse proxy,
 set `PANEL_COOKIE_SECURE=true` in `.env` and restart the service:
 
 ```bash
-bash codex-panel restart
+codex-panel restart
 ```
 
 If you choose the localhost override, the service listens on `127.0.0.1:8787`.
@@ -145,15 +145,15 @@ Do not commit `.env`, `auth.json`, provider profiles, or backup directories.
 Run these commands from the repository directory:
 
 ```bash
-bash codex-panel status
-bash codex-panel logs
-bash codex-panel restart
-bash codex-panel update
-bash codex-panel help
-bash codex-panel uninstall
+codex-panel status
+codex-panel logs
+codex-panel restart
+codex-panel update
+codex-panel help
+codex-panel uninstall
 ```
 
-`uninstall` 会要求确认，然后停止并移除 Docker 容器，并删除项目目录、`.env` 以及 `CODEX_HOME_HOST` 指向的 Codex 数据目录。若 Docker 已被卸载，脚本会跳过容器清理，仍会删除项目和 Codex 数据。该操作不可恢复，请先备份需要保留的内容。
+Installation creates the `codex-panel` command so it can be used from any directory. `uninstall` 会要求确认，然后停止并移除 Docker 容器，并删除项目目录、`.env` 以及 `CODEX_HOME_HOST` 指向的 Codex 数据目录，同时移除该命令。若 Docker 已被卸载，脚本会跳过容器清理，仍会删除项目和 Codex 数据。该操作不可恢复，请先备份需要保留的内容。
 
 ## Verify uninstall
 
