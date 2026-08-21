@@ -63,7 +63,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-cons
 反向代理不是部署必选项。直接使用公网 IP 访问即可；如需域名和 HTTPS，登录控制台后打开左侧“反向代理”，填写域名、上游地址和证书路径。通过 HTTPS 反向代理访问时，将 `.env` 中的 `PANEL_COOKIE_SECURE` 改为 `true`，然后执行：
 
 ```bash
-bash codex-panel restart
+codex-panel restart
 ```
 
 通过 SSH 隧道访问：
@@ -77,15 +77,15 @@ ssh -N -L 8787:127.0.0.1:8787 用户名@服务器IP
 ## 日常管理
 
 ```bash
-bash codex-panel status
-bash codex-panel logs
-bash codex-panel restart
-bash codex-panel update
-bash codex-panel help
-bash codex-panel uninstall
+codex-panel status
+codex-panel logs
+codex-panel restart
+codex-panel update
+codex-panel help
+codex-panel uninstall
 ```
 
-`uninstall` 会要求确认，然后停止并移除 Docker 容器，删除项目目录、`.env` 和 `CODEX_HOME_HOST` 指向的 Codex 数据。若 Docker 已被卸载，脚本会跳过容器清理，仍会删除项目和 Codex 数据。该操作不可恢复，请先备份需要保留的内容。
+安装完成后会创建 `codex-panel` 命令，可在任意目录使用。`uninstall` 会要求确认，然后停止并移除 Docker 容器，删除项目目录、`.env` 和 `CODEX_HOME_HOST` 指向的 Codex 数据，并移除该命令。若 Docker 已被卸载，脚本会跳过容器清理，仍会删除项目和 Codex 数据。该操作不可恢复，请先备份需要保留的内容。
 
 ### 卸载后确认
 
