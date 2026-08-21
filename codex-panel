@@ -54,7 +54,11 @@ case "${1:-}" in
         rm -rf -- "$PROJECT_DIR"
         echo "Codex Provider Console was removed."
 
-        read -r -p "Remove Codex CLI and Codex data at ${CODEX_HOME_HOST}? [y/N]: " remove_codex
+        codex_data_paths="$CODEX_HOME_HOST"
+        if [[ "$CODEX_HOME_HOST" != "$HOME/.codex" ]]; then
+          codex_data_paths+=" and $HOME/.codex"
+        fi
+        read -r -p "Remove Codex CLI and Codex data at ${codex_data_paths}? [y/N]: " remove_codex
         case "${remove_codex:-n}" in
           y|Y|yes|YES)
             rm -f -- "$HOME/.local/bin/codex"
