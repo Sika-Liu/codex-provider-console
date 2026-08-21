@@ -142,7 +142,7 @@ Do not commit `.env`, `auth.json`, provider profiles, or backup directories.
 
 ## Management
 
-Run these commands from the repository directory:
+After installation, run these commands from any directory:
 
 ```bash
 codex-panel status
