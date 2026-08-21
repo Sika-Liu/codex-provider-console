@@ -153,7 +153,7 @@ codex-panel help
 codex-panel uninstall
 ```
 
-Installation creates the `codex-panel` command so it can be used from any directory. `uninstall` first asks to remove the panel containers, project directory, `.env`, project image, and this command. It then separately asks whether to remove the Codex CLI and Codex data, and whether to remove Docker Engine and all Docker data. Both optional removals default to `N`. Removing Docker affects every Docker workload on the server, so choose `y` only after confirming no other services depend on it.
+Installation creates the `codex-panel` command so it can be used from any directory. `uninstall` first asks to remove the panel containers, project directory, `.env`, project image, and this command. It then asks whether to remove the Codex CLI and Codex data; this optional removal defaults to `N`. The uninstaller never removes Docker Engine or data belonging to other Docker workloads.
 
 ## Verify uninstall
 
