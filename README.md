@@ -54,6 +54,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-cons
 
 该选项要求服务器已安装 `curl`。官方安装脚本会将 Codex CLI 安装到服务器。
 
+### 在控制台完成官方登录
+
+选择“官方登录”供应商后，点击“开始官方登录”。控制台会显示 OpenAI 登录网址和一次性设备码；在自己的浏览器完成登录后，认证会安全写入服务器的 Codex 目录。点击“刷新令牌（重新登录）”会重新发起该流程。页面不会显示 `auth.json` 或任何登录令牌。
+
 自定义 Codex 目录或端口：
 
 ```bash
