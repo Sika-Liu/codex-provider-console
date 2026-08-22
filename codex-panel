@@ -29,7 +29,7 @@ case "${1:-}" in
   logs) docker compose logs -f --tail=100 codex-provider-console ;;
   update)
     git pull --ff-only
-    docker compose up -d --build
+    docker compose up -d --build --force-recreate
     ;;
   config) printf '%s\n' "$PROJECT_DIR/.env" ;;
   uninstall)
