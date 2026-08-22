@@ -101,6 +101,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-cons
 
 `curl` must already be available on the server.
 
+## Official login in the panel
+
+For an official-login provider, select **官方登录** and choose **开始官方登录**.
+The panel displays an OpenAI verification URL and one-time device code. Complete
+the login in your own browser; Codex stores and refreshes the authentication in
+the mounted Codex directory. **刷新令牌（重新登录）** starts this flow again. The
+panel never returns `auth.json` or tokens to the browser.
+
 Useful installer options:
 
 ```bash
