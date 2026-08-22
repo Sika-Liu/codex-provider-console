@@ -5,6 +5,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -35,6 +37,136 @@ SESSION_SECRET = os.environ.get("PANEL_SESSION_SECRET", "")
 COOKIE_SECURE = os.environ.get("PANEL_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
 SESSION_COOKIE = "codex_panel_session"
 SESSION_MAX_AGE = 12 * 60 * 60
+LOGIN_TIMEOUT_SECONDS = 10
+
+
+class DeviceLoginSession:
+    """Owns one local Codex app-server device-code login without exposing tokens."""
+
+    def __init__(self, provider_id: str):
+        self.provider_id = provider_id
+        self.process: subprocess.Popen[str] | None = None
+        self.lock = threading.Lock()
+        self.next_id = 1
+        self.waiters: dict[int, tuple[threading.Event, dict]] = {}
+        self.login_id = ""
+        self.verification_url = ""
+        self.user_code = ""
+        self.status = "starting"
+        self.detail = "正在启动官方登录服务…"
+        self.plan_type = ""
+        self.captured = False
+
+    def _reader(self) -> None:
+        assert self.process and self.process.stdout
+        for raw in self.process.stdout:
+            try:
+                message = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            response_id = message.get("id")
+            if isinstance(response_id, int):
+                with self.lock:
+                    waiter = self.waiters.get(response_id)
+                    if waiter:
+                        waiter[1]["message"] = message
+                        waiter[0].set()
+                continue
+            params = message.get("params") if isinstance(message.get("params"), dict) else {}
+            if message.get("method") == "account/login/completed" and params.get("loginId") == self.login_id:
+                with self.lock:
+                    if params.get("success"):
+                        self.status = "completed"
+                        self.detail = "登录已完成，正在保存认证状态。"
+                    else:
+                        self.status = "failed"
+                        self.detail = str(params.get("error") or "官方登录未完成")[:300]
+            elif message.get("method") == "account/updated":
+                with self.lock:
+                    self.plan_type = str(params.get("planType") or "")
+
+    def _send(self, payload: dict) -> None:
+        if not self.process or not self.process.stdin:
+            raise RuntimeError("Codex login service is unavailable")
+        self.process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        self.process.stdin.flush()
+
+    def request(self, method: str, params: dict) -> dict:
+        with self.lock:
+            request_id = self.next_id
+            self.next_id += 1
+            event = threading.Event()
+            holder: dict = {}
+            self.waiters[request_id] = (event, holder)
+            self._send({"method": method, "id": request_id, "params": params})
+        if not event.wait(LOGIN_TIMEOUT_SECONDS):
+            with self.lock:
+                self.waiters.pop(request_id, None)
+            raise RuntimeError("Codex login service timed out")
+        message = holder.get("message", {})
+        if message.get("error"):
+            raise RuntimeError(str(message["error"].get("message") or "Codex login service rejected the request"))
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("Codex login service returned an invalid response")
+        return result
+
+    def start(self) -> dict:
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(CODEX_HOME)
+        try:
+            self.process = subprocess.Popen(
+                ["codex", "app-server", "--stdio"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+                env=env,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("Codex CLI is unavailable in the control panel container. Update the deployment and try again.") from exc
+        threading.Thread(target=self._reader, daemon=True).start()
+        self.request("initialize", {"clientInfo": {"name": "codex_provider_console", "title": "Codex Provider Console", "version": "1.0"}})
+        self._send({"method": "initialized", "params": {}})
+        result = self.request("account/login/start", {"type": "chatgptDeviceCode"})
+        self.login_id = str(result.get("loginId") or "")
+        self.verification_url = str(result.get("verificationUrl") or "")
+        self.user_code = str(result.get("userCode") or "")
+        if not self.login_id or not self.verification_url or not self.user_code:
+            raise RuntimeError("Codex did not return a device login code")
+        self.status = "pending"
+        self.detail = "请在浏览器完成官方登录。"
+        return self.public_status()
+
+    def cancel(self) -> None:
+        if self.status == "pending" and self.login_id:
+            try:
+                self.request("account/login/cancel", {"loginId": self.login_id})
+            except RuntimeError:
+                pass
+        self.status = "cancelled"
+        self.detail = "登录已取消。"
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+
+    def public_status(self) -> dict:
+        if self.process and self.process.poll() is not None and self.status in {"starting", "pending"}:
+            self.status = "failed"
+            self.detail = "Codex 登录服务已退出。"
+        return {
+            "provider_id": self.provider_id,
+            "status": self.status,
+            "detail": self.detail,
+            "verification_url": self.verification_url if self.status == "pending" else "",
+            "user_code": self.user_code if self.status == "pending" else "",
+            "plan_type": self.plan_type,
+            "captured": self.captured,
+        }
+
+
+DEVICE_LOGIN_LOCK = threading.Lock()
+DEVICE_LOGIN: DeviceLoginSession | None = None
 
 
 class ModelEntry(BaseModel):
@@ -688,6 +820,11 @@ def get_health() -> dict:
 
 @app.post("/api/providers/{provider_id}/capture-auth")
 def capture_chatgpt_auth(provider_id: str) -> dict:
+    capture_chatgpt_snapshot(provider_id)
+    return {"provider_id": provider_id, "captured": True}
+
+
+def capture_chatgpt_snapshot(provider_id: str) -> None:
     profiles = read_profiles()
     profile = profiles.get(provider_id)
     if not profile:
@@ -703,7 +840,58 @@ def capture_chatgpt_auth(provider_id: str) -> dict:
     profiles[provider_id] = profile
     write_private(PROFILE_PATH, json.dumps(profiles, ensure_ascii=False, indent=2) + "\n")
     audit("chatgpt_auth_captured", provider_id=provider_id)
-    return {"provider_id": provider_id, "captured": True}
+
+
+@app.post("/api/providers/{provider_id}/official-login/start")
+def start_official_login(provider_id: str) -> dict:
+    global DEVICE_LOGIN
+    profile = read_profiles().get(provider_id)
+    if not profile:
+        raise HTTPException(404, "Provider profile not found")
+    if profile.get("auth_mode") != "chatgpt":
+        raise HTTPException(422, "Only a ChatGPT login provider can start official login")
+    with DEVICE_LOGIN_LOCK:
+        if DEVICE_LOGIN and DEVICE_LOGIN.status == "pending":
+            DEVICE_LOGIN.cancel()
+        DEVICE_LOGIN = DeviceLoginSession(provider_id)
+        try:
+            result = DEVICE_LOGIN.start()
+        except RuntimeError as exc:
+            DEVICE_LOGIN.status = "failed"
+            DEVICE_LOGIN.detail = str(exc)[:300]
+            raise HTTPException(503, DEVICE_LOGIN.detail) from exc
+    audit("chatgpt_device_login_started", provider_id=provider_id)
+    return result
+
+
+@app.get("/api/official-login/status")
+def official_login_status() -> dict:
+    with DEVICE_LOGIN_LOCK:
+        if not DEVICE_LOGIN:
+            return {"status": "idle", "detail": "尚未开始官方登录。", "captured": False}
+        status = DEVICE_LOGIN.public_status()
+        if DEVICE_LOGIN.status == "completed" and not DEVICE_LOGIN.captured:
+            try:
+                capture_chatgpt_snapshot(DEVICE_LOGIN.provider_id)
+            except (HTTPException, OSError) as exc:
+                DEVICE_LOGIN.status = "failed"
+                DEVICE_LOGIN.detail = str(getattr(exc, "detail", exc))[:300]
+            else:
+                DEVICE_LOGIN.captured = True
+                DEVICE_LOGIN.detail = "官方登录已更新并安全保存。"
+                audit("chatgpt_device_login_completed", provider_id=DEVICE_LOGIN.provider_id)
+            status = DEVICE_LOGIN.public_status()
+        return status
+
+
+@app.post("/api/official-login/cancel")
+def cancel_official_login() -> dict:
+    with DEVICE_LOGIN_LOCK:
+        if not DEVICE_LOGIN:
+            return {"status": "idle", "detail": "没有正在进行的官方登录。"}
+        DEVICE_LOGIN.cancel()
+        audit("chatgpt_device_login_cancelled", provider_id=DEVICE_LOGIN.provider_id)
+        return DEVICE_LOGIN.public_status()
 
 
 @app.post("/api/providers/{provider_id}/test")
@@ -737,15 +925,19 @@ def list_backups() -> list[dict]:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    official_panel = '''<div id="official-fields" class="field-help" style="display:none"><div>官方登录档案使用当前服务器的 Codex 登录状态，不写入 API Key。</div><div style="margin-top:8px"><button id="capture-auth-btn" type="button" class="btn light small" onclick="captureOfficialAuth()">捕获当前官方登录</button> <span id="capture-auth-status" class="muted">请先保存该档案，再捕获认证快照。</span></div><div style="margin-top:7px">认证从当前部署挂载的 Codex 目录读取并私有保存；令牌不会在页面显示。</div></div>'''
+    official_panel = '''<div id="official-fields" class="field-help" style="display:none"><div>官方登录使用设备码流程，不写入或显示 API Key。</div><div style="margin-top:8px"><button id="official-login-btn" type="button" class="btn light small" onclick="startOfficialLogin()">开始官方登录</button> <button id="official-refresh-btn" type="button" class="btn light small" onclick="startOfficialLogin()">刷新令牌（重新登录）</button> <button id="official-cancel-btn" type="button" class="btn light small" onclick="cancelOfficialLogin()" style="display:none">取消登录</button></div><div id="official-login-flow" style="display:none;margin-top:10px;padding:10px 12px;border:1px solid #d2d6da;border-radius:7px;background:#f8fafc"><div id="official-login-status">正在准备登录…</div><div id="official-login-code" style="display:none;margin-top:8px;font-weight:700;font-family:monospace"></div><a id="official-login-link" target="_blank" rel="noopener" style="display:none;margin-top:6px;word-break:break-all"></a></div><div id="capture-auth-status" class="muted" style="margin-top:7px">请先保存该档案，再开始官方登录。</div><div style="margin-top:7px">登录在你的浏览器完成；令牌只写入服务器的 Codex 目录，不会在页面显示。</div></div>'''
     old_panel = '''<div id="official-fields" class="field-help" style="display:none">官方登录档案会使用当前服务器的 Codex 登录状态。保存档案后点击“捕获当前官方登录”建立加密前的本地认证快照；快照不会在页面显示。</div>'''
     official_script = r'''<script>
 document.head.insertAdjacentHTML('beforeend','<style>#model-list.model-list-box{min-height:150px;max-height:300px;overflow:auto;border:1px solid #d2d6da;border-radius:7px;background:#fff;padding:10px 12px}.model-entry{line-height:1.8;font:14px "Consolas","Microsoft YaHei",sans-serif;color:#2c3035}.model-entry:empty{display:none}.doctor-mask{display:none;position:fixed;inset:0;background:#0008;z-index:1000;align-items:center;justify-content:center}.doctor-mask.show{display:flex}.doctor-card{width:min(560px,calc(100vw - 32px));background:#fff;border-radius:11px;padding:19px;box-shadow:0 18px 60px #0004}.doctor-title{font-size:18px;font-weight:500}.doctor-summary{margin:8px 0 12px;color:#656b73}.doctor-progress{height:8px;background:#e8ebee;border-radius:999px;overflow:hidden;margin-bottom:10px}.doctor-progress i{display:block;height:100%;width:0;background:#1683ff;border-radius:inherit;transition:width .22s}#doctor-state{padding:3px 8px;background:#f3f4f5;border-radius:999px;font-size:12px;color:#30343a}.doctor-check{min-height:64px;border:1px solid #e1e4e8;border-radius:9px;padding:12px 12px 12px 50px;margin-top:10px;position:relative}.doctor-check:before{content:"✓";position:absolute;left:15px;top:17px;width:20px;height:20px;border-radius:50%;background:#f0f1f2;color:#1683ff;display:grid;place-items:center;font-size:12px;font-weight:700}.doctor-check b{display:block}.doctor-check small{display:block;color:#6a7078;margin-top:5px;line-height:1.45}.doctor-check.real-result.expanded{height:130px;overflow:hidden}.doctor-check.real-result.expanded small{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:5;overflow:hidden}.doctor-check.running{border-color:#acd4ff}.doctor-check.running:before{content:"◌"}.doctor-check.fail:before{content:"!";color:#ed5b5b}.doctor-check.warning:before{content:"";background:#f0f1f2}.doctor-advice{margin-top:10px}.doctor-advice .doctor-check{margin-top:0}.doctor-advice .doctor-check:before{content:"◆";color:#e49a13;font-size:10px}</style>');
 document.body.insertAdjacentHTML('beforeend','<div id="doctor-mask" class="doctor-mask"><div class="doctor-card"><div class="row-between"><div class="doctor-title">Provider Doctor</div><span id="doctor-state" class="section-hint"></span><button class="back" onclick="closeDoctor()">×</button></div><div id="doctor-summary" class="doctor-summary"></div><div class="doctor-progress"><i id="doctor-progress"></i></div><div id="doctor-checks"></div><div id="doctor-advice" class="doctor-advice"></div><p style="margin:16px 0 0"><button id="doctor-close" class="btn light" onclick="closeDoctor()">关闭</button></p></div></div>');
 const modelList=$('#model-list');const modelHead=modelList?.previousElementSibling,modelHelp=modelHead?.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;if(modelHead){modelHead.remove()}if(modelTitle){modelTitle.querySelector('button')?.remove()}if(modelList){modelList.classList.add('model-list-box');modelList.setAttribute('aria-readonly','true')}if(modelHelp)modelHelp.textContent='模型名称仅能通过“从上游获取”填入。';
 function setModelListVisibility(official){const list=$('#model-list');if(!list)return;const modelHelp=list.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;[list,modelHelp,modelTitle].forEach(node=>{if(node)node.style.display=official?'none':''})}
-function authModeChanged(){const official=$('#p-auth').value==='chatgpt';$('#api-fields').style.display=official?'none':'grid';$('#official-fields').style.display=official?'block':'none';$('#p-url').required=!official;$('#test-btn').style.display=official?'none':'';const protocols=$('.protocols'),protocolTitle=protocols?.previousElementSibling;if(protocols)protocols.style.display=official?'none':'flex';if(protocolTitle)protocolTitle.style.display=official?'none':'';setModelListVisibility(official);if(official){const captured=state.current?.has_auth_snapshot;$('#capture-auth-status').textContent=captured?'已捕获服务器官方登录快照。':'请先保存该档案，再捕获认证快照。';$('#capture-auth-btn').disabled=!state.current?.id}updatePreview()}
-async function captureOfficialAuth(){try{if($('#p-auth').value!=='chatgpt')throw Error('仅官方登录档案可捕获认证。');await saveProvider();const p=gather();if(!p.id)throw Error('请先填写并保存供应商名称。');const d=await api(`/api/providers/${encodeURIComponent(p.id)}/capture-auth`,{method:'POST'});state.current={...p,has_auth_snapshot:d.captured};$('#capture-auth-btn').disabled=false;$('#capture-auth-status').textContent='已捕获服务器官方登录快照。';note('已捕获服务器官方登录；认证令牌不会显示。');await refreshAll()}catch(e){note(e.message)}}
+let officialLoginPoll=null;
+function renderOfficialLogin(status){const flow=$('#official-login-flow'),label=$('#official-login-status'),code=$('#official-login-code'),link=$('#official-login-link'),cancel=$('#official-cancel-btn'),start=$('#official-login-btn'),refresh=$('#official-refresh-btn');if(!flow)return;const pending=status.status==='pending';flow.style.display=status.status==='idle'?'none':'';label.textContent=status.detail||'';code.style.display=pending?'block':'none';code.textContent=pending?`一次性验证码：${status.user_code}`:'';link.style.display=pending?'block':'none';if(pending){link.href=status.verification_url;link.textContent=status.verification_url}cancel.style.display=pending?'':'none';start.disabled=!state.current?.id||pending;refresh.disabled=!state.current?.id||pending;const saved=status.status==='completed'&&status.captured;if(saved){state.current={...state.current,has_auth_snapshot:true};$('#capture-auth-status').textContent='官方登录已更新并安全保存。';note('官方登录已完成，认证令牌不会显示。');refreshAll()}else if(status.status==='failed'||status.status==='cancelled'){$('#capture-auth-status').textContent=status.detail||'官方登录未完成。'}}
+async function pollOfficialLogin(){try{const status=await api('/api/official-login/status');renderOfficialLogin(status);if(status.status!=='pending'&&officialLoginPoll){clearInterval(officialLoginPoll);officialLoginPoll=null}}catch(e){if(officialLoginPoll){clearInterval(officialLoginPoll);officialLoginPoll=null}note(e.message)}}
+function authModeChanged(){const official=$('#p-auth').value==='chatgpt';$('#api-fields').style.display=official?'none':'grid';$('#official-fields').style.display=official?'block':'none';$('#p-url').required=!official;$('#test-btn').style.display=official?'none':'';const protocols=$('.protocols'),protocolTitle=protocols?.previousElementSibling;if(protocols)protocols.style.display=official?'none':'flex';if(protocolTitle)protocolTitle.style.display=official?'none':'';setModelListVisibility(official);if(official){const captured=state.current?.has_auth_snapshot;$('#capture-auth-status').textContent=captured?'已保存官方登录；可用“刷新令牌”重新登录。':'请先保存该档案，再开始官方登录。';$('#official-login-btn').disabled=!state.current?.id;$('#official-refresh-btn').disabled=!state.current?.id;pollOfficialLogin()}updatePreview()}
+async function startOfficialLogin(){try{if($('#p-auth').value!=='chatgpt')throw Error('仅官方登录档案可开始登录。');const saved=gather();if(!saved.id)throw Error('请先填写供应商名称。');await saveProvider();if(!state.current||state.current.id!==saved.id)openProvider(saved.id);const status=await api(`/api/providers/${encodeURIComponent(saved.id)}/official-login/start`,{method:'POST'});renderOfficialLogin(status);if(officialLoginPoll)clearInterval(officialLoginPoll);officialLoginPoll=setInterval(pollOfficialLogin,1500)}catch(e){note(e.message)}}
+async function cancelOfficialLogin(){try{const status=await api('/api/official-login/cancel',{method:'POST'});renderOfficialLogin(status);if(officialLoginPoll){clearInterval(officialLoginPoll);officialLoginPoll=null}}catch(e){note(e.message)}}
 async function fetchModelsFromUpstream(){try{if($('#p-auth').value!=='apikey')throw Error('从上游获取仅适用于纯 API 供应商。');const base_url=$('#p-url').value.trim(),bearer_token=$('#p-key').value;if(!base_url||!bearer_token)throw Error('请先填写 Base URL 和 Key。');const button=$('#fetch-models-btn');button.disabled=true;button.textContent='正在获取…';const result=await api('/api/upstream/models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url,bearer_token})});$('#model-list').innerHTML='';result.models.forEach(name=>addModel({name}));if(!state.testModel&&result.models.length)state.testModel=result.models[0];note(`已从上游获取 ${result.models.length} 个模型。`);updatePreview()}catch(e){note(e.message)}finally{const button=$('#fetch-models-btn');if(button){button.disabled=false;button.textContent='⇩ 从上游获取'}}}
 function installFetchModelsButton(){const list=$('#model-list');if(!list||$('#fetch-models-btn'))return;const modelHelp=list.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;if(!modelTitle)return;const button=document.createElement('button');button.id='fetch-models-btn';button.type='button';button.className='btn light small';button.textContent='⇩ 从上游获取';button.onclick=fetchModelsFromUpstream;modelTitle.append(button)}
 installFetchModelsButton()
