@@ -894,6 +894,21 @@ def cancel_official_login() -> dict:
         return DEVICE_LOGIN.public_status()
 
 
+@app.post("/api/runtime/restart")
+def restart_managed_codex_runtime() -> dict:
+    """Restart only the Codex process owned by this panel, never a user shell."""
+    global DEVICE_LOGIN
+    with DEVICE_LOGIN_LOCK:
+        if DEVICE_LOGIN:
+            DEVICE_LOGIN.cancel()
+            DEVICE_LOGIN = None
+    audit("managed_codex_runtime_restarted")
+    return {
+        "restarted": True,
+        "detail": "面板托管的 Codex 服务已重启；后续从面板发起的 Codex 会话会读取当前配置。",
+    }
+
+
 @app.post("/api/providers/{provider_id}/test")
 def test_saved_provider(provider_id: str) -> dict:
     profile = read_profiles().get(provider_id)
@@ -929,6 +944,7 @@ def index() -> str:
     old_panel = '''<div id="official-fields" class="field-help" style="display:none">官方登录档案会使用当前服务器的 Codex 登录状态。保存档案后点击“捕获当前官方登录”建立加密前的本地认证快照；快照不会在页面显示。</div>'''
     official_script = r'''<script>
 document.head.insertAdjacentHTML('beforeend','<style>#model-list.model-list-box{min-height:150px;max-height:300px;overflow:auto;border:1px solid #d2d6da;border-radius:7px;background:#fff;padding:10px 12px}.model-entry{line-height:1.8;font:14px "Consolas","Microsoft YaHei",sans-serif;color:#2c3035}.model-entry:empty{display:none}.doctor-mask{display:none;position:fixed;inset:0;background:#0008;z-index:1000;align-items:center;justify-content:center}.doctor-mask.show{display:flex}.doctor-card{width:min(560px,calc(100vw - 32px));background:#fff;border-radius:11px;padding:19px;box-shadow:0 18px 60px #0004}.doctor-title{font-size:18px;font-weight:500}.doctor-summary{margin:8px 0 12px;color:#656b73}.doctor-progress{height:8px;background:#e8ebee;border-radius:999px;overflow:hidden;margin-bottom:10px}.doctor-progress i{display:block;height:100%;width:0;background:#1683ff;border-radius:inherit;transition:width .22s}#doctor-state{padding:3px 8px;background:#f3f4f5;border-radius:999px;font-size:12px;color:#30343a}.doctor-check{min-height:64px;border:1px solid #e1e4e8;border-radius:9px;padding:12px 12px 12px 50px;margin-top:10px;position:relative}.doctor-check:before{content:"✓";position:absolute;left:15px;top:17px;width:20px;height:20px;border-radius:50%;background:#f0f1f2;color:#1683ff;display:grid;place-items:center;font-size:12px;font-weight:700}.doctor-check b{display:block}.doctor-check small{display:block;color:#6a7078;margin-top:5px;line-height:1.45}.doctor-check.real-result.expanded{height:130px;overflow:hidden}.doctor-check.real-result.expanded small{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:5;overflow:hidden}.doctor-check.running{border-color:#acd4ff}.doctor-check.running:before{content:"◌"}.doctor-check.fail:before{content:"!";color:#ed5b5b}.doctor-check.warning:before{content:"";background:#f0f1f2}.doctor-advice{margin-top:10px}.doctor-advice .doctor-check{margin-top:0}.doctor-advice .doctor-check:before{content:"◆";color:#e49a13;font-size:10px}</style>');
+document.head.insertAdjacentHTML('beforeend','<style>.btn:disabled{background:#c8ccd1;color:#777d85;cursor:not-allowed}</style>');
 document.body.insertAdjacentHTML('beforeend','<div id="doctor-mask" class="doctor-mask"><div class="doctor-card"><div class="row-between"><div class="doctor-title">Provider Doctor</div><span id="doctor-state" class="section-hint"></span><button class="back" onclick="closeDoctor()">×</button></div><div id="doctor-summary" class="doctor-summary"></div><div class="doctor-progress"><i id="doctor-progress"></i></div><div id="doctor-checks"></div><div id="doctor-advice" class="doctor-advice"></div><p style="margin:16px 0 0"><button id="doctor-close" class="btn light" onclick="closeDoctor()">关闭</button></p></div></div>');
 const modelList=$('#model-list');const modelHead=modelList?.previousElementSibling,modelHelp=modelHead?.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;if(modelHead){modelHead.remove()}if(modelTitle){modelTitle.querySelector('button')?.remove()}if(modelList){modelList.classList.add('model-list-box');modelList.setAttribute('aria-readonly','true')}if(modelHelp)modelHelp.textContent='模型名称仅能通过“从上游获取”填入。';
 function setModelListVisibility(official){const list=$('#model-list');if(!list)return;const modelHelp=list.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;[list,modelHelp,modelTitle].forEach(node=>{if(node)node.style.display=official?'none':''})}
@@ -942,6 +958,8 @@ async function fetchModelsFromUpstream(){try{if($('#p-auth').value!=='apikey')th
 function installFetchModelsButton(){const list=$('#model-list');if(!list||$('#fetch-models-btn'))return;const modelHelp=list.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;if(!modelTitle)return;const button=document.createElement('button');button.id='fetch-models-btn';button.type='button';button.className='btn light small';button.textContent='⇩ 从上游获取';button.onclick=fetchModelsFromUpstream;modelTitle.append(button)}
 installFetchModelsButton()
 function newProvider(){state.current={id:'',name:'',base_url:'',model:'',wire_api:'responses',auth_mode:'chatgpt',models:[],goals_enabled:false,goals_configured:false,test_model:''};openDetail()}
+function setManagedRestartAvailable(available){const button=$('#managed-restart-btn');if(!button)return;button.disabled=!available;button.title=available?'重启面板托管的 Codex 服务并读取当前配置':'请先成功切换供应商'}
+async function restartManagedCodex(){const button=$('#managed-restart-btn');if(!button||button.disabled)return;try{button.disabled=true;button.textContent='正在重启…';const result=await api('/api/runtime/restart',{method:'POST'});note(result.detail,'list-notice');}catch(e){note(e.message,'list-notice');button.disabled=false;}finally{button.textContent='重启 Codex';button.title='请先成功切换供应商'}}
 const migrationTarget=$('#migration-target');if(migrationTarget){const migrationPanel=migrationTarget.parentElement;const migrationSection=migrationPanel?.parentElement;migrationPanel?.remove();if(migrationSection)migrationSection.style.gridTemplateColumns='1fr'}
 const commonConfig=$('#common-config');if(commonConfig){const commonPanel=commonConfig.parentElement;const commonSection=commonPanel?.parentElement;commonPanel?.remove();if(commonSection)commonSection.style.gridTemplateColumns='1fr'}
 const routeModel=$('#route-model');if(routeModel){const routeRow=routeModel.parentElement;const routeHelp=routeRow?.previousElementSibling;const routeTitle=routeHelp?.previousElementSibling;routeRow?.remove();routeHelp?.remove();routeTitle?.remove()}
@@ -981,7 +999,7 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
     return (
         NEW_HTML.replace(old_panel, official_panel)
         .replace('<button class="btn outline" onclick="loadCommon()">通用配置</button>', "")
-        .replace('<button class="btn" onclick="restartHint()">重启 Codex</button>', "")
+        .replace('<button class="btn" onclick="restartHint()">重启 Codex</button>', '<button id="managed-restart-btn" class="btn" onclick="restartManagedCodex()" disabled title="请先成功切换供应商">重启 Codex</button>')
         .replace('<button class="btn light" onclick="loadCommon()">提取通用配置</button>', "")
         .replace('<button class="btn light" onclick="newProvider(\'apikey\')">＋ 添加供应商</button><button class="btn light" onclick="newProvider(\'chatgpt\')">＋ 添加官方登录供应商</button>', '<button class="btn light" onclick="newProvider()">＋ 添加供应商</button>')
         .replace('每行一个模型；上下文窗口和图片处理方式将一并保存到供应商档案。', '每行一个模型名称；可手动输入，或从上游获取后自动填入。')
@@ -1027,7 +1045,7 @@ function addModel(m={name:'',context_window:'1M',image_mode:'send-as-is'}){const
 function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),wire_api:state.protocol,auth_mode:$('#p-auth').value,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-row')].map(r=>({name:r.children[0].value.trim(),context_window:r.children[1].value.trim(),image_mode:r.children[2].value})).filter(m=>m.name)}}
 function updatePreview(){if(!state.current)return;const p=gather();const lines=[`model = "${p.model||'gpt-5.6-terra'}"`,`model_provider = "${p.id||'provider-id'}"`,`model_reasoning_effort = "medium"`];if(p.auth_mode==='apikey'){lines.push('',`[model_providers.${p.id||'provider-id'}]`,`name = "${p.name||'供应商名称'}"`,`base_url = "${p.base_url||'https://api.example.com'}"`,`wire_api = "${p.wire_api}"`,`experimental_bearer_token = "***"`)}else lines.push('','# 官方登录模式：使用已捕获的 auth.json 快照');if(p.models.length)lines.push('',`model_catalog_json = "model-catalogs/control-panel-${p.id||'provider-id'}.json"`);$('#config-preview').value=lines.join('\n');$('#auth-preview').value=p.auth_mode==='chatgpt'?'{\n  "auth_mode": "chatgpt",\n  "tokens": "已隐藏"\n}':'{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "***"\n}'}
 async function saveProvider(){try{const wasNew=!state.current?.id;const p=gather();if(!p.id||!p.name||!p.model||(p.auth_mode==='apikey'&&!p.base_url)){throw Error('请完整填写名称、模型、Base URL 与供应商标识。')}await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});state.current=p;note('供应商配置已保存。');await refreshAll();if(wasNew)closeDetail()}catch(e){note(e.message)}}
-async function activateCurrent(){try{await saveProvider();const p=gather();if(!p.id)return;const d=await api(`/api/providers/${encodeURIComponent(p.id)}/activate`,{method:'POST'});state.active=p.id;note(`已设为当前供应商，备份编号：${d.backup_id}`);await refreshAll()}catch(e){note(e.message)}}
+async function activateCurrent(){try{await saveProvider();const p=gather();if(!p.id)return;const d=await api(`/api/providers/${encodeURIComponent(p.id)}/activate`,{method:'POST'});state.active=p.id;setManagedRestartAvailable(true);note(`已设为当前供应商，备份编号：${d.backup_id}。现在可点击“重启 Codex”让面板托管服务读取新配置。`);await refreshAll()}catch(e){note(e.message)}}
 async function testCurrent(){try{const p=gather();const d=await api('/api/providers/diagnose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const failed=(d.checks||[]).filter(item=>item.status==='fail').map(item=>`${item.name}：${item.detail}`);const warnings=(d.checks||[]).filter(item=>item.status==='warning').map(item=>`${item.name}：${item.detail}`);note(d.ok?`诊断通过。${warnings.length?' '+warnings.join('；'):''}`:`诊断发现问题：${failed.join('；')}`)}catch(e){note(e.message)}}
 async function loadCommon(){try{const d=await api('/api/common-config');$('#common-config').value=d.contents}catch{}}
 async function extractCommon(){try{const d=await api('/api/common-config/extract',{method:'POST'});$('#common-config').value=d.contents;note('已提取当前通用配置。')}catch(e){note(e.message)}}
