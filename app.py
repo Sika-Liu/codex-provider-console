@@ -178,7 +178,7 @@ class Provider(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     base_url: str = Field(default="", pattern=r"^(|https?://.+)")
     wire_api: str = Field(default="responses", pattern=r"^(responses|chat)$")
-    model: str = Field(default="gpt-5.6-terra", min_length=1, max_length=120)
+    model: str = Field(default="", max_length=120)
     auth_mode: Literal["apikey", "chatgpt"] = "apikey"
     requires_openai_auth: bool = False
     bearer_token: str | None = Field(default=None, max_length=4096)
@@ -687,14 +687,15 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
             raise HTTPException(422, "Capture the current ChatGPT authentication before activating this profile")
         validate_auth_snapshot(snapshot)
     catalog_path = write_model_catalog(provider_id, profile)
+    selected_model = str(model_override or profile.get("model") or "").strip()
     generated = [
         f'model_provider = {toml_quote(provider_id)}',
-        f'model = {toml_quote(model_override or profile["model"])}',
-        "",
         f'[model_providers.{provider_id}]',
         f'name = {toml_quote(profile["name"])}',
         f'requires_openai_auth = {str(auth_mode == "chatgpt").lower()}',
     ]
+    if selected_model:
+        generated.insert(1, f'model = {toml_quote(selected_model)}')
     if auth_mode == "apikey":
         generated.insert(5, f'wire_api = {toml_quote(profile["wire_api"])}')
     if auth_mode == "apikey" and profile.get("base_url"):
@@ -702,7 +703,7 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
     if profile.get("bearer_token"):
         generated.append(f'experimental_bearer_token = {toml_quote(profile["bearer_token"])}')
     if catalog_path:
-        generated.insert(2, f'model_catalog_json = {toml_quote(catalog_path)}')
+        generated.insert(2 if selected_model else 1, f'model_catalog_json = {toml_quote(catalog_path)}')
     provider_config = profile.get("config_contents", "").strip()
     if provider_config:
         masked_token = 'experimental_bearer_token = "***"'
@@ -729,8 +730,8 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
                 os.chmod(target, 0o600)
         audit("provider_switch_failed", provider_id=provider_id, detail=str(exc))
         raise HTTPException(500, "Configuration write failed and the previous configuration was restored.") from exc
-    audit("provider_switched", provider_id=provider_id, backup_id=backup_id, model=model_override or profile["model"])
-    return {"active_provider": provider_id, "backup_id": backup_id, "check": check, "model": model_override or profile["model"], "auth_mode": auth_mode}
+    audit("provider_switched", provider_id=provider_id, backup_id=backup_id, model=selected_model or None)
+    return {"active_provider": provider_id, "backup_id": backup_id, "check": check, "model": selected_model or None, "auth_mode": auth_mode}
 
 
 @app.get("/api/status")
@@ -1009,6 +1010,8 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
         .replace('<input id="p-key" type="password" placeholder="保存后不再显示">', '<input id="p-key" type="text" placeholder="API Key">')
         .replace('placeholder="例如 fhl"', 'placeholder="例如 chatgpt"')
         .replace('<input id="p-model" value="gpt-5.6-terra" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()">', '<input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()">')
+        .replace('<div class="field"><label>名称</label><input id="p-name" placeholder="例如 chatgpt" oninput="updatePreview()"></div>', '<div class="field"><label>名称</label><input id="p-name" placeholder="例如 chatgpt_1" oninput="updatePreview()"><div class="field-help">系统会据此自动生成供应商标识，用于写入 Codex 配置；请使用英文、数字、`-` 或 `_`。</div></div>')
+        .replace('<div class="field"><label>配置模型</label><input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()"><div class="field-help">默认启动 Codex 时使用的模型名称。</div></div>', '<div class="field"><label>配置模型（可选）</label><input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()"><div class="field-help">留空时不写入默认模型，可在 Codex 中自行选择。</div></div>')
         .replace('<div class="field"><label>Codex 目标</label><select id="p-target"><option value="">不启用目标功能</option></select></div>', '<div class="field"><label>Codex 目标</label><label style="display:flex;align-items:center;gap:8px;border:1px solid #d2d6da;border-radius:7px;padding:10px 12px;font-weight:400"><input id="p-goals" type="checkbox" onchange="syncGoalsConfig()" style="width:auto">启用目标功能</label></div>')
          .replace("</body></html>", official_script + navigation_script + "</body></html>")
     )
@@ -1044,7 +1047,7 @@ function setProtocol(v){state.protocol=v;$('#responses-tab').classList.toggle('s
 function addModel(m={name:'',context_window:'1M',image_mode:'send-as-is'}){const row=document.createElement('div');row.className='model-row';row.innerHTML=`<input placeholder="例如 gpt-5.6-terra" value="${esc(m.name)}" oninput="updatePreview()"><input placeholder="1M" value="${esc(m.context_window||'')}" oninput="updatePreview()"><select onchange="updatePreview()"><option value="send-as-is">send-as-is</option><option value="omit">omit</option></select><button class="remove-model" title="删除模型" onclick="this.parentElement.remove();updatePreview()">×</button>`;row.querySelector('select').value=m.image_mode||'send-as-is';$('#model-list').append(row)}
 function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),wire_api:state.protocol,auth_mode:$('#p-auth').value,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-row')].map(r=>({name:r.children[0].value.trim(),context_window:r.children[1].value.trim(),image_mode:r.children[2].value})).filter(m=>m.name)}}
 function updatePreview(){if(!state.current)return;const p=gather();const lines=[`model = "${p.model||'gpt-5.6-terra'}"`,`model_provider = "${p.id||'provider-id'}"`,`model_reasoning_effort = "medium"`];if(p.auth_mode==='apikey'){lines.push('',`[model_providers.${p.id||'provider-id'}]`,`name = "${p.name||'供应商名称'}"`,`base_url = "${p.base_url||'https://api.example.com'}"`,`wire_api = "${p.wire_api}"`,`experimental_bearer_token = "***"`)}else lines.push('','# 官方登录模式：使用已捕获的 auth.json 快照');if(p.models.length)lines.push('',`model_catalog_json = "model-catalogs/control-panel-${p.id||'provider-id'}.json"`);$('#config-preview').value=lines.join('\n');$('#auth-preview').value=p.auth_mode==='chatgpt'?'{\n  "auth_mode": "chatgpt",\n  "tokens": "已隐藏"\n}':'{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "***"\n}'}
-async function saveProvider(){try{const wasNew=!state.current?.id;const p=gather();if(!p.id||!p.name||!p.model||(p.auth_mode==='apikey'&&!p.base_url)){throw Error('请完整填写名称、模型、Base URL 与供应商标识。')}await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});state.current=p;note('供应商配置已保存。');await refreshAll();if(wasNew)closeDetail()}catch(e){note(e.message)}}
+async function saveProvider(){try{const wasNew=!state.current?.id;const p=gather();if(!p.id||!p.name||(p.auth_mode==='apikey'&&!p.base_url)){throw Error('请填写供应商名称；纯 API 还需要 Base URL。供应商标识会由名称自动生成。')}await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});state.current=p;note('供应商配置已保存。');await refreshAll();if(wasNew)closeDetail()}catch(e){note(e.message)}}
 async function activateCurrent(){try{await saveProvider();const p=gather();if(!p.id)return;const d=await api(`/api/providers/${encodeURIComponent(p.id)}/activate`,{method:'POST'});state.active=p.id;setManagedRestartAvailable(true);note(`已设为当前供应商，备份编号：${d.backup_id}。现在可点击“重启 Codex”让面板托管服务读取新配置。`);await refreshAll()}catch(e){note(e.message)}}
 async function testCurrent(){try{const p=gather();const d=await api('/api/providers/diagnose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const failed=(d.checks||[]).filter(item=>item.status==='fail').map(item=>`${item.name}：${item.detail}`);const warnings=(d.checks||[]).filter(item=>item.status==='warning').map(item=>`${item.name}：${item.detail}`);note(d.ok?`诊断通过。${warnings.length?' '+warnings.join('；'):''}`:`诊断发现问题：${failed.join('；')}`)}catch(e){note(e.message)}}
 async function loadCommon(){try{const d=await api('/api/common-config');$('#common-config').value=d.contents}catch{}}
