@@ -628,7 +628,7 @@ def health_check() -> dict:
         except (OSError, json.JSONDecodeError):
             add("auth.json", "fail", "文件不可读或不是有效 JSON")
     else:
-        add("auth.json", "warning", "未找到；纯 API 供应商不一定需要该文件")
+        add("auth.json", "warning", "未找到；官方登录和纯 API 供应商都会使用该文件保存认证，保存并激活供应商后会自动创建")
 
     if not auth_configured() and AUTH_ENABLED:
         add("控制台认证", "fail", "认证已启用但管理员账号、密码或会话密钥未配置")
