@@ -15,6 +15,7 @@ Commands:
   status    Show container status
   logs      Follow console logs
   update    Pull the latest Git revision and rebuild the console
+  install-codex Install Codex CLI on this server and refresh the health status
   config    Print the active .env file path
   uninstall Remove the console, then optionally remove Codex CLI
   help      Show this command reference
@@ -30,6 +31,27 @@ case "${1:-}" in
   update)
     git pull --ff-only
     docker compose up -d --build --force-recreate
+    ;;
+  install-codex)
+    if ! command -v curl >/dev/null 2>&1; then
+      echo "curl is required to install Codex CLI. Install curl, then retry." >&2
+      exit 1
+    fi
+    echo "Installing Codex CLI with the official installer."
+    curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh
+    export PATH="$HOME/.local/bin:$PATH"
+    if ! command -v codex >/dev/null 2>&1; then
+      echo "Codex CLI installation did not complete successfully." >&2
+      exit 1
+    fi
+    version=$(codex --version | head -n 1)
+    if grep -q '^CODEX_CLI_VERSION=' "$PROJECT_DIR/.env"; then
+      sed -i "s|^CODEX_CLI_VERSION=.*|CODEX_CLI_VERSION=${version}|" "$PROJECT_DIR/.env"
+    else
+      printf 'CODEX_CLI_VERSION=%s\n' "$version" >> "$PROJECT_DIR/.env"
+    fi
+    docker compose up -d --force-recreate
+    echo "Codex CLI installed: ${version}"
     ;;
   config) printf '%s\n' "$PROJECT_DIR/.env" ;;
   uninstall)
