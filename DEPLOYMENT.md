@@ -109,10 +109,10 @@ the login in your own browser; Codex stores and refreshes the authentication in
 the mounted Codex directory. **刷新令牌（重新登录）** starts this flow again. The
 panel never returns `auth.json` or tokens to the browser.
 
-## Restart after switching providers
+## Apply configuration after switching providers
 
-After a provider switch succeeds, the top-right **重启 Codex** button becomes
-available. It restarts the Codex login/runtime service managed by the panel so
+After a provider switch succeeds, the top-right **应用配置** button becomes
+available. It resets the Codex login session managed by the panel so
 future Codex sessions launched by the panel read the new configuration, then
 disables itself again. It never stops Codex processes started manually in an SSH
 terminal, so active terminal tasks are not interrupted; exit and start those
