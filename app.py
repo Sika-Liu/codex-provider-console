@@ -609,7 +609,11 @@ def health_check() -> dict:
 
     add("Codex 数据目录", "pass" if CODEX_HOME.exists() else "fail", str(CODEX_HOME) if CODEX_HOME.exists() else f"目录不存在：{CODEX_HOME}")
     cli_installed = CODEX_CLI_VERSION not in {"", "not_installed", "unknown"}
-    add("Codex CLI", "pass" if cli_installed else "fail", CODEX_CLI_VERSION if cli_installed else "宿主机未检测到 Codex CLI；请先安装后重新运行 install.sh --force")
+    add(
+        "Codex CLI",
+        "pass" if cli_installed else "fail",
+        CODEX_CLI_VERSION if cli_installed else "宿主机未检测到 Codex CLI；在服务器执行 codex-panel install-codex 后，再点击“立即检查”。",
+    )
     add("目录写入权限", "pass" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "fail", "可写" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "控制台无法写入 Codex 数据目录")
 
     config = config_text()
@@ -617,7 +621,15 @@ def health_check() -> dict:
         add("config.toml", "pass" if config.strip() else "warning", "已找到配置文件" if config.strip() else "配置文件为空")
         provider_match = re.search(r"^\s*model_provider\s*=\s*['\"]([^'\"]+)['\"]", config, re.M)
         model_match = re.search(r"^\s*model\s*=\s*['\"]([^'\"]+)['\"]", config, re.M)
-        add("Codex 关键配置", "pass" if provider_match and model_match else "warning", f"供应商：{provider_match.group(1)}，模型：{model_match.group(1)}" if provider_match and model_match else "缺少 model_provider 或 model；激活供应商后会自动补齐")
+        if provider_match:
+            detail = f"供应商：{provider_match.group(1)}"
+            if model_match:
+                detail += f"，默认模型：{model_match.group(1)}"
+            else:
+                detail += "；未设置默认模型（可在 Codex 中自行选择）"
+            add("Codex 关键配置", "pass", detail)
+        else:
+            add("Codex 关键配置", "warning", "缺少 model_provider；保存并激活供应商后会自动补齐")
     else:
         add("config.toml", "warning", "尚未生成；保存并激活供应商后会创建")
 
@@ -897,16 +909,16 @@ def cancel_official_login() -> dict:
 
 @app.post("/api/runtime/restart")
 def restart_managed_codex_runtime() -> dict:
-    """Restart only the Codex process owned by this panel, never a user shell."""
+    """Reset only the panel-owned device-login session, never a user shell."""
     global DEVICE_LOGIN
     with DEVICE_LOGIN_LOCK:
         if DEVICE_LOGIN:
             DEVICE_LOGIN.cancel()
             DEVICE_LOGIN = None
-    audit("managed_codex_runtime_restarted")
+    audit("managed_codex_runtime_reset")
     return {
         "restarted": True,
-        "detail": "面板托管的 Codex 服务已重启；后续从面板发起的 Codex 会话会读取当前配置。",
+        "detail": "供应商配置已应用。控制台没有可安全重启的常驻 Codex 进程；之后从控制台发起的 Codex 会话会读取新配置，SSH 终端中手动运行的 Codex 不会被中断。",
     }
 
 
@@ -1002,7 +1014,7 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
     return (
         NEW_HTML.replace(old_panel, official_panel)
         .replace('<button class="btn outline" onclick="loadCommon()">通用配置</button>', "")
-        .replace('<button class="btn" onclick="restartHint()">重启 Codex</button>', '<button id="managed-restart-btn" class="btn" onclick="restartManagedCodex()" disabled title="请先成功切换供应商">重启 Codex</button>')
+        .replace('<button class="btn" onclick="restartHint()">重启 Codex</button>', '<button id="managed-restart-btn" class="btn" onclick="restartManagedCodex()" disabled title="请先成功切换供应商">应用配置</button>')
         .replace('<button class="btn light" onclick="loadCommon()">提取通用配置</button>', "")
         .replace('<button class="btn light" onclick="newProvider(\'apikey\')">＋ 添加供应商</button><button class="btn light" onclick="newProvider(\'chatgpt\')">＋ 添加官方登录供应商</button>', '<button class="btn light" onclick="newProvider()">＋ 添加供应商</button>')
         .replace('每行一个模型；上下文窗口和图片处理方式将一并保存到供应商档案。', '每行一个模型名称；可手动输入，或从上游获取后自动填入。')
@@ -1053,6 +1065,8 @@ function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLower
 function updatePreview(){if(!state.current)return;const p=gather();const lines=[`model = "${p.model||'gpt-5.6-terra'}"`,`model_provider = "${p.id||'provider-id'}"`,`model_reasoning_effort = "medium"`];if(p.auth_mode==='apikey'){lines.push('',`[model_providers.${p.id||'provider-id'}]`,`name = "${p.name||'供应商名称'}"`,`base_url = "${p.base_url||'https://api.example.com'}"`,`wire_api = "${p.wire_api}"`,`experimental_bearer_token = "***"`)}else lines.push('','# 官方登录模式：使用已捕获的 auth.json 快照');if(p.models.length)lines.push('',`model_catalog_json = "model-catalogs/control-panel-${p.id||'provider-id'}.json"`);$('#config-preview').value=lines.join('\n');$('#auth-preview').value=p.auth_mode==='chatgpt'?'{\n  "auth_mode": "chatgpt",\n  "tokens": "已隐藏"\n}':'{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "***"\n}'}
 async function saveProvider(){try{const wasNew=!state.current?.id;const p=gather();if(!p.id||!p.name||(p.auth_mode==='apikey'&&!p.base_url)){throw Error('请填写供应商名称；纯 API 还需要 Base URL。供应商标识会由名称自动生成。')}await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});state.current=p;note('供应商配置已保存。');await refreshAll();if(wasNew)closeDetail()}catch(e){note(e.message)}}
 async function activateCurrent(){try{await saveProvider();const p=gather();if(!p.id)return;const d=await api(`/api/providers/${encodeURIComponent(p.id)}/activate`,{method:'POST'});state.active=p.id;setManagedRestartAvailable(true);note(`已设为当前供应商，备份编号：${d.backup_id}。现在可点击“重启 Codex”让面板托管服务读取新配置。`);await refreshAll()}catch(e){note(e.message)}}
+function setManagedRestartAvailable(available){const button=$('#managed-restart-btn');if(!button)return;button.disabled=!available;button.title=available?'确认后续控制台会话读取当前供应商配置':'请先成功切换供应商'}
+async function restartManagedCodex(){const button=$('#managed-restart-btn');if(!button||button.disabled)return;try{button.disabled=true;button.textContent='正在应用…';const result=await api('/api/runtime/restart',{method:'POST'});note(result.detail,'list-notice');}catch(e){note(e.message,'list-notice');button.disabled=false;}finally{button.textContent='应用配置';button.title='请先成功切换供应商'}}
 async function testCurrent(){try{const p=gather();const d=await api('/api/providers/diagnose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const failed=(d.checks||[]).filter(item=>item.status==='fail').map(item=>`${item.name}：${item.detail}`);const warnings=(d.checks||[]).filter(item=>item.status==='warning').map(item=>`${item.name}：${item.detail}`);note(d.ok?`诊断通过。${warnings.length?' '+warnings.join('；'):''}`:`诊断发现问题：${failed.join('；')}`)}catch(e){note(e.message)}}
 async function loadCommon(){try{const d=await api('/api/common-config');$('#common-config').value=d.contents}catch{}}
 async function extractCommon(){try{const d=await api('/api/common-config/extract',{method:'POST'});$('#common-config').value=d.contents;note('已提取当前通用配置。')}catch(e){note(e.message)}}
