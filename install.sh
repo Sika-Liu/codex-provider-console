@@ -30,8 +30,8 @@ Options:
   --force               Replace matching settings in an existing .env file
   -h, --help            Show this help
 
-The default binds the panel to localhost. Use an SSH tunnel or an authenticated
-HTTPS reverse proxy instead of exposing the panel directly to the internet.
+The default binds the panel to 0.0.0.0 for direct public-IP access. Protect the
+panel with its administrator login, cloud firewall rules, or an HTTPS reverse proxy.
 EOF
 }
 
