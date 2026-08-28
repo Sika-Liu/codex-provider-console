@@ -162,8 +162,9 @@ its required shell profile and CLI files.
 
 The health page can also create a panel-managed Ed25519 deployment key when
 one is missing. It authorizes only that public key for the deployment user and
-downloads the private key without displaying it in the page. Select that
-downloaded private key in Codex App's SSH connection settings. Existing keys
+downloads the private key without displaying it in the page. An authenticated
+panel user can download the private key again when needed, so keep it private.
+Select that private key in Codex App's SSH connection settings. Existing keys
 are never overwritten.
 
 ## Data and portability
