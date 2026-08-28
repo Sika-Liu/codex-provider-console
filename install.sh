@@ -235,7 +235,8 @@ detect_ssh_server() {
     return
   fi
 
-  configured_port=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}')
+  # Non-root users may not be allowed to read every sshd runtime setting.
+  configured_port=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}' || true)
   SSH_SERVER_PORT="${configured_port:-22}"
 
   if command -v ss >/dev/null 2>&1; then
