@@ -850,7 +850,7 @@ def get_health() -> dict:
 @app.post("/api/health/install-codex")
 def install_codex_from_health() -> dict:
     if not HOST_CODEX_BIN.parent.parent.exists():
-        raise HTTPException(409, "部署未挂载当前用户的 .local 目录；请更新面板后重试")
+        raise HTTPException(409, "部署未挂载当前用户的主目录；请更新面板后重试")
     try:
         result = subprocess.run(
             ["/bin/sh", "-c", "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh"],

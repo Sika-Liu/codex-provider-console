@@ -7,7 +7,7 @@ services:
       - "${PANEL_BIND:-127.0.0.1}:${PANEL_PORT:-8787}:8787"
     volumes:
       - "${CODEX_HOME_HOST:-./codex-data}:/codex"
-      - "${CODEX_LOCAL_HOME_HOST:-./codex-local}:/user-home/.local"
+      - "${CODEX_USER_HOME_HOST:-./codex-user-home}:/user-home"
     environment:
       CODEX_HOME: /codex
       PANEL_AUTH_ENABLED: "${PANEL_AUTH_ENABLED:-true}"

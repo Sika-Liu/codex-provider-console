@@ -156,7 +156,9 @@ checks the mounted Codex directory, write permissions, Codex CLI, the saved SSH
 login user and deployment user match, configuration and auth files, panel
 authentication, the active provider, a real upstream request, and available disk
 space. SSH private keys are never uploaded or read. When the CLI is missing,
-the health page can install it for the deployment user.
+the health page can install it for the deployment user. The panel temporarily
+uses that user's mounted home directory so the official installer can update
+its required shell profile and CLI files.
 
 ## Data and portability
 
