@@ -66,11 +66,9 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 If neither `curl` nor `wget` is present, install one download tool first; a
 network installer cannot run before a downloader is available.
 
-The installer creates `.env` from `.env.example` and deploys to one existing
-non-root operational user. When started as a non-root user, it uses the current
-account; when started as root, it asks for an existing account. The project,
-Codex CLI, `CODEX_HOME_HOST`, and container UID are aligned to that user. It
-does not overwrite
+Run the installer as the non-root operational user that Codex Desktop will use
+for SSH. It exits when run directly as root. The project, Codex CLI,
+`CODEX_HOME_HOST`, and container UID are aligned to the current user. It does not overwrite
 an existing Codex directory value unless `--force` is provided. The port and
 bind address selected interactively are always applied.
 
@@ -103,11 +101,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-cons
 ```
 
 `curl` must already be available on the server. The CLI is installed for the
-selected non-root operational user; specify it non-interactively when needed:
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --deploy-user ubuntu --install-codex
-```
+current non-root operational user.
 
 To change an existing root-owned deployment to a non-root operational user,
 uninstall the console and deploy it again with this flow. The new project is

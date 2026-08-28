@@ -17,7 +17,6 @@ PANEL_PASSWORD=""
 PANEL_SESSION_SECRET=""
 CODEX_CLI_VERSION=""
 DEPLOY_USER="${SUDO_USER:-$(id -un)}"
-DEPLOY_USER_SET=false
 CODEX_CLI_USER="$DEPLOY_USER"
 CODEX_HOME_SET=false
 DOCKER_GROUP_NOTE=""
@@ -29,10 +28,7 @@ usage() {
 Usage: bash install.sh [options]
 
 Options:
-  --deploy-user <user>  Existing non-root operational user for the panel and CLI
   --codex-home <path>   Host directory mounted as /codex (default: ~/.codex)
-  --codex-cli-user <user>
-                        Deprecated alias for --deploy-user
   --bind <address>      Advanced override (default: 0.0.0.0)
   --port <port>         Host port (default: 8787)
   --install-docker      Install Docker when it is missing (common Linux distros)
@@ -51,7 +47,7 @@ require_value() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --deploy-user|--codex-cli-user) require_value "$1" "${2:-}"; DEPLOY_USER="$2"; DEPLOY_USER_SET=true; shift ;;
+    --deploy-user|--codex-cli-user) require_value "$1" "${2:-}"; DEPLOY_USER="$2"; shift ;;
     --codex-home) require_value "$1" "${2:-}"; CODEX_HOME_HOST="$2"; CODEX_HOME_SET=true; shift ;;
     --bind) require_value "$1" "${2:-}"; PANEL_BIND="$2"; BIND_SET=true; shift ;;
     --port) require_value "$1" "${2:-}"; PANEL_PORT="$2"; PORT_SET=true; shift ;;
@@ -65,20 +61,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$(uname -s)" == "Linux" ]] || { echo "This installer supports Linux servers only." >&2; exit 1; }
-if [[ "$(id -u)" -eq 0 && "$DEPLOY_USER_SET" == false && "${SUDO_USER:-}" == "" ]]; then
-  if [[ -t 0 ]]; then
-    read -r -p "Non-root operational user for this deployment: " DEPLOY_USER
-  else
-    echo "When running as root, pass --deploy-user <existing-non-root-user>." >&2
-    exit 1
-  fi
+if [[ "$(id -u)" -eq 0 && -z "${SUDO_USER:-}" ]]; then
+  cat >&2 <<'EOF'
+Please deploy the console from a non-root user account.
+Sign in with the user that Codex Desktop will use for SSH, then run bash install.sh.
+The installer will request sudo only when needed.
+EOF
+  exit 1
 fi
-id "$DEPLOY_USER" >/dev/null 2>&1 || { echo "Deployment user does not exist: $DEPLOY_USER" >&2; exit 1; }
-[[ "$DEPLOY_USER" != "root" ]] || { echo "Choose an existing non-root operational user with --deploy-user." >&2; exit 1; }
 if [[ "$(id -u)" -ne 0 && "$DEPLOY_USER" != "$(id -un)" ]]; then
   echo "A non-root deployment can only use the current user: $(id -un)." >&2
   exit 1
 fi
+id "$DEPLOY_USER" >/dev/null 2>&1 || { echo "Deployment user does not exist: $DEPLOY_USER" >&2; exit 1; }
+[[ "$DEPLOY_USER" != "root" ]] || { echo "The deployment user must not be root." >&2; exit 1; }
 CODEX_CLI_USER="$DEPLOY_USER"
 CODEX_CLI_HOME=$(getent passwd "$DEPLOY_USER" | cut -d: -f6)
 [[ -n "$CODEX_CLI_HOME" ]] || { echo "Could not determine home directory for $DEPLOY_USER." >&2; exit 1; }
