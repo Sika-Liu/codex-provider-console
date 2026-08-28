@@ -119,8 +119,12 @@ port_in_use() {
 }
 
 if port_in_use; then
-  echo "Port ${PANEL_PORT} is already in use. Choose another port with --port." >&2
-  exit 1
+  if [[ -f "$ENV_FILE" && "$FORCE" == true ]]; then
+    echo "Port ${PANEL_PORT} is used by the existing deployment; it will be recreated."
+  else
+    echo "Port ${PANEL_PORT} is already in use. Choose another port with --port." >&2
+    exit 1
+  fi
 fi
 
 install_docker() {
