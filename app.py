@@ -22,6 +22,8 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
 CODEX_CLI_USER = os.environ.get("CODEX_CLI_USER", "unknown")
 DEPLOY_USER = os.environ.get("DEPLOY_USER", "unknown")
+SSH_SERVER_STATUS = os.environ.get("SSH_SERVER_STATUS", "unknown")
+SSH_SERVER_PORT = os.environ.get("SSH_SERVER_PORT", "22")
 CONFIG_PATH = CODEX_HOME / "config.toml"
 PROFILE_PATH = CODEX_HOME / "control-panel-profiles.json"
 SETTINGS_PATH = CODEX_HOME / "control-panel-settings.json"
@@ -616,6 +618,15 @@ def health_check() -> dict:
         "pass" if cli_installed else "fail",
         (f"{CODEX_CLI_VERSION}；部署运维用户：{DEPLOY_USER}" if cli_installed else "部署运维用户未检测到 Codex CLI；在服务器执行 codex-panel install-codex 后，再点击“立即检查”。"),
     )
+    ssh_details = {
+        "listening": ("pass", f"sshd 正在监听端口 {SSH_SERVER_PORT}"),
+        "running": ("pass", "sshd 服务正在运行；未能确认监听端口"),
+        "not_listening": ("warning", f"已安装 sshd，但未监听端口 {SSH_SERVER_PORT}"),
+        "not_running": ("warning", "已安装 sshd，但服务未运行"),
+        "not_installed": ("warning", "未安装 SSH 服务；仅使用面板不受影响，但 Codex Desktop 无法通过 SSH 连接此服务器"),
+    }
+    ssh_status, ssh_detail = ssh_details.get(SSH_SERVER_STATUS, ("warning", "无法确认 SSH 服务状态；部署或更新面板后会重新检测"))
+    add("SSH 服务", ssh_status, ssh_detail)
     add("目录写入权限", "pass" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "fail", "可写" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "控制台无法写入 Codex 数据目录")
 
     config = config_text()
