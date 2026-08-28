@@ -38,6 +38,8 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 
 登录控制台后打开左侧“健康检查”，可检查 Codex 数据目录、写入权限、Codex CLI、SSH 登录用户与部署用户是否一致、`config.toml`、`auth.json`、控制台认证、当前供应商、供应商真实请求和磁盘空间。SSH 私钥不会上传或读取；请在“SSH 连接”中保存 Codex Desktop 使用的登录用户名。若未安装 Codex CLI，可直接在健康检查页选择安装；安装器会在部署用户的主目录中写入 CLI 和必要的 shell 配置。
 
+健康检查还会验证面板管理的 Codex Desktop 部署密钥。没有密钥时，可在面板生成 Ed25519 密钥、将公钥授权到部署用户的 `authorized_keys`，并下载私钥。在 Codex App 的 SSH 连接中选择下载的私钥文件；私钥不会显示在页面中，已有密钥不会被覆盖。
+
 缺少 Docker 时，先安装 Docker，或明确允许脚本自动安装：
 
 ```bash

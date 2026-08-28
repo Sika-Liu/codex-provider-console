@@ -160,6 +160,12 @@ the health page can install it for the deployment user. The panel temporarily
 uses that user's mounted home directory so the official installer can update
 its required shell profile and CLI files.
 
+The health page can also create a panel-managed Ed25519 deployment key when
+one is missing. It authorizes only that public key for the deployment user and
+downloads the private key without displaying it in the page. Select that
+downloaded private key in Codex App's SSH connection settings. Existing keys
+are never overwritten.
+
 ## Data and portability
 
 All state is stored under `CODEX_HOME_HOST`, including provider profiles,
