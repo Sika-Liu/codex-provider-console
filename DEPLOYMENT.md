@@ -152,11 +152,11 @@ page only when needed; the panel can read and replace Codex credentials, so
 public deployments must retain login authentication.
 
 After signing in, use the left-side **健康检查** page before running Codex. It
-checks the mounted Codex directory, write permissions, Codex CLI, the host SSH
-service and listening port, configuration and auth files, panel authentication,
-the active provider, a real upstream request, and available disk space. SSH
-checks do not read private keys, passwords, or attempt a login; the host result
-is refreshed when the panel is deployed or updated.
+checks the mounted Codex directory, write permissions, Codex CLI, the saved SSH
+login user and deployment user match, configuration and auth files, panel
+authentication, the active provider, a real upstream request, and available disk
+space. SSH private keys are never uploaded or read. When the CLI is missing,
+the health page can install it for the deployment user.
 
 ## Data and portability
 
