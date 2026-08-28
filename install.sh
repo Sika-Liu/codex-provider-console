@@ -107,9 +107,15 @@ port_in_use() {
   fi
 }
 
+existing_deployment_uses_port() {
+  [[ -f "$ENV_FILE" ]] || return 1
+  command -v docker >/dev/null 2>&1 || return 1
+  docker compose -f "$PROJECT_DIR/compose.yml" ps -q 2>/dev/null | grep -q .
+}
+
 if port_in_use; then
-  if [[ -f "$ENV_FILE" && "$FORCE" == true ]]; then
-    echo "Port ${PANEL_PORT} is used by the existing deployment; it will be recreated."
+  if existing_deployment_uses_port; then
+    echo "Port ${PANEL_PORT} is used by this deployment; it will be recreated."
   else
     echo "Port ${PANEL_PORT} is already in use. Choose another port with --port." >&2
     exit 1
