@@ -227,10 +227,12 @@ if [[ "$(id -u)" -eq 0 ]] && getent group docker >/dev/null 2>&1 && ! id -nG "$D
 fi
 
 codex_version_for_user() {
+  local codex_bin="$CODEX_CLI_HOME/.local/bin/codex"
+  [[ -x "$codex_bin" ]] || return 0
   if [[ "$(id -un)" == "$CODEX_CLI_USER" ]]; then
-    PATH="$CODEX_CLI_HOME/.local/bin:$PATH" codex --version 2>/dev/null | head -n 1 || true
+    "$codex_bin" --version 2>/dev/null | head -n 1 || true
   else
-    runuser -l "$CODEX_CLI_USER" -c 'PATH="$HOME/.local/bin:$PATH" codex --version 2>/dev/null | head -n 1' || true
+    runuser -u "$CODEX_CLI_USER" -- "$codex_bin" --version 2>/dev/null | head -n 1 || true
   fi
 }
 
