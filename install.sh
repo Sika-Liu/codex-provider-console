@@ -228,12 +228,18 @@ fi
 
 codex_version_for_user() {
   local codex_bin="$CODEX_CLI_HOME/.local/bin/codex"
-  [[ -x "$codex_bin" ]] || return 0
-  if [[ "$(id -un)" == "$CODEX_CLI_USER" ]]; then
-    "$codex_bin" --version 2>/dev/null | head -n 1 || true
-  else
-    runuser -u "$CODEX_CLI_USER" -- "$codex_bin" --version 2>/dev/null | head -n 1 || true
+  local version=""
+  if [[ -x "$codex_bin" ]]; then
+    if [[ "$(id -un)" == "$CODEX_CLI_USER" ]]; then
+      version=$("$codex_bin" --version 2>/dev/null | head -n 1 || true)
+    else
+      version=$(runuser -u "$CODEX_CLI_USER" -- "$codex_bin" --version 2>/dev/null | head -n 1 || true)
+    fi
   fi
+  if [[ -z "$version" ]] && command -v docker >/dev/null 2>&1 && docker compose -f "$PROJECT_DIR/compose.yml" ps -q 2>/dev/null | grep -q .; then
+    version=$(docker compose -f "$PROJECT_DIR/compose.yml" exec -T codex-provider-console /user-home/.local/bin/codex --version 2>/dev/null | head -n 1 || true)
+  fi
+  printf '%s\n' "$version"
 }
 
 if [[ -z "$(codex_version_for_user)" ]]; then
