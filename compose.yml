@@ -16,6 +16,7 @@ services:
       PANEL_COOKIE_SECURE: "${PANEL_COOKIE_SECURE:-false}"
       CODEX_CLI_VERSION: "${CODEX_CLI_VERSION:-not_installed}"
       CODEX_CLI_USER: "${CODEX_CLI_USER:-unknown}"
+      DEPLOY_USER: "${DEPLOY_USER:-unknown}"
     security_opt:
       - no-new-privileges:true
     cap_drop:

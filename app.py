@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
 CODEX_CLI_USER = os.environ.get("CODEX_CLI_USER", "unknown")
+DEPLOY_USER = os.environ.get("DEPLOY_USER", "unknown")
 CONFIG_PATH = CODEX_HOME / "config.toml"
 PROFILE_PATH = CODEX_HOME / "control-panel-profiles.json"
 SETTINGS_PATH = CODEX_HOME / "control-panel-settings.json"
@@ -613,7 +614,7 @@ def health_check() -> dict:
     add(
         "Codex CLI",
         "pass" if cli_installed else "fail",
-        (f"{CODEX_CLI_VERSION}；部署目标 SSH 用户：{CODEX_CLI_USER}" if cli_installed else "部署目标 SSH 用户未检测到 Codex CLI；在服务器执行 codex-panel install-codex 后，再点击“立即检查”。"),
+        (f"{CODEX_CLI_VERSION}；部署运维用户：{DEPLOY_USER}" if cli_installed else "部署运维用户未检测到 Codex CLI；在服务器执行 codex-panel install-codex 后，再点击“立即检查”。"),
     )
     add("目录写入权限", "pass" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "fail", "可写" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "控制台无法写入 Codex 数据目录")
 
