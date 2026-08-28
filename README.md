@@ -23,7 +23,7 @@ sudo dnf upgrade -y    # CentOS 7 可使用 yum update -y
 bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
 ```
 
-该命令会克隆项目到当前用户的 `~/codex-provider-console`，然后自动运行安装脚本。安装脚本会检查 Docker、创建 `.env`，并询问 Codex CLI 对应的 SSH 登录用户；新部署会使用该用户的 `~/.codex` 目录并启动服务。默认监听 `0.0.0.0:8787`，便于直接通过服务器公网 IP 访问。
+该命令会克隆项目到运维用户的 `~/codex-provider-console`，然后自动运行安装脚本。直接以非 root 用户执行时会自动使用当前用户；以 root 执行时会要求选择服务器中已有的非 root 运维用户。项目目录、Codex CLI、`~/.codex` 目录和面板容器运行身份会统一使用该账户。默认监听 `0.0.0.0:8787`，便于直接通过服务器公网 IP 访问。
 
 如果服务器没有 `curl` 但有 `wget`，执行：
 
@@ -52,18 +52,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-cons
 bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-codex
 ```
 
-该选项要求服务器已安装 `curl`。官方安装脚本会将 Codex CLI 安装到部署时选择的 SSH 登录用户，而非固定安装到 `root`。也可明确指定：
+该选项要求服务器已安装 `curl`。官方安装脚本会将 Codex CLI 安装到部署时选择的非 root 运维用户，而非固定安装到 `root`。用户名称取决于服务器实际账户，例如 `ubuntu`、`debian`、`ec2-user` 或自建账户。也可明确指定：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-codex --codex-cli-user ubuntu
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --deploy-user ubuntu --install-codex
 ```
 
-已由 `root` 部署、但 Codex Desktop 通过 `ubuntu` 登录的服务器，可在项目目录执行以下命令将 CLI 与面板配置目录对齐到 `ubuntu`。这不会迁移既有登录令牌，完成后请在控制台重新进行官方登录：
-
-```bash
-cd ~/codex-provider-console
-bash install.sh --force --install-codex --codex-cli-user ubuntu --codex-home /home/ubuntu/.codex
-```
+已有 root 部署如需切换为非 root 运维用户，请先卸载面板，再按本节重新部署；新项目会直接创建在目标用户的家目录中。登录令牌不会迁移，重新部署后请在控制台重新进行官方登录。
 
 ### 在控制台完成官方登录
 

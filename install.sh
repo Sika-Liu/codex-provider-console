@@ -16,18 +16,21 @@ PANEL_USERNAME="admin"
 PANEL_PASSWORD=""
 PANEL_SESSION_SECRET=""
 CODEX_CLI_VERSION=""
-CODEX_CLI_USER="${SUDO_USER:-$(id -un)}"
+DEPLOY_USER="${SUDO_USER:-$(id -un)}"
+DEPLOY_USER_SET=false
+CODEX_CLI_USER="$DEPLOY_USER"
 CODEX_HOME_SET=false
-CODEX_CLI_USER_SET=false
+DOCKER_GROUP_NOTE=""
 
 usage() {
   cat <<'EOF'
 Usage: bash install.sh [options]
 
 Options:
+  --deploy-user <user>  Existing non-root operational user for the panel and CLI
   --codex-home <path>   Host directory mounted as /codex (default: ~/.codex)
   --codex-cli-user <user>
-                        SSH login user that should run Codex CLI (default: current user)
+                        Deprecated alias for --deploy-user
   --bind <address>      Advanced override (default: 0.0.0.0)
   --port <port>         Host port (default: 8787)
   --install-docker      Install Docker when it is missing (common Linux distros)
@@ -46,8 +49,8 @@ require_value() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --deploy-user|--codex-cli-user) require_value "$1" "${2:-}"; DEPLOY_USER="$2"; DEPLOY_USER_SET=true; shift ;;
     --codex-home) require_value "$1" "${2:-}"; CODEX_HOME_HOST="$2"; CODEX_HOME_SET=true; shift ;;
-    --codex-cli-user) require_value "$1" "${2:-}"; CODEX_CLI_USER="$2"; CODEX_CLI_USER_SET=true; shift ;;
     --bind) require_value "$1" "${2:-}"; PANEL_BIND="$2"; BIND_SET=true; shift ;;
     --port) require_value "$1" "${2:-}"; PANEL_PORT="$2"; PORT_SET=true; shift ;;
     --install-docker) INSTALL_DOCKER=true ;;
@@ -60,49 +63,37 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$(uname -s)" == "Linux" ]] || { echo "This installer supports Linux servers only." >&2; exit 1; }
-id "$CODEX_CLI_USER" >/dev/null 2>&1 || { echo "Codex CLI user does not exist: $CODEX_CLI_USER" >&2; exit 1; }
-if [[ "$(id -u)" -ne 0 && "$CODEX_CLI_USER" != "$(id -un)" ]]; then
-  echo "Run this installer as root to install Codex CLI for another user." >&2
+if [[ "$(id -u)" -eq 0 && "$DEPLOY_USER_SET" == false && "${SUDO_USER:-}" == "" ]]; then
+  if [[ -t 0 ]]; then
+    read -r -p "Non-root operational user for this deployment: " DEPLOY_USER
+  else
+    echo "When running as root, pass --deploy-user <existing-non-root-user>." >&2
+    exit 1
+  fi
+fi
+id "$DEPLOY_USER" >/dev/null 2>&1 || { echo "Deployment user does not exist: $DEPLOY_USER" >&2; exit 1; }
+[[ "$DEPLOY_USER" != "root" ]] || { echo "Choose an existing non-root operational user with --deploy-user." >&2; exit 1; }
+if [[ "$(id -u)" -ne 0 && "$DEPLOY_USER" != "$(id -un)" ]]; then
+  echo "A non-root deployment can only use the current user: $(id -un)." >&2
   exit 1
 fi
-CODEX_CLI_HOME=$(getent passwd "$CODEX_CLI_USER" | cut -d: -f6)
-[[ -n "$CODEX_CLI_HOME" ]] || { echo "Could not determine home directory for $CODEX_CLI_USER." >&2; exit 1; }
+CODEX_CLI_USER="$DEPLOY_USER"
+CODEX_CLI_HOME=$(getent passwd "$DEPLOY_USER" | cut -d: -f6)
+[[ -n "$CODEX_CLI_HOME" ]] || { echo "Could not determine home directory for $DEPLOY_USER." >&2; exit 1; }
 if [[ "$CODEX_HOME_SET" == false && ! -f "$ENV_FILE" ]]; then
   CODEX_HOME_HOST="$CODEX_CLI_HOME/.codex"
 fi
 if [[ -f "$ENV_FILE" ]]; then
   existing_port=$(sed -n 's/^PANEL_PORT=//p' "$ENV_FILE" | tail -n 1)
   existing_bind=$(sed -n 's/^PANEL_BIND=//p' "$ENV_FILE" | tail -n 1)
-  existing_cli_user=$(sed -n 's/^CODEX_CLI_USER=//p' "$ENV_FILE" | tail -n 1)
   [[ "$PORT_SET" == true || -z "$existing_port" ]] || PANEL_PORT="$existing_port"
   [[ "$BIND_SET" == true || -z "$existing_bind" ]] || PANEL_BIND="$existing_bind"
-  if [[ "$CODEX_CLI_USER_SET" == false && -n "$existing_cli_user" ]] && id "$existing_cli_user" >/dev/null 2>&1; then
-    CODEX_CLI_USER="$existing_cli_user"
-    CODEX_CLI_HOME=$(getent passwd "$CODEX_CLI_USER" | cut -d: -f6)
-  fi
 fi
 
 if [[ -t 0 && "$PORT_SET" == false ]]; then
   read -r -p "Panel port [${PANEL_PORT}]: " requested_port
   PANEL_PORT="${requested_port:-$PANEL_PORT}"
   PORT_SET=true
-fi
-
-if [[ -t 0 && "$CODEX_CLI_USER_SET" == false ]]; then
-  read -r -p "SSH login user for Codex CLI [${CODEX_CLI_USER}]: " requested_cli_user
-  if [[ -n "$requested_cli_user" ]]; then
-    id "$requested_cli_user" >/dev/null 2>&1 || { echo "Codex CLI user does not exist: $requested_cli_user" >&2; exit 1; }
-    if [[ "$(id -u)" -ne 0 && "$requested_cli_user" != "$(id -un)" ]]; then
-      echo "Run this installer as root to install Codex CLI for another user." >&2
-      exit 1
-    fi
-    CODEX_CLI_USER="$requested_cli_user"
-    CODEX_CLI_HOME=$(getent passwd "$CODEX_CLI_USER" | cut -d: -f6)
-    [[ -n "$CODEX_CLI_HOME" ]] || { echo "Could not determine home directory for $CODEX_CLI_USER." >&2; exit 1; }
-    if [[ "$CODEX_HOME_SET" == false && ! -f "$ENV_FILE" ]]; then
-      CODEX_HOME_HOST="$CODEX_CLI_HOME/.codex"
-    fi
-  fi
 fi
 
 [[ "$PANEL_PORT" =~ ^[1-9][0-9]{0,4}$ && "$PANEL_PORT" -le 65535 ]] || { echo "Invalid port: $PANEL_PORT" >&2; exit 1; }
@@ -226,6 +217,11 @@ install_codex() {
   fi
 }
 
+if [[ "$(id -u)" -eq 0 ]] && getent group docker >/dev/null 2>&1 && ! id -nG "$DEPLOY_USER" | tr ' ' '\n' | grep -qx docker; then
+  usermod -aG docker "$DEPLOY_USER"
+  DOCKER_GROUP_NOTE="The operational user was added to the docker group. Sign out and sign in again before using codex-panel."
+fi
+
 codex_version_for_user() {
   if [[ "$(id -un)" == "$CODEX_CLI_USER" ]]; then
     PATH="$CODEX_CLI_HOME/.local/bin:$PATH" codex --version 2>/dev/null | head -n 1 || true
@@ -259,11 +255,14 @@ EOF
 fi
 
 mkdir -p "$CODEX_HOME_HOST"
+if [[ "$(id -u)" -eq 0 ]]; then
+  chown "$DEPLOY_USER":"$(id -gn "$DEPLOY_USER")" "$CODEX_HOME_HOST"
+fi
 
 install_management_command() {
-  local command_dir="$HOME/.local/bin"
+  local command_dir="$CODEX_CLI_HOME/.local/bin"
   local command_path="$command_dir/codex-panel"
-  local profile="$HOME/.bashrc"
+  local profile="$CODEX_CLI_HOME/.bashrc"
 
   mkdir -p "$command_dir"
   printf '#!/usr/bin/env bash\nexec bash %q "$@"\n' "$PROJECT_DIR/codex-panel" > "$command_path"
@@ -271,6 +270,9 @@ install_management_command() {
   export PATH="$command_dir:$PATH"
   if ! grep -Fqx 'export PATH="$HOME/.local/bin:$PATH"' "$profile" 2>/dev/null; then
     printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$profile"
+  fi
+  if [[ "$(id -u)" -eq 0 ]]; then
+    chown "$DEPLOY_USER":"$(id -gn "$DEPLOY_USER")" "$command_dir" "$command_path" "$profile"
   fi
 }
 
@@ -281,13 +283,8 @@ if [[ ! -f "$ENV_FILE" ]]; then
   CREATED_ENV=true
 fi
 
-if [[ "$CODEX_HOME_HOST" == "$CODEX_CLI_HOME/.codex" ]]; then
-  PANEL_PUID=$(id -u "$CODEX_CLI_USER")
-  PANEL_PGID=$(id -g "$CODEX_CLI_USER")
-else
-  PANEL_PUID=$(id -u)
-  PANEL_PGID=$(id -g)
-fi
+PANEL_PUID=$(id -u "$DEPLOY_USER")
+PANEL_PGID=$(id -g "$DEPLOY_USER")
 
 set_env() {
   local key="$1"
@@ -309,6 +306,7 @@ set_env PUID "$PANEL_PUID" "$FORCE"
 set_env PGID "$PANEL_PGID" "$FORCE"
 set_env CODEX_CLI_VERSION "$CODEX_CLI_VERSION" true
 set_env CODEX_CLI_USER "$CODEX_CLI_USER" true
+set_env DEPLOY_USER "$DEPLOY_USER" true
 
 existing_username=$(sed -n 's/^PANEL_USERNAME=//p' "$ENV_FILE" | tail -n 1)
 existing_password=$(sed -n 's/^PANEL_PASSWORD=//p' "$ENV_FILE" | tail -n 1)
@@ -330,6 +328,9 @@ set_env PANEL_PASSWORD "$PANEL_PASSWORD"
 set_env PANEL_SESSION_SECRET "$PANEL_SESSION_SECRET"
 set_env PANEL_COOKIE_SECURE "false"
 chmod 600 "$ENV_FILE"
+if [[ "$(id -u)" -eq 0 ]]; then
+  chown -R "$DEPLOY_USER":"$(id -gn "$DEPLOY_USER")" "$PROJECT_DIR"
+fi
 
 docker compose -f "$PROJECT_DIR/compose.yml" up -d --build
 
@@ -356,14 +357,17 @@ Codex Provider Console installed successfully
 External address: ${external_address}
 Internal address: ${internal_address}
 Listening address: ${PANEL_BIND}:${PANEL_PORT}
-SSH tunnel: ssh -N -L ${PANEL_PORT}:127.0.0.1:${PANEL_PORT} $(whoami)@<server-ip>
+SSH tunnel: ssh -N -L ${PANEL_PORT}:127.0.0.1:${PANEL_PORT} ${DEPLOY_USER}@<server-ip>
 Config file: ${ENV_FILE}
+Operational user: ${DEPLOY_USER}
 Codex data: ${CODEX_HOME_HOST}
 Codex CLI user: ${CODEX_CLI_USER}
 Management command: codex-panel
 Username: ${PANEL_USERNAME}
 Password: ${PANEL_PASSWORD}
 Codex CLI: ${CODEX_CLI_VERSION}
+
+${DOCKER_GROUP_NOTE}
 
 ${exposure_note}
 

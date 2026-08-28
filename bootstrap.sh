@@ -2,12 +2,50 @@
 set -Eeuo pipefail
 
 REPOSITORY_URL="https://github.com/Sika-Liu/codex-provider-console.git"
-PROJECT_DIR="${HOME}/codex-provider-console"
+DEPLOY_USER="${SUDO_USER:-$(id -un)}"
+DEPLOY_USER_SET=false
+INSTALL_ARGS=()
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "This installer supports Linux servers only." >&2
   exit 1
 fi
+
+require_value() {
+  [[ -n "${2:-}" ]] || { echo "Missing value for $1" >&2; exit 1; }
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --deploy-user)
+      require_value "$1" "${2:-}"
+      DEPLOY_USER="$2"
+      DEPLOY_USER_SET=true
+      shift
+      ;;
+    *) INSTALL_ARGS+=("$1") ;;
+  esac
+  shift
+done
+
+if [[ "$(id -u)" -eq 0 && "$DEPLOY_USER_SET" == false && "${SUDO_USER:-}" == "" ]]; then
+  if [[ -t 0 ]]; then
+    read -r -p "Non-root operational user for this deployment: " DEPLOY_USER
+  else
+    echo "When running one-command deployment as root, pass --deploy-user <existing-non-root-user>." >&2
+    exit 1
+  fi
+fi
+
+id "$DEPLOY_USER" >/dev/null 2>&1 || { echo "Deployment user does not exist: $DEPLOY_USER" >&2; exit 1; }
+[[ "$DEPLOY_USER" != "root" ]] || { echo "Choose an existing non-root operational user with --deploy-user." >&2; exit 1; }
+if [[ "$(id -u)" -ne 0 && "$DEPLOY_USER" != "$(id -un)" ]]; then
+  echo "A non-root deployment can only use the current user: $(id -un)." >&2
+  exit 1
+fi
+DEPLOY_HOME=$(getent passwd "$DEPLOY_USER" | cut -d: -f6)
+[[ -n "$DEPLOY_HOME" ]] || { echo "Could not determine home directory for $DEPLOY_USER." >&2; exit 1; }
+PROJECT_DIR="${DEPLOY_HOME}/codex-provider-console"
 
 run_privileged() {
   if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
@@ -73,5 +111,15 @@ EOF
   exit 1
 fi
 
-git clone "$REPOSITORY_URL" "$PROJECT_DIR"
-exec bash "$PROJECT_DIR/install.sh" "$@"
+if [[ "$(id -u)" -eq 0 ]]; then
+  runuser -u "$DEPLOY_USER" -- git clone "$REPOSITORY_URL" "$PROJECT_DIR"
+else
+  git clone "$REPOSITORY_URL" "$PROJECT_DIR"
+fi
+if [[ "$(id -u)" -eq 0 ]]; then
+  exec bash "$PROJECT_DIR/install.sh" --deploy-user "$DEPLOY_USER" "${INSTALL_ARGS[@]}"
+elif command -v sudo >/dev/null 2>&1; then
+  exec sudo bash "$PROJECT_DIR/install.sh" --deploy-user "$DEPLOY_USER" "${INSTALL_ARGS[@]}"
+else
+  exec bash "$PROJECT_DIR/install.sh" --deploy-user "$DEPLOY_USER" "${INSTALL_ARGS[@]}"
+fi
