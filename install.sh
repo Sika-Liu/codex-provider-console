@@ -20,7 +20,7 @@ DEPLOY_USER="${SUDO_USER:-$(id -un)}"
 CODEX_CLI_USER="$DEPLOY_USER"
 CODEX_HOME_SET=false
 DOCKER_GROUP_NOTE=""
-CODEX_LOCAL_HOME_HOST=""
+CODEX_USER_HOME_HOST=""
 
 usage() {
   cat <<'EOF'
@@ -77,7 +77,7 @@ id "$DEPLOY_USER" >/dev/null 2>&1 || { echo "Deployment user does not exist: $DE
 CODEX_CLI_USER="$DEPLOY_USER"
 CODEX_CLI_HOME=$(getent passwd "$DEPLOY_USER" | cut -d: -f6)
 [[ -n "$CODEX_CLI_HOME" ]] || { echo "Could not determine home directory for $DEPLOY_USER." >&2; exit 1; }
-CODEX_LOCAL_HOME_HOST="$CODEX_CLI_HOME/.local"
+CODEX_USER_HOME_HOST="$CODEX_CLI_HOME"
 if [[ "$CODEX_HOME_SET" == false && ! -f "$ENV_FILE" ]]; then
   CODEX_HOME_HOST="$CODEX_CLI_HOME/.codex"
 fi
@@ -259,9 +259,8 @@ EOF
 fi
 
 mkdir -p "$CODEX_HOME_HOST"
-mkdir -p "$CODEX_LOCAL_HOME_HOST"
 if [[ "$(id -u)" -eq 0 ]]; then
-  chown "$DEPLOY_USER":"$(id -gn "$DEPLOY_USER")" "$CODEX_HOME_HOST" "$CODEX_LOCAL_HOME_HOST"
+  chown "$DEPLOY_USER":"$(id -gn "$DEPLOY_USER")" "$CODEX_HOME_HOST"
 fi
 
 install_management_command() {
@@ -312,7 +311,7 @@ set_env PGID "$PANEL_PGID" "$FORCE"
 set_env CODEX_CLI_VERSION "$CODEX_CLI_VERSION" true
 set_env CODEX_CLI_USER "$CODEX_CLI_USER" true
 set_env DEPLOY_USER "$DEPLOY_USER" true
-set_env CODEX_LOCAL_HOME_HOST "$CODEX_LOCAL_HOME_HOST" true
+set_env CODEX_USER_HOME_HOST "$CODEX_USER_HOME_HOST" true
 
 existing_username=$(sed -n 's/^PANEL_USERNAME=//p' "$ENV_FILE" | tail -n 1)
 existing_password=$(sed -n 's/^PANEL_PASSWORD=//p' "$ENV_FILE" | tail -n 1)
