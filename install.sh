@@ -21,6 +21,8 @@ DEPLOY_USER_SET=false
 CODEX_CLI_USER="$DEPLOY_USER"
 CODEX_HOME_SET=false
 DOCKER_GROUP_NOTE=""
+SSH_SERVER_STATUS="unknown"
+SSH_SERVER_PORT="22"
 
 usage() {
   cat <<'EOF'
@@ -230,6 +232,31 @@ codex_version_for_user() {
   fi
 }
 
+detect_ssh_server() {
+  local configured_port=""
+  if ! command -v sshd >/dev/null 2>&1; then
+    SSH_SERVER_STATUS="not_installed"
+    return
+  fi
+
+  configured_port=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}')
+  SSH_SERVER_PORT="${configured_port:-22}"
+
+  if command -v ss >/dev/null 2>&1; then
+    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${SSH_SERVER_PORT}$"; then
+      SSH_SERVER_STATUS="listening"
+    else
+      SSH_SERVER_STATUS="not_listening"
+    fi
+  elif command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
+      SSH_SERVER_STATUS="running"
+    else
+      SSH_SERVER_STATUS="not_running"
+    fi
+  fi
+}
+
 if [[ -z "$(codex_version_for_user)" ]]; then
   install_choice="n"
   if [[ "$INSTALL_CODEX" == true ]]; then
@@ -244,6 +271,7 @@ fi
 
 CODEX_CLI_VERSION="$(codex_version_for_user)"
 CODEX_CLI_VERSION="${CODEX_CLI_VERSION:-not_installed}"
+detect_ssh_server
 
 if ! docker info >/dev/null 2>&1; then
   cat >&2 <<'EOF'
@@ -307,6 +335,8 @@ set_env PGID "$PANEL_PGID" "$FORCE"
 set_env CODEX_CLI_VERSION "$CODEX_CLI_VERSION" true
 set_env CODEX_CLI_USER "$CODEX_CLI_USER" true
 set_env DEPLOY_USER "$DEPLOY_USER" true
+set_env SSH_SERVER_STATUS "$SSH_SERVER_STATUS" true
+set_env SSH_SERVER_PORT "$SSH_SERVER_PORT" true
 
 existing_username=$(sed -n 's/^PANEL_USERNAME=//p' "$ENV_FILE" | tail -n 1)
 existing_password=$(sed -n 's/^PANEL_PASSWORD=//p' "$ENV_FILE" | tail -n 1)
