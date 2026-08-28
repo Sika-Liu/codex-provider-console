@@ -22,8 +22,7 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
 CODEX_CLI_USER = os.environ.get("CODEX_CLI_USER", "unknown")
 DEPLOY_USER = os.environ.get("DEPLOY_USER", "unknown")
-SSH_SERVER_STATUS = os.environ.get("SSH_SERVER_STATUS", "unknown")
-SSH_SERVER_PORT = os.environ.get("SSH_SERVER_PORT", "22")
+HOST_CODEX_BIN = Path(os.environ.get("HOST_CODEX_BIN", "/user-home/.local/bin/codex"))
 CONFIG_PATH = CODEX_HOME / "config.toml"
 PROFILE_PATH = CODEX_HOME / "control-panel-profiles.json"
 SETTINGS_PATH = CODEX_HOME / "control-panel-settings.json"
@@ -612,21 +611,25 @@ def health_check() -> dict:
         checks.append({"name": name, "status": status, "detail": detail})
 
     add("Codex 数据目录", "pass" if CODEX_HOME.exists() else "fail", str(CODEX_HOME) if CODEX_HOME.exists() else f"目录不存在：{CODEX_HOME}")
-    cli_installed = CODEX_CLI_VERSION not in {"", "not_installed", "unknown"}
+    cli_version = ""
+    if HOST_CODEX_BIN.is_file() and os.access(HOST_CODEX_BIN, os.X_OK):
+        try:
+            cli_version = subprocess.run([str(HOST_CODEX_BIN), "--version"], capture_output=True, text=True, timeout=8, check=False).stdout.strip().splitlines()[0]
+        except (OSError, subprocess.SubprocessError, IndexError):
+            cli_version = ""
+    cli_installed = bool(cli_version) or CODEX_CLI_VERSION not in {"", "not_installed", "unknown"}
     add(
         "Codex CLI",
         "pass" if cli_installed else "fail",
-        (f"{CODEX_CLI_VERSION}；部署运维用户：{DEPLOY_USER}" if cli_installed else "部署运维用户未检测到 Codex CLI；在服务器执行 codex-panel install-codex 后，再点击“立即检查”。"),
+        (f"{cli_version or CODEX_CLI_VERSION}；部署运维用户：{DEPLOY_USER}" if cli_installed else f"用户 {DEPLOY_USER} 未检测到 Codex CLI；可在此页直接安装。"),
     )
-    ssh_details = {
-        "listening": ("pass", f"sshd 正在监听端口 {SSH_SERVER_PORT}"),
-        "running": ("pass", "sshd 服务正在运行；未能确认监听端口"),
-        "not_listening": ("warning", f"已安装 sshd，但未监听端口 {SSH_SERVER_PORT}"),
-        "not_running": ("warning", "已安装 sshd，但服务未运行"),
-        "not_installed": ("warning", "未安装 SSH 服务；仅使用面板不受影响，但 Codex Desktop 无法通过 SSH 连接此服务器"),
-    }
-    ssh_status, ssh_detail = ssh_details.get(SSH_SERVER_STATUS, ("warning", "无法确认 SSH 服务状态；部署或更新面板后会重新检测"))
-    add("SSH 服务", ssh_status, ssh_detail)
+    ssh_user = str(panel_settings().get("ssh", {}).get("user", "")).strip()
+    if not ssh_user:
+        add("SSH 登录用户", "warning", f"尚未在“SSH 连接”中保存用户名；Codex Desktop 应使用部署用户 {DEPLOY_USER} 登录。")
+    elif ssh_user == DEPLOY_USER:
+        add("SSH 登录用户", "pass", f"{ssh_user} 与部署/CLI 用户一致")
+    else:
+        add("SSH 登录用户", "fail", f"当前为 {ssh_user}，但 Codex CLI 安装在 {DEPLOY_USER}；请使用相同用户 SSH 登录或重新部署。")
     add("目录写入权限", "pass" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "fail", "可写" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "控制台无法写入 Codex 数据目录")
 
     config = config_text()
@@ -844,6 +847,29 @@ def get_health() -> dict:
     return health_check()
 
 
+@app.post("/api/health/install-codex")
+def install_codex_from_health() -> dict:
+    if not HOST_CODEX_BIN.parent.parent.exists():
+        raise HTTPException(409, "部署未挂载当前用户的 .local 目录；请更新面板后重试")
+    try:
+        result = subprocess.run(
+            ["/bin/sh", "-c", "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh"],
+            env={**os.environ, "HOME": "/user-home", "PATH": "/user-home/.local/bin:/usr/local/bin:/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, "Codex CLI 安装超时") from exc
+    if result.returncode != 0 or not HOST_CODEX_BIN.exists():
+        detail = (result.stderr or result.stdout or "官方安装器未完成").strip()[-500:]
+        raise HTTPException(502, f"Codex CLI 安装失败：{detail}")
+    version = subprocess.run([str(HOST_CODEX_BIN), "--version"], capture_output=True, text=True, timeout=8, check=False).stdout.strip().splitlines()[0]
+    audit("codex_cli_installed_from_health", user=DEPLOY_USER, version=version)
+    return {"version": version, "detail": f"Codex CLI 已安装到用户 {DEPLOY_USER}；健康检查已刷新。"}
+
+
 @app.post("/api/providers/{provider_id}/capture-auth")
 def capture_chatgpt_auth(provider_id: str) -> dict:
     capture_chatgpt_snapshot(provider_id)
@@ -1017,7 +1043,8 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
  requestAnimationFrame(()=>document.body.classList.add('console-ready'));
  async function logoutConsole(){await fetch('/logout',{method:'POST'});location.href='/login'}
  function openConsoleSection(section){document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';document.querySelector('#console-'+section).style.display='block';if(section==='health')runHealth()}localStorage.setItem('console-section',section)}
- async function runHealth(){const summary=$('#health-summary'),list=$('#health-checks');summary.textContent='正在检查服务器环境和供应商连通性…';list.innerHTML='';try{const d=await api('/api/health');summary.textContent=d.summary;list.innerHTML=(d.checks||[]).map(item=>`<div class="health-check ${item.status}"><b>${item.status==='pass'?'通过':item.status==='warning'?'提醒':'失败'} · ${esc(item.name)}</b><small>${esc(item.detail)}</small></div>`).join('')}catch(e){summary.textContent='健康检查失败：'+e.message}}
+ async function runHealth(){const summary=$('#health-summary'),list=$('#health-checks');summary.textContent='正在检查服务器环境和供应商连通性…';list.innerHTML='';try{const d=await api('/api/health');summary.textContent=d.summary;list.innerHTML=(d.checks||[]).map(item=>`<div class="health-check ${item.status}"><b>${item.status==='pass'?'通过':item.status==='warning'?'提醒':'失败'} · ${esc(item.name)}</b><small>${esc(item.detail)}</small>${item.name==='Codex CLI'&&item.status==='fail'?'<p><button class="btn small" onclick="installCodexCli(this)">安装 Codex CLI</button></p>':''}</div>`).join('')}catch(e){summary.textContent='健康检查失败：'+e.message}}
+ async function installCodexCli(button){if(!confirm('将为部署用户安装官方 Codex CLI。继续？'))return;button.disabled=true;button.textContent='正在安装…';try{const result=await api('/api/health/install-codex',{method:'POST'});alert(result.detail);await runHealth()}catch(e){alert(e.message);button.disabled=false;button.textContent='安装 Codex CLI'}}
  function updateSshCommand(){const host=$('#ssh-host')?.value.trim(),user=$('#ssh-user')?.value.trim(),port=$('#ssh-port')?.value||22,local=$('#ssh-local-port')?.value||8787;$('#ssh-command').textContent=host&&user?`ssh -N -L ${local}:127.0.0.1:8787 -p ${port} ${user}@${host}`:'填写服务器地址和用户名后生成'}
  function updateProxyConfig(){const domain=$('#proxy-domain')?.value.trim(),upstream=$('#proxy-upstream')?.value.trim()||'127.0.0.1:8787',cert=$('#proxy-cert')?.value.trim(),key=$('#proxy-key')?.value.trim();$('#proxy-config').textContent=domain?`server {\n    listen 443 ssl;\n    server_name ${domain};\n    ssl_certificate ${cert||'/path/to/fullchain.pem'};\n    ssl_certificate_key ${key||'/path/to/privkey.pem'};\n    location / {\n        proxy_pass http://${upstream};\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    }\n}`:'填写域名后生成'}
  ['ssh-host','ssh-port','ssh-user','ssh-local-port'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateSshCommand));['proxy-domain','proxy-upstream','proxy-cert','proxy-key'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateProxyConfig));

@@ -7,6 +7,7 @@ services:
       - "${PANEL_BIND:-127.0.0.1}:${PANEL_PORT:-8787}:8787"
     volumes:
       - "${CODEX_HOME_HOST:-./codex-data}:/codex"
+      - "${CODEX_LOCAL_HOME_HOST:-./codex-local}:/user-home/.local"
     environment:
       CODEX_HOME: /codex
       PANEL_AUTH_ENABLED: "${PANEL_AUTH_ENABLED:-true}"
@@ -17,8 +18,7 @@ services:
       CODEX_CLI_VERSION: "${CODEX_CLI_VERSION:-not_installed}"
       CODEX_CLI_USER: "${CODEX_CLI_USER:-unknown}"
       DEPLOY_USER: "${DEPLOY_USER:-unknown}"
-      SSH_SERVER_STATUS: "${SSH_SERVER_STATUS:-unknown}"
-      SSH_SERVER_PORT: "${SSH_SERVER_PORT:-22}"
+      HOST_CODEX_BIN: /user-home/.local/bin/codex
     security_opt:
       - no-new-privileges:true
     cap_drop:

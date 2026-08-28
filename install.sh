@@ -20,8 +20,7 @@ DEPLOY_USER="${SUDO_USER:-$(id -un)}"
 CODEX_CLI_USER="$DEPLOY_USER"
 CODEX_HOME_SET=false
 DOCKER_GROUP_NOTE=""
-SSH_SERVER_STATUS="unknown"
-SSH_SERVER_PORT="22"
+CODEX_LOCAL_HOME_HOST=""
 
 usage() {
   cat <<'EOF'
@@ -78,6 +77,7 @@ id "$DEPLOY_USER" >/dev/null 2>&1 || { echo "Deployment user does not exist: $DE
 CODEX_CLI_USER="$DEPLOY_USER"
 CODEX_CLI_HOME=$(getent passwd "$DEPLOY_USER" | cut -d: -f6)
 [[ -n "$CODEX_CLI_HOME" ]] || { echo "Could not determine home directory for $DEPLOY_USER." >&2; exit 1; }
+CODEX_LOCAL_HOME_HOST="$CODEX_CLI_HOME/.local"
 if [[ "$CODEX_HOME_SET" == false && ! -f "$ENV_FILE" ]]; then
   CODEX_HOME_HOST="$CODEX_CLI_HOME/.codex"
 fi
@@ -228,32 +228,6 @@ codex_version_for_user() {
   fi
 }
 
-detect_ssh_server() {
-  local configured_port=""
-  if ! command -v sshd >/dev/null 2>&1; then
-    SSH_SERVER_STATUS="not_installed"
-    return
-  fi
-
-  # Non-root users may not be allowed to read every sshd runtime setting.
-  configured_port=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}' || true)
-  SSH_SERVER_PORT="${configured_port:-22}"
-
-  if command -v ss >/dev/null 2>&1; then
-    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${SSH_SERVER_PORT}$"; then
-      SSH_SERVER_STATUS="listening"
-    else
-      SSH_SERVER_STATUS="not_listening"
-    fi
-  elif command -v systemctl >/dev/null 2>&1; then
-    if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
-      SSH_SERVER_STATUS="running"
-    else
-      SSH_SERVER_STATUS="not_running"
-    fi
-  fi
-}
-
 if [[ -z "$(codex_version_for_user)" ]]; then
   install_choice="n"
   if [[ "$INSTALL_CODEX" == true ]]; then
@@ -268,7 +242,6 @@ fi
 
 CODEX_CLI_VERSION="$(codex_version_for_user)"
 CODEX_CLI_VERSION="${CODEX_CLI_VERSION:-not_installed}"
-detect_ssh_server
 
 if ! docker info >/dev/null 2>&1; then
   cat >&2 <<'EOF'
@@ -280,8 +253,9 @@ EOF
 fi
 
 mkdir -p "$CODEX_HOME_HOST"
+mkdir -p "$CODEX_LOCAL_HOME_HOST"
 if [[ "$(id -u)" -eq 0 ]]; then
-  chown "$DEPLOY_USER":"$(id -gn "$DEPLOY_USER")" "$CODEX_HOME_HOST"
+  chown "$DEPLOY_USER":"$(id -gn "$DEPLOY_USER")" "$CODEX_HOME_HOST" "$CODEX_LOCAL_HOME_HOST"
 fi
 
 install_management_command() {
@@ -332,8 +306,7 @@ set_env PGID "$PANEL_PGID" "$FORCE"
 set_env CODEX_CLI_VERSION "$CODEX_CLI_VERSION" true
 set_env CODEX_CLI_USER "$CODEX_CLI_USER" true
 set_env DEPLOY_USER "$DEPLOY_USER" true
-set_env SSH_SERVER_STATUS "$SSH_SERVER_STATUS" true
-set_env SSH_SERVER_PORT "$SSH_SERVER_PORT" true
+set_env CODEX_LOCAL_HOME_HOST "$CODEX_LOCAL_HOME_HOST" true
 
 existing_username=$(sed -n 's/^PANEL_USERNAME=//p' "$ENV_FILE" | tail -n 1)
 existing_password=$(sed -n 's/^PANEL_PASSWORD=//p' "$ENV_FILE" | tail -n 1)

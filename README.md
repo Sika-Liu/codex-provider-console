@@ -36,7 +36,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 安装时会交互式询问控制台端口。服务默认监听 `0.0.0.0`，完成后会输出公网地址、内网地址、SSH 隧道命令、配置文件路径和安全组提示，行为与 1Panel 类似。
 首次安装还会生成管理员用户名、随机密码和会话密钥，并在结果中显示一次。登录后可从左侧菜单退出登录。
 
-登录控制台后打开左侧“健康检查”，可检查 Codex 数据目录、写入权限、Codex CLI、宿主机 SSH 服务与监听端口、`config.toml`、`auth.json`、控制台认证、当前供应商、供应商真实请求和磁盘空间。SSH 检测不会读取私钥、密码或尝试登录；结果会在部署或更新面板时刷新。若提示未安装 Codex CLI，在服务器执行 `codex-panel install-codex`，完成后返回页面点击“立即检查”。
+登录控制台后打开左侧“健康检查”，可检查 Codex 数据目录、写入权限、Codex CLI、SSH 登录用户与部署用户是否一致、`config.toml`、`auth.json`、控制台认证、当前供应商、供应商真实请求和磁盘空间。SSH 私钥不会上传或读取；请在“SSH 连接”中保存 Codex Desktop 使用的登录用户名。若未安装 Codex CLI，可直接在健康检查页选择安装。
 
 缺少 Docker 时，先安装 Docker，或明确允许脚本自动安装：
 
