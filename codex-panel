@@ -4,6 +4,25 @@ set -Eeuo pipefail
 PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$PROJECT_DIR"
 
+configured_cli_user() {
+  local user
+  user=$(sed -n 's/^CODEX_CLI_USER=//p' "$PROJECT_DIR/.env" 2>/dev/null | tail -n 1)
+  printf '%s\n' "${user:-$(id -un)}"
+}
+
+run_as_cli_user() {
+  local user="$1"
+  local command="$2"
+  if [[ "$(id -un)" == "$user" ]]; then
+    bash -lc "$command"
+  elif [[ "$(id -u)" -eq 0 ]]; then
+    runuser -l "$user" -c "$command"
+  else
+    echo "Run this command as root to manage Codex CLI for ${user}." >&2
+    return 1
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage: codex-panel <command>
@@ -15,7 +34,7 @@ Commands:
   status    Show container status
   logs      Follow console logs
   update    Pull the latest Git revision and rebuild the console
-  install-codex Install Codex CLI on this server and refresh the health status
+  install-codex Install Codex CLI for the configured SSH user and refresh health status
   config    Print the active .env file path
   uninstall Remove the console, then optionally remove Codex CLI
   help      Show this command reference
@@ -37,21 +56,22 @@ case "${1:-}" in
       echo "curl is required to install Codex CLI. Install curl, then retry." >&2
       exit 1
     fi
-    echo "Installing Codex CLI with the official installer."
-    curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh
-    export PATH="$HOME/.local/bin:$PATH"
-    if ! command -v codex >/dev/null 2>&1; then
+    cli_user=$(configured_cli_user)
+    id "$cli_user" >/dev/null 2>&1 || { echo "Configured Codex CLI user does not exist: $cli_user" >&2; exit 1; }
+    echo "Installing Codex CLI for ${cli_user} with the official installer."
+    run_as_cli_user "$cli_user" 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh'
+    version=$(run_as_cli_user "$cli_user" 'PATH="$HOME/.local/bin:$PATH" codex --version | head -n 1')
+    if [[ -z "$version" ]]; then
       echo "Codex CLI installation did not complete successfully." >&2
       exit 1
     fi
-    version=$(codex --version | head -n 1)
     if grep -q '^CODEX_CLI_VERSION=' "$PROJECT_DIR/.env"; then
       sed -i "s|^CODEX_CLI_VERSION=.*|CODEX_CLI_VERSION=${version}|" "$PROJECT_DIR/.env"
     else
       printf 'CODEX_CLI_VERSION=%s\n' "$version" >> "$PROJECT_DIR/.env"
     fi
     docker compose up -d --force-recreate
-    echo "Codex CLI installed: ${version}"
+    echo "Codex CLI installed for ${cli_user}: ${version}"
     ;;
   config) printf '%s\n' "$PROJECT_DIR/.env" ;;
   uninstall)

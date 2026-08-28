@@ -66,8 +66,9 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 If neither `curl` nor `wget` is present, install one download tool first; a
 network installer cannot run before a downloader is available.
 
-The installer creates `.env` from `.env.example`, defaults `CODEX_HOME_HOST` to
-the current user's `~/.codex`, and starts the service. It does not overwrite
+The installer creates `.env` from `.env.example`, asks which SSH login user
+will run Codex CLI, defaults `CODEX_HOME_HOST` to that user's `~/.codex`, and
+starts the service. It does not overwrite
 an existing Codex directory value unless `--force` is provided. The port and
 bind address selected interactively are always applied.
 
@@ -99,7 +100,22 @@ non-interactive setup, use:
 bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-codex
 ```
 
-`curl` must already be available on the server.
+`curl` must already be available on the server. The CLI is installed for the
+selected SSH login user; specify it non-interactively when needed:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-codex --codex-cli-user ubuntu
+```
+
+For an existing root-owned deployment where Codex Desktop connects as `ubuntu`,
+run the following inside the project to align the CLI and mounted config
+directory with `ubuntu`. Existing credentials are not migrated; sign in again
+through the panel afterward:
+
+```bash
+cd ~/codex-provider-console
+bash install.sh --force --install-codex --codex-cli-user ubuntu --codex-home /home/ubuntu/.codex
+```
 
 ## Official login in the panel
 

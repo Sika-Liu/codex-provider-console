@@ -23,7 +23,7 @@ sudo dnf upgrade -y    # CentOS 7 可使用 yum update -y
 bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
 ```
 
-该命令会克隆项目到当前用户的 `~/codex-provider-console`，然后自动运行安装脚本。安装脚本会检查 Docker、创建 `.env`、使用当前用户的 `~/.codex` 目录，并启动服务。默认监听 `0.0.0.0:8787`，便于直接通过服务器公网 IP 访问。
+该命令会克隆项目到当前用户的 `~/codex-provider-console`，然后自动运行安装脚本。安装脚本会检查 Docker、创建 `.env`，并询问 Codex CLI 对应的 SSH 登录用户；新部署会使用该用户的 `~/.codex` 目录并启动服务。默认监听 `0.0.0.0:8787`，便于直接通过服务器公网 IP 访问。
 
 如果服务器没有 `curl` 但有 `wget`，执行：
 
@@ -52,7 +52,18 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-cons
 bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-codex
 ```
 
-该选项要求服务器已安装 `curl`。官方安装脚本会将 Codex CLI 安装到服务器。
+该选项要求服务器已安装 `curl`。官方安装脚本会将 Codex CLI 安装到部署时选择的 SSH 登录用户，而非固定安装到 `root`。也可明确指定：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-codex --codex-cli-user ubuntu
+```
+
+已由 `root` 部署、但 Codex Desktop 通过 `ubuntu` 登录的服务器，可在项目目录执行以下命令将 CLI 与面板配置目录对齐到 `ubuntu`。这不会迁移既有登录令牌，完成后请在控制台重新进行官方登录：
+
+```bash
+cd ~/codex-provider-console
+bash install.sh --force --install-codex --codex-cli-user ubuntu --codex-home /home/ubuntu/.codex
+```
 
 ### 在控制台完成官方登录
 
