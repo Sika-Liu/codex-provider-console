@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
@@ -23,6 +23,10 @@ CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
 CODEX_CLI_USER = os.environ.get("CODEX_CLI_USER", "unknown")
 DEPLOY_USER = os.environ.get("DEPLOY_USER", "unknown")
 HOST_CODEX_BIN = Path(os.environ.get("HOST_CODEX_BIN", "/user-home/.local/bin/codex"))
+USER_HOME = Path(os.environ.get("USER_HOME_PATH", "/user-home"))
+DEPLOYMENT_KEY_PATH = USER_HOME / ".ssh" / "codex-provider-console_ed25519"
+DEPLOYMENT_KEY_PUBLIC_PATH = DEPLOYMENT_KEY_PATH.with_suffix(".pub")
+AUTHORIZED_KEYS_PATH = USER_HOME / ".ssh" / "authorized_keys"
 CONFIG_PATH = CODEX_HOME / "config.toml"
 PROFILE_PATH = CODEX_HOME / "control-panel-profiles.json"
 SETTINGS_PATH = CODEX_HOME / "control-panel-settings.json"
@@ -630,6 +634,8 @@ def health_check() -> dict:
         add("SSH 登录用户", "pass", f"{ssh_user} 与部署/CLI 用户一致")
     else:
         add("SSH 登录用户", "fail", f"当前为 {ssh_user}，但 Codex CLI 安装在 {DEPLOY_USER}；请使用相同用户 SSH 登录或重新部署。")
+    deployment_key_ready, deployment_key_detail = deployment_key_status()
+    add("Codex Desktop 部署密钥", "pass" if deployment_key_ready else "warning", deployment_key_detail)
     add("目录写入权限", "pass" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "fail", "可写" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "控制台无法写入 Codex 数据目录")
 
     config = config_text()
@@ -690,6 +696,19 @@ def health_check() -> dict:
         "checks": checks,
         "summary": "环境满足使用条件。" if failed == 0 and warnings == 0 else f"发现 {failed} 项失败、{warnings} 项提醒。",
     }
+
+
+def deployment_key_status() -> tuple[bool, str]:
+    if not DEPLOYMENT_KEY_PATH.is_file() or not DEPLOYMENT_KEY_PUBLIC_PATH.is_file():
+        return False, "尚未生成面板管理的部署密钥；可在此页创建、部署并下载。"
+    try:
+        public_key = DEPLOYMENT_KEY_PUBLIC_PATH.read_text(encoding="utf-8").strip()
+        authorized_keys = AUTHORIZED_KEYS_PATH.read_text(encoding="utf-8") if AUTHORIZED_KEYS_PATH.exists() else ""
+    except OSError:
+        return False, "部署密钥文件不可读；请检查部署用户主目录权限。"
+    if public_key and public_key in authorized_keys:
+        return True, f"已部署到用户 {DEPLOY_USER} 的 authorized_keys；可下载私钥供 Codex Desktop 使用。"
+    return False, "部署密钥尚未写入 authorized_keys；可在此页重新部署。"
 
 
 def switch_provider(provider_id: str, verify: bool = True, model_override: str | None = None) -> dict:
@@ -870,6 +889,63 @@ def install_codex_from_health() -> dict:
     return {"version": version, "detail": f"Codex CLI 已安装到用户 {DEPLOY_USER}；健康检查已刷新。"}
 
 
+@app.post("/api/health/deployment-key")
+def deploy_ssh_key() -> dict:
+    ssh_dir = DEPLOYMENT_KEY_PATH.parent
+    if not USER_HOME.is_dir() or not os.access(USER_HOME, os.W_OK):
+        raise HTTPException(409, "部署未挂载当前用户的主目录或目录不可写；请更新面板后重试")
+    if not shutil.which("ssh-keygen"):
+        raise HTTPException(409, "面板镜像未包含 ssh-keygen；请更新面板后重试")
+    ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(ssh_dir, 0o700)
+    if DEPLOYMENT_KEY_PATH.exists() and not DEPLOYMENT_KEY_PUBLIC_PATH.exists():
+        raise HTTPException(409, "发现不完整的部署私钥；为避免覆盖现有密钥，请先人工处理后再试")
+    if DEPLOYMENT_KEY_PUBLIC_PATH.exists() and not DEPLOYMENT_KEY_PATH.exists():
+        raise HTTPException(409, "发现没有对应私钥的部署公钥；为避免覆盖现有文件，请先人工处理后再试")
+    if not DEPLOYMENT_KEY_PATH.exists():
+        result = subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-f", str(DEPLOYMENT_KEY_PATH), "-N", "", "-C", f"codex-provider-console-{DEPLOY_USER}"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "ssh-keygen 未完成").strip()[-300:]
+            raise HTTPException(502, f"生成部署密钥失败：{detail}")
+    try:
+        public_key = DEPLOYMENT_KEY_PUBLIC_PATH.read_text(encoding="utf-8").strip()
+        if not public_key:
+            raise ValueError("公钥为空")
+        existing = AUTHORIZED_KEYS_PATH.read_text(encoding="utf-8") if AUTHORIZED_KEYS_PATH.exists() else ""
+        if public_key not in existing:
+            with AUTHORIZED_KEYS_PATH.open("a", encoding="utf-8") as handle:
+                if existing and not existing.endswith("\n"):
+                    handle.write("\n")
+                handle.write(public_key + "\n")
+        os.chmod(DEPLOYMENT_KEY_PATH, 0o600)
+        os.chmod(DEPLOYMENT_KEY_PUBLIC_PATH, 0o644)
+        os.chmod(AUTHORIZED_KEYS_PATH, 0o600)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(502, f"部署公钥失败：{exc}") from exc
+    audit("deployment_ssh_key_created", user=DEPLOY_USER)
+    return {"detail": "部署密钥已生成并授权。现在请下载私钥，并在 Codex App 中选择该文件。", "download_url": "/api/health/deployment-key/download"}
+
+
+@app.get("/api/health/deployment-key/download")
+def download_ssh_key() -> FileResponse:
+    ready, _ = deployment_key_status()
+    if not ready:
+        raise HTTPException(404, "部署密钥尚未完成创建和授权")
+    audit("deployment_ssh_key_downloaded", user=DEPLOY_USER)
+    return FileResponse(
+        DEPLOYMENT_KEY_PATH,
+        media_type="application/octet-stream",
+        filename=f"codex-provider-console-{DEPLOY_USER}.ed25519",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.post("/api/providers/{provider_id}/capture-auth")
 def capture_chatgpt_auth(provider_id: str) -> dict:
     capture_chatgpt_snapshot(provider_id)
@@ -1043,8 +1119,10 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
  requestAnimationFrame(()=>document.body.classList.add('console-ready'));
  async function logoutConsole(){await fetch('/logout',{method:'POST'});location.href='/login'}
  function openConsoleSection(section){document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';document.querySelector('#console-'+section).style.display='block';if(section==='health')runHealth()}localStorage.setItem('console-section',section)}
- async function runHealth(){const summary=$('#health-summary'),list=$('#health-checks');summary.textContent='正在检查服务器环境和供应商连通性…';list.innerHTML='';try{const d=await api('/api/health');summary.textContent=d.summary;list.innerHTML=(d.checks||[]).map(item=>`<div class="health-check ${item.status}"><b>${item.status==='pass'?'通过':item.status==='warning'?'提醒':'失败'} · ${esc(item.name)}</b><small>${esc(item.detail)}</small>${item.name==='Codex CLI'&&item.status==='fail'?'<p><button class="btn small" onclick="installCodexCli(this)">安装 Codex CLI</button></p>':''}</div>`).join('')}catch(e){summary.textContent='健康检查失败：'+e.message}}
+ async function runHealth(){const summary=$('#health-summary'),list=$('#health-checks');summary.textContent='正在检查服务器环境和供应商连通性…';list.innerHTML='';try{const d=await api('/api/health');summary.textContent=d.summary;list.innerHTML=(d.checks||[]).map(item=>{const cliAction=item.name==='Codex CLI'&&item.status==='fail'?'<p><button class="btn small" onclick="installCodexCli(this)">安装 Codex CLI</button></p>':'';const keyAction=item.name==='Codex Desktop 部署密钥'?`<p><button class="btn small" onclick="${item.status==='pass'?'downloadDeploymentKey()':'deployDeploymentKey(this)'}">${item.status==='pass'?'下载部署密钥':'创建并部署密钥'}</button></p>`:'';return `<div class="health-check ${item.status}"><b>${item.status==='pass'?'通过':item.status==='warning'?'提醒':'失败'} · ${esc(item.name)}</b><small>${esc(item.detail)}</small>${cliAction}${keyAction}</div>`}).join('')}catch(e){summary.textContent='健康检查失败：'+e.message}}
  async function installCodexCli(button){if(!confirm('将为部署用户安装官方 Codex CLI。继续？'))return;button.disabled=true;button.textContent='正在安装…';try{const result=await api('/api/health/install-codex',{method:'POST'});alert(result.detail);await runHealth()}catch(e){alert(e.message);button.disabled=false;button.textContent='安装 Codex CLI'}}
+ async function deployDeploymentKey(button){if(!confirm('将为当前部署用户生成新的 SSH 私钥，并将对应公钥加入 authorized_keys。私钥只会通过下载提供一次，请妥善保管。继续？'))return;button.disabled=true;button.textContent='正在部署…';try{const result=await api('/api/health/deployment-key',{method:'POST'});alert(result.detail);window.location.href=result.download_url;await runHealth()}catch(e){alert(e.message);button.disabled=false;button.textContent='创建并部署密钥'}}
+ function downloadDeploymentKey(){window.location.href='/api/health/deployment-key/download'}
  function updateSshCommand(){const host=$('#ssh-host')?.value.trim(),user=$('#ssh-user')?.value.trim(),port=$('#ssh-port')?.value||22,local=$('#ssh-local-port')?.value||8787;$('#ssh-command').textContent=host&&user?`ssh -N -L ${local}:127.0.0.1:8787 -p ${port} ${user}@${host}`:'填写服务器地址和用户名后生成'}
  function updateProxyConfig(){const domain=$('#proxy-domain')?.value.trim(),upstream=$('#proxy-upstream')?.value.trim()||'127.0.0.1:8787',cert=$('#proxy-cert')?.value.trim(),key=$('#proxy-key')?.value.trim();$('#proxy-config').textContent=domain?`server {\n    listen 443 ssl;\n    server_name ${domain};\n    ssl_certificate ${cert||'/path/to/fullchain.pem'};\n    ssl_certificate_key ${key||'/path/to/privkey.pem'};\n    location / {\n        proxy_pass http://${upstream};\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    }\n}`:'填写域名后生成'}
  ['ssh-host','ssh-port','ssh-user','ssh-local-port'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateSshCommand));['proxy-domain','proxy-upstream','proxy-cert','proxy-key'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateProxyConfig));

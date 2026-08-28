@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl openssh-client \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh \
     && install -m 755 "$(readlink -f /root/.local/bin/codex)" /usr/local/bin/codex
