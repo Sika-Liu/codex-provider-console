@@ -51,9 +51,10 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 
   ```bash
   cd ~/codex-provider-console
-  git pull --ff-only
-  bash install.sh
+  codex-panel update
   ```
+
+  `codex-panel update` 会拉取最新代码并重建已有容器，能够复用正在使用的面板端口。若已手动执行过 `git pull --ff-only`，可使用 `codex-panel restart` 仅重建并重启面板。
 
 再次看到 `Panel port [8787]:` 时，直接按 Enter 使用默认端口，或输入未被占用的端口后按 Enter。
 

@@ -110,7 +110,12 @@ port_in_use() {
 existing_deployment_uses_port() {
   [[ -f "$ENV_FILE" ]] || return 1
   command -v docker >/dev/null 2>&1 || return 1
-  docker compose -f "$PROJECT_DIR/compose.yml" ps -q 2>/dev/null | grep -q .
+  if docker compose -f "$PROJECT_DIR/compose.yml" ps -q 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  docker ps -q \
+    --filter "label=com.docker.compose.project=$(basename "$PROJECT_DIR")" \
+    --filter "label=com.docker.compose.service=codex-provider-console" 2>/dev/null | grep -q .
 }
 
 if port_in_use; then
