@@ -10,7 +10,6 @@ PANEL_PORT="8787"
 PORT_SET=false
 BIND_SET=false
 INSTALL_DOCKER=false
-INSTALL_CODEX=false
 FORCE=false
 PANEL_USERNAME="admin"
 PANEL_PASSWORD=""
@@ -31,7 +30,6 @@ Options:
   --bind <address>      Advanced override (default: 0.0.0.0)
   --port <port>         Host port (default: 8787)
   --install-docker      Install Docker when it is missing (common Linux distros)
-  --install-codex       Install Codex CLI with the official installer when missing
   --force               Replace matching settings in an existing .env file
   -h, --help            Show this help
 
@@ -51,7 +49,6 @@ while [[ $# -gt 0 ]]; do
     --bind) require_value "$1" "${2:-}"; PANEL_BIND="$2"; BIND_SET=true; shift ;;
     --port) require_value "$1" "${2:-}"; PANEL_PORT="$2"; PORT_SET=true; shift ;;
     --install-docker) INSTALL_DOCKER=true ;;
-    --install-codex) INSTALL_CODEX=true ;;
     --force) FORCE=true ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unsupported option: $1" >&2; usage; exit 1 ;;
@@ -213,19 +210,6 @@ docker compose version >/dev/null 2>&1 || {
   exit 1
 }
 
-install_codex() {
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "curl is required to install Codex CLI. Install curl, then retry." >&2
-    return 1
-  fi
-  echo "Installing Codex CLI for ${CODEX_CLI_USER} with the official installer."
-  if [[ "$(id -un)" == "$CODEX_CLI_USER" ]]; then
-    curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh
-  else
-    runuser -l "$CODEX_CLI_USER" -c 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh'
-  fi
-}
-
 codex_binary_for_user() {
   local candidate
   for candidate in \
@@ -284,18 +268,6 @@ codex_version_for_user() {
   fi
   printf '%s\n' "$version"
 }
-
-if [[ -z "$(codex_version_for_user)" ]]; then
-  install_choice="n"
-  if [[ "$INSTALL_CODEX" == true ]]; then
-    install_choice="y"
-  elif [[ -t 0 ]]; then
-    read -r -p "Codex CLI was not found. Install it now with the official installer? [y/N]: " install_choice
-  fi
-  case "${install_choice:-n}" in
-    y|Y|yes|YES) install_codex || exit 1 ;;
-  esac
-fi
 
 CODEX_CLI_VERSION="$(codex_version_for_user)"
 CODEX_CLI_VERSION="${CODEX_CLI_VERSION:-not_installed}"

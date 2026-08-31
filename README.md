@@ -70,13 +70,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-cons
 
 交互式一键安装时，如果检测不到 Docker，脚本会询问是否安装；输入 `y` 后会继续完成部署。Debian/Ubuntu 会使用系统包管理器，CentOS/RHEL 系列会使用 Docker 官方安装脚本。脚本不会自动执行可能触发系统重启的系统升级。
 
-缺少 Codex CLI 时，安装脚本会询问是否安装。确认后会以非交互方式运行官方安装器，安装完成后自动继续部署面板，不会启动 Codex CLI 或要求额外执行命令。也可以直接执行：
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-codex
-```
-
-该选项要求服务器已安装 `curl`。官方安装脚本会将 Codex CLI 安装到当前登录的非 root 运维用户，而非固定安装到 `root`。用户名称取决于服务器实际账户，例如 `ubuntu`、`debian`、`ec2-user` 或自建账户。安装器会在 `/usr/local/bin/codex` 创建指向该用户 CLI 的符号链接，使 Codex Desktop 的非交互 SSH 检测也能找到 CLI；即使首次选择暂不安装 CLI，该链接也会预先创建，之后从健康检查安装 CLI 即可直接生效。此步骤可能请求一次 `sudo`。
+首次部署只安装控制台，不会询问或下载 Codex CLI。完成部署后，登录控制台并打开“健康检查”，在“Codex CLI”项中选择“安装 Codex CLI”。CLI 会安装到当前登录的非 root 运维用户，例如 `ubuntu`、`debian`、`ec2-user` 或自建账户。部署过程会准备 `/usr/local/bin/codex` 链接，使后续由健康检查安装的 CLI 可被 Codex Desktop 的非交互 SSH 检测到；此准备步骤可能请求一次 `sudo`，但不会下载或安装 CLI。
 
 已有 root 部署如需切换为非 root 运维用户，请先卸载面板，再按本节重新部署；新项目会直接创建在目标用户的家目录中。登录令牌不会迁移，重新部署后请在控制台重新进行官方登录。
 

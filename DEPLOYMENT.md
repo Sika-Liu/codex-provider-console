@@ -120,17 +120,11 @@ the distribution packages; CentOS/RHEL/Rocky/AlmaLinux/Fedora use Docker's
 official installer. The installer does not run a full system upgrade
 automatically because that can upgrade the kernel and require a reboot.
 
-If Codex CLI is missing, the installer asks whether to install it with the
-official standalone installer. It runs the official installer non-interactively,
-then continues panel deployment without launching an interactive Codex session. For
-non-interactive setup, use:
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-codex
-```
-
-`curl` must already be available on the server. The CLI is installed for the
-current non-root operational user.
+The initial deployment installs only the panel and never downloads or installs
+Codex CLI. After the panel is available, open **健康检查** and use **安装 Codex CLI**
+there. The CLI is installed for the current non-root operational user. Deployment
+prepares the `/usr/local/bin/codex` SSH path so that a CLI installed from the
+health page is discoverable by Codex Desktop's non-interactive SSH connection.
 
 To change an existing root-owned deployment to a non-root operational user,
 uninstall the console and deploy it again with this flow. The new project is
