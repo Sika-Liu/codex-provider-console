@@ -221,6 +221,32 @@ install_codex() {
   fi
 }
 
+expose_codex_to_ssh() {
+  local codex_bin="$CODEX_CLI_HOME/.local/bin/codex"
+  local system_bin="/usr/local/bin/codex"
+
+  [[ -x "$codex_bin" ]] || return 0
+
+  # Codex Desktop probes the CLI through a non-interactive SSH command. That
+  # command does not load the user's shell profile, so ~/.local/bin is absent.
+  if [[ -e "$system_bin" && ! -L "$system_bin" ]]; then
+    echo "Codex CLI is installed for ${CODEX_CLI_USER}, but ${system_bin} is a regular file; leaving it unchanged." >&2
+    echo "To expose this user's CLI to Codex Desktop, point ${system_bin} to ${codex_bin}." >&2
+    return 0
+  fi
+
+  if [[ -w "$(dirname "$system_bin")" ]]; then
+    ln -sfn "$codex_bin" "$system_bin"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo ln -sfn "$codex_bin" "$system_bin"
+  else
+    echo "Codex CLI is installed for ${CODEX_CLI_USER}, but sudo is required to expose it at ${system_bin}." >&2
+    return 0
+  fi
+
+  echo "Exposed Codex CLI for non-interactive SSH: ${system_bin} -> ${codex_bin}"
+}
+
 if [[ "$(id -u)" -eq 0 ]] && getent group docker >/dev/null 2>&1 && ! id -nG "$DEPLOY_USER" | tr ' ' '\n' | grep -qx docker; then
   usermod -aG docker "$DEPLOY_USER"
   DOCKER_GROUP_NOTE="The operational user was added to the docker group. Sign out and sign in again before using codex-panel."
@@ -256,6 +282,7 @@ fi
 
 CODEX_CLI_VERSION="$(codex_version_for_user)"
 CODEX_CLI_VERSION="${CODEX_CLI_VERSION:-not_installed}"
+expose_codex_to_ssh
 
 if ! docker info >/dev/null 2>&1; then
   cat >&2 <<'EOF'
