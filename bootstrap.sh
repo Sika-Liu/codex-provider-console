@@ -92,17 +92,22 @@ ensure_command curl curl
 ensure_command git git
 
 if [[ -e "$PROJECT_DIR" ]]; then
-  cat >&2 <<EOF
+  if [[ -d "$PROJECT_DIR/.git" && -f "$PROJECT_DIR/install.sh" && ! -e "$PROJECT_DIR/.env" ]]; then
+    echo "An incomplete deployment was found at ${PROJECT_DIR}; resuming it."
+    git -C "$PROJECT_DIR" pull --ff-only
+  else
+    cat >&2 <<EOF
 ${PROJECT_DIR} already exists.
 To protect its existing configuration and data, one-command installation will not overwrite it.
 EOF
-  exit 1
-fi
-
-if [[ "$(id -u)" -eq 0 ]]; then
-  runuser -u "$DEPLOY_USER" -- git clone "$REPOSITORY_URL" "$PROJECT_DIR"
+    exit 1
+  fi
 else
-  git clone "$REPOSITORY_URL" "$PROJECT_DIR"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    runuser -u "$DEPLOY_USER" -- git clone "$REPOSITORY_URL" "$PROJECT_DIR"
+  else
+    git clone "$REPOSITORY_URL" "$PROJECT_DIR"
+  fi
 fi
 if [[ "$(id -u)" -eq 0 ]]; then
   exec bash "$PROJECT_DIR/install.sh" --deploy-user "$DEPLOY_USER" "${INSTALL_ARGS[@]}"
