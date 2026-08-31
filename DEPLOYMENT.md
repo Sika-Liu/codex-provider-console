@@ -190,6 +190,15 @@ panel user can download the private key again when needed, so keep it private.
 Select that private key in Codex App's SSH connection settings. Existing keys
 are never overwritten.
 
+Before connecting Codex App to a new server, make one Windows OpenSSH connection
+with that private key and verify the server fingerprint. Confirming it adds the
+host key to `~/.ssh/known_hosts`, which allows Codex App to verify the server's
+identity. If a server is rebuilt at the same IP, remove the old record with
+`ssh-keygen -R <server-ip>` before confirming the new fingerprint. This host-key
+verification is independent of whether the login private key uses RSA or Ed25519:
+the private key proves the user identity, while the host key proves the server
+identity.
+
 ## Data and portability
 
 All state is stored under `CODEX_HOME_HOST`, including provider profiles,

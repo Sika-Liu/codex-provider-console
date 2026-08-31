@@ -62,6 +62,14 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 
 健康检查还会验证面板管理的 Codex Desktop 部署密钥。没有密钥时，可在面板生成 Ed25519 密钥、将公钥授权到部署用户的 `authorized_keys`，并下载私钥。在 Codex App 的 SSH 连接中选择下载的私钥文件；私钥不会显示在页面中，但已登录面板可重复下载，请勿分享给他人。已有密钥不会被覆盖。
 
+首次通过 Codex App 连接一台新服务器前，请先使用 Windows OpenSSH 手动连接一次并核对服务器指纹：
+
+```powershell
+ssh -i "$env:USERPROFILE\.ssh\<部署密钥文件>" <部署用户>@<服务器IP>
+```
+
+确认指纹属于该服务器后输入 `yes`，Windows 会将其写入 `~/.ssh/known_hosts`，随后 Codex App 才能完成主机身份校验。若同一 IP 重装了服务器，先执行 `ssh-keygen -R <服务器IP>`，再重新连接并确认新指纹。此校验与用于登录的 RSA 或 Ed25519 用户私钥无关：用户私钥用于证明“你是谁”，主机指纹用于证明“服务器是谁”。
+
 缺少 Docker 时，先安装 Docker，或明确允许脚本自动安装：
 
 ```bash
