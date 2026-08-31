@@ -226,9 +226,25 @@ install_codex() {
   fi
 }
 
+codex_binary_for_user() {
+  local candidate
+  for candidate in \
+    "$CODEX_CLI_HOME/.local/bin/codex" \
+    "$CODEX_CLI_HOME/.codex/bin/codex" \
+    "$CODEX_CLI_HOME/.codex/packages/standalone/current/bin/codex"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 expose_codex_to_ssh() {
-  local codex_bin="$CODEX_CLI_HOME/.local/bin/codex"
+  local codex_bin
   local system_bin="/usr/local/bin/codex"
+
+  codex_bin=$(codex_binary_for_user || printf '%s' "$CODEX_CLI_HOME/.codex/packages/standalone/current/bin/codex")
 
   # Codex Desktop probes the CLI through a non-interactive SSH command. That
   # command does not load the user's shell profile, so ~/.local/bin is absent.
@@ -256,9 +272,10 @@ if [[ "$(id -u)" -eq 0 ]] && getent group docker >/dev/null 2>&1 && ! id -nG "$D
 fi
 
 codex_version_for_user() {
-  local codex_bin="$CODEX_CLI_HOME/.local/bin/codex"
+  local codex_bin
   local version=""
-  if [[ -x "$codex_bin" ]]; then
+  codex_bin=$(codex_binary_for_user || true)
+  if [[ -n "$codex_bin" ]]; then
     if [[ "$(id -un)" == "$CODEX_CLI_USER" ]]; then
       version=$("$codex_bin" --version 2>/dev/null | head -n 1 || true)
     else

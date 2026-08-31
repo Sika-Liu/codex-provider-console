@@ -60,7 +60,7 @@ case "${1:-}" in
     id "$cli_user" >/dev/null 2>&1 || { echo "Configured Codex CLI user does not exist: $cli_user" >&2; exit 1; }
     echo "Installing Codex CLI for ${cli_user} with the official installer."
     run_as_cli_user "$cli_user" 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh'
-    version=$(run_as_cli_user "$cli_user" 'PATH="$HOME/.local/bin:$PATH" codex --version | head -n 1')
+    version=$(run_as_cli_user "$cli_user" 'PATH="$HOME/.local/bin:$HOME/.codex/bin:$HOME/.codex/packages/standalone/current/bin:$PATH" codex --version | head -n 1')
     if [[ -z "$version" ]]; then
       echo "Codex CLI installation did not complete successfully." >&2
       exit 1

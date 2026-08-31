@@ -22,8 +22,13 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
 CODEX_CLI_USER = os.environ.get("CODEX_CLI_USER", "unknown")
 DEPLOY_USER = os.environ.get("DEPLOY_USER", "unknown")
-HOST_CODEX_BIN = Path(os.environ.get("HOST_CODEX_BIN", "/user-home/.local/bin/codex"))
 USER_HOME = Path(os.environ.get("USER_HOME_PATH", "/user-home"))
+HOST_CODEX_BIN = Path(os.environ.get("HOST_CODEX_BIN", "/user-home/.local/bin/codex"))
+HOST_CODEX_BIN_CANDIDATES = (
+    HOST_CODEX_BIN,
+    USER_HOME / ".codex" / "bin" / "codex",
+    USER_HOME / ".codex" / "packages" / "standalone" / "current" / "bin" / "codex",
+)
 HOST_USER_HOME_PATH = os.environ.get("HOST_USER_HOME_PATH", "")
 DEPLOYMENT_KEY_PATH = USER_HOME / ".ssh" / "codex-provider-console_ed25519"
 DEPLOYMENT_KEY_PUBLIC_PATH = DEPLOYMENT_KEY_PATH.with_suffix(".pub")
@@ -610,20 +615,23 @@ def preflight() -> dict:
 
 
 def executable_cli_path() -> Path | None:
-    if HOST_CODEX_BIN.is_file() and os.access(HOST_CODEX_BIN, os.X_OK):
-        return HOST_CODEX_BIN
-    if not HOST_CODEX_BIN.is_symlink() or not HOST_USER_HOME_PATH:
-        return None
+    for cli_path in HOST_CODEX_BIN_CANDIDATES:
+        if cli_path.is_file() and os.access(cli_path, os.X_OK):
+            return cli_path
+        if not cli_path.is_symlink() or not HOST_USER_HOME_PATH:
+            continue
 
-    # The official installer may create an absolute host-home symlink, such as
-    # /home/ubuntu/.local/bin/codex -> /home/ubuntu/.codex/.../bin/codex.
-    try:
-        target = Path(os.readlink(HOST_CODEX_BIN))
-        relative_target = target.relative_to(HOST_USER_HOME_PATH)
-    except (OSError, ValueError):
-        return None
-    mounted_target = USER_HOME / relative_target
-    return mounted_target if mounted_target.is_file() and os.access(mounted_target, os.X_OK) else None
+        # The official installer may create an absolute host-home symlink, such
+        # as /home/ubuntu/.local/bin/codex -> /home/ubuntu/.codex/.../bin/codex.
+        try:
+            target = Path(os.readlink(cli_path))
+            relative_target = target.relative_to(HOST_USER_HOME_PATH)
+        except (OSError, ValueError):
+            continue
+        mounted_target = USER_HOME / relative_target
+        if mounted_target.is_file() and os.access(mounted_target, os.X_OK):
+            return mounted_target
+    return None
 
 
 def health_check() -> dict:
@@ -894,7 +902,7 @@ def install_codex_from_health() -> dict:
     try:
         result = subprocess.run(
             ["/bin/sh", "-c", "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh"],
-            env={**os.environ, "HOME": "/user-home", "PATH": "/user-home/.local/bin:/usr/local/bin:/usr/bin:/bin"},
+            env={**os.environ, "HOME": "/user-home", "PATH": "/user-home/.local/bin:/user-home/.codex/bin:/user-home/.codex/packages/standalone/current/bin:/usr/local/bin:/usr/bin:/bin"},
             capture_output=True,
             text=True,
             timeout=180,
