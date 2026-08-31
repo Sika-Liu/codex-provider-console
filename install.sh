@@ -225,8 +225,6 @@ expose_codex_to_ssh() {
   local codex_bin="$CODEX_CLI_HOME/.local/bin/codex"
   local system_bin="/usr/local/bin/codex"
 
-  [[ -x "$codex_bin" ]] || return 0
-
   # Codex Desktop probes the CLI through a non-interactive SSH command. That
   # command does not load the user's shell profile, so ~/.local/bin is absent.
   if [[ -e "$system_bin" && ! -L "$system_bin" ]]; then
@@ -244,7 +242,7 @@ expose_codex_to_ssh() {
     return 0
   fi
 
-  echo "Exposed Codex CLI for non-interactive SSH: ${system_bin} -> ${codex_bin}"
+  echo "Prepared Codex CLI path for non-interactive SSH: ${system_bin} -> ${codex_bin}"
 }
 
 if [[ "$(id -u)" -eq 0 ]] && getent group docker >/dev/null 2>&1 && ! id -nG "$DEPLOY_USER" | tr ' ' '\n' | grep -qx docker; then

@@ -54,7 +54,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-cons
 bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-codex
 ```
 
-该选项要求服务器已安装 `curl`。官方安装脚本会将 Codex CLI 安装到当前登录的非 root 运维用户，而非固定安装到 `root`。用户名称取决于服务器实际账户，例如 `ubuntu`、`debian`、`ec2-user` 或自建账户。安装器还会在 `/usr/local/bin/codex` 创建指向该用户 CLI 的符号链接，使 Codex Desktop 的非交互 SSH 检测也能找到 CLI；此步骤可能请求一次 `sudo`。
+该选项要求服务器已安装 `curl`。官方安装脚本会将 Codex CLI 安装到当前登录的非 root 运维用户，而非固定安装到 `root`。用户名称取决于服务器实际账户，例如 `ubuntu`、`debian`、`ec2-user` 或自建账户。安装器会在 `/usr/local/bin/codex` 创建指向该用户 CLI 的符号链接，使 Codex Desktop 的非交互 SSH 检测也能找到 CLI；即使首次选择暂不安装 CLI，该链接也会预先创建，之后从健康检查安装 CLI 即可直接生效。此步骤可能请求一次 `sudo`。
 
 已有 root 部署如需切换为非 root 运维用户，请先卸载面板，再按本节重新部署；新项目会直接创建在目标用户的家目录中。登录令牌不会迁移，重新部署后请在控制台重新进行官方登录。
 
