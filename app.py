@@ -24,6 +24,7 @@ CODEX_CLI_USER = os.environ.get("CODEX_CLI_USER", "unknown")
 DEPLOY_USER = os.environ.get("DEPLOY_USER", "unknown")
 HOST_CODEX_BIN = Path(os.environ.get("HOST_CODEX_BIN", "/user-home/.local/bin/codex"))
 USER_HOME = Path(os.environ.get("USER_HOME_PATH", "/user-home"))
+HOST_USER_HOME_PATH = os.environ.get("HOST_USER_HOME_PATH", "")
 DEPLOYMENT_KEY_PATH = USER_HOME / ".ssh" / "codex-provider-console_ed25519"
 DEPLOYMENT_KEY_PUBLIC_PATH = DEPLOYMENT_KEY_PATH.with_suffix(".pub")
 AUTHORIZED_KEYS_PATH = USER_HOME / ".ssh" / "authorized_keys"
@@ -608,6 +609,23 @@ def preflight() -> dict:
     }
 
 
+def executable_cli_path() -> Path | None:
+    if HOST_CODEX_BIN.is_file() and os.access(HOST_CODEX_BIN, os.X_OK):
+        return HOST_CODEX_BIN
+    if not HOST_CODEX_BIN.is_symlink() or not HOST_USER_HOME_PATH:
+        return None
+
+    # The official installer may create an absolute host-home symlink, such as
+    # /home/ubuntu/.local/bin/codex -> /home/ubuntu/.codex/.../bin/codex.
+    try:
+        target = Path(os.readlink(HOST_CODEX_BIN))
+        relative_target = target.relative_to(HOST_USER_HOME_PATH)
+    except (OSError, ValueError):
+        return None
+    mounted_target = USER_HOME / relative_target
+    return mounted_target if mounted_target.is_file() and os.access(mounted_target, os.X_OK) else None
+
+
 def health_check() -> dict:
     checks: list[dict[str, str]] = []
 
@@ -615,10 +633,11 @@ def health_check() -> dict:
         checks.append({"name": name, "status": status, "detail": detail})
 
     add("Codex 数据目录", "pass" if CODEX_HOME.exists() else "fail", str(CODEX_HOME) if CODEX_HOME.exists() else f"目录不存在：{CODEX_HOME}")
+    cli_path = executable_cli_path()
     cli_version = ""
-    if HOST_CODEX_BIN.is_file() and os.access(HOST_CODEX_BIN, os.X_OK):
+    if cli_path:
         try:
-            cli_version = subprocess.run([str(HOST_CODEX_BIN), "--version"], capture_output=True, text=True, timeout=8, check=False).stdout.strip().splitlines()[0]
+            cli_version = subprocess.run([str(cli_path), "--version"], capture_output=True, text=True, timeout=8, check=False).stdout.strip().splitlines()[0]
         except (OSError, subprocess.SubprocessError, IndexError):
             cli_version = ""
     # The version recorded at deployment time can be stale. Only a binary that
@@ -883,10 +902,11 @@ def install_codex_from_health() -> dict:
         )
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(504, "Codex CLI 安装超时") from exc
-    if result.returncode != 0 or not HOST_CODEX_BIN.exists():
+    cli_path = executable_cli_path()
+    if result.returncode != 0 or not cli_path:
         detail = (result.stderr or result.stdout or "官方安装器未完成").strip()[-500:]
         raise HTTPException(502, f"Codex CLI 安装失败：{detail}")
-    version = subprocess.run([str(HOST_CODEX_BIN), "--version"], capture_output=True, text=True, timeout=8, check=False).stdout.strip().splitlines()[0]
+    version = subprocess.run([str(cli_path), "--version"], capture_output=True, text=True, timeout=8, check=False).stdout.strip().splitlines()[0]
     audit("codex_cli_installed_from_health", user=DEPLOY_USER, version=version)
     return {"version": version, "detail": f"Codex CLI 已安装到用户 {DEPLOY_USER}；健康检查已刷新。"}
 

@@ -19,6 +19,7 @@ services:
       CODEX_CLI_USER: "${CODEX_CLI_USER:-unknown}"
       DEPLOY_USER: "${DEPLOY_USER:-unknown}"
       HOST_CODEX_BIN: /user-home/.local/bin/codex
+      HOST_USER_HOME_PATH: "${CODEX_USER_HOME_HOST:-}"
     security_opt:
       - no-new-privileges:true
     cap_drop:
