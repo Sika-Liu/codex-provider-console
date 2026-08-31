@@ -262,9 +262,6 @@ codex_version_for_user() {
       version=$(runuser -u "$CODEX_CLI_USER" -- "$codex_bin" --version 2>/dev/null | head -n 1 || true)
     fi
   fi
-  if [[ -z "$version" ]] && command -v docker >/dev/null 2>&1 && docker compose -f "$PROJECT_DIR/compose.yml" ps -q 2>/dev/null | grep -q .; then
-    version=$(docker compose -f "$PROJECT_DIR/compose.yml" exec -T codex-provider-console /user-home/.local/bin/codex --version 2>/dev/null | head -n 1 || true)
-  fi
   printf '%s\n' "$version"
 }
 

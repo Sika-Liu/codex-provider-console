@@ -621,7 +621,9 @@ def health_check() -> dict:
             cli_version = subprocess.run([str(HOST_CODEX_BIN), "--version"], capture_output=True, text=True, timeout=8, check=False).stdout.strip().splitlines()[0]
         except (OSError, subprocess.SubprocessError, IndexError):
             cli_version = ""
-    cli_installed = bool(cli_version) or CODEX_CLI_VERSION not in {"", "not_installed", "unknown"}
+    # The version recorded at deployment time can be stale. Only a binary that
+    # is executable from the deployment user's mounted home proves SSH can use it.
+    cli_installed = bool(cli_version)
     add(
         "Codex CLI",
         "pass" if cli_installed else "fail",
