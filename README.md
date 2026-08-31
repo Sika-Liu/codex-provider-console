@@ -35,8 +35,27 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 
 安装时会交互式询问控制台端口。服务默认监听 `0.0.0.0`，完成后会输出公网地址、内网地址、SSH 隧道命令、配置文件路径和安全组提示，行为与 1Panel 类似。
 
-若在首次选择端口前中断，引导脚本已克隆的项目目录中尚未包含 `.env`。再次执行同一条部署命令会自动续装；已有 `.env` 的项目仍不会被一键部署覆盖。
 首次安装还会生成管理员用户名、随机密码和会话密钥，并在结果中显示一次。登录后可从左侧菜单退出登录。
+
+### 部署中断后继续安装
+
+部署过程中可以随时按 `Ctrl+C` 中断，不会删除已有项目文件。处理方式取决于中断时机：
+
+- 在首次 `Panel port [8787]:` 提示前或此处中断时，项目仅完成克隆，尚未生成 `.env`。再次执行同一条一键部署命令即可自动续装：
+
+  ```bash
+  bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
+  ```
+
+- 已生成 `.env`、正在安装 Docker/CLI，或已开始构建容器后中断时，为保护已有配置，一键引导不会覆盖项目。请进入项目目录续装：
+
+  ```bash
+  cd ~/codex-provider-console
+  git pull --ff-only
+  bash install.sh
+  ```
+
+再次看到 `Panel port [8787]:` 时，直接按 Enter 使用默认端口，或输入未被占用的端口后按 Enter。
 
 登录控制台后打开左侧“健康检查”，可检查 Codex 数据目录、写入权限、Codex CLI、SSH 登录用户与部署用户是否一致、`config.toml`、`auth.json`、控制台认证、当前供应商、供应商真实请求和磁盘空间。SSH 私钥不会上传或读取；请在“SSH 连接”中保存 Codex Desktop 使用的登录用户名。若未安装 Codex CLI，可直接在健康检查页选择安装；安装器会在部署用户的主目录中写入 CLI 和必要的 shell 配置。
 

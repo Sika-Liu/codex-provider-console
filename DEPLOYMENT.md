@@ -79,6 +79,32 @@ is optional and is configured later from the panel.
 It also generates a panel administrator password and session secret. The
 credentials are stored in `.env`, which the installer restricts to mode `600`.
 
+### Resuming an interrupted deployment
+
+You can stop the installer with `Ctrl+C`; it does not remove project files.
+The resume command depends on when the interruption happened:
+
+- Before, or while responding to, the first `Panel port [8787]:` prompt, only
+  the repository has been cloned and no `.env` exists. Run the same bootstrap
+  command again to resume automatically:
+
+  ```bash
+  bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
+  ```
+
+- After `.env` has been created, while Docker or the CLI is being installed, or
+  while the container is being built, preserve the existing configuration and
+  resume from the project directory instead:
+
+  ```bash
+  cd ~/codex-provider-console
+  git pull --ff-only
+  bash install.sh
+  ```
+
+At the panel-port prompt, press Enter to accept `8787`, or enter another unused
+port and press Enter.
+
 To allow Docker installation through the installer on common Linux distributions:
 
 ```bash
