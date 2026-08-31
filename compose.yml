@@ -8,6 +8,9 @@ services:
     volumes:
       - "${CODEX_HOME_HOST:-./codex-data}:/codex"
       - "${CODEX_USER_HOME_HOST:-./codex-user-home}:/user-home"
+      # Codex Desktop runs a non-interactive SSH command, which normally finds
+      # the CLI through this stable host path.
+      - "/usr/local/bin:/host-local-bin:ro"
     environment:
       CODEX_HOME: /codex
       PANEL_AUTH_ENABLED: "${PANEL_AUTH_ENABLED:-true}"
@@ -19,6 +22,7 @@ services:
       CODEX_CLI_USER: "${CODEX_CLI_USER:-unknown}"
       DEPLOY_USER: "${DEPLOY_USER:-unknown}"
       HOST_CODEX_BIN: /user-home/.local/bin/codex
+      HOST_SSH_CODEX_BIN: /host-local-bin/codex
       HOST_USER_HOME_PATH: "${CODEX_USER_HOME_HOST:-}"
     security_opt:
       - no-new-privileges:true

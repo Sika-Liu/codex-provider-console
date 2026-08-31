@@ -24,6 +24,7 @@ CODEX_CLI_USER = os.environ.get("CODEX_CLI_USER", "unknown")
 DEPLOY_USER = os.environ.get("DEPLOY_USER", "unknown")
 USER_HOME = Path(os.environ.get("USER_HOME_PATH", "/user-home"))
 HOST_CODEX_BIN = Path(os.environ.get("HOST_CODEX_BIN", "/user-home/.local/bin/codex"))
+HOST_SSH_CODEX_BIN = Path(os.environ.get("HOST_SSH_CODEX_BIN", "/host-local-bin/codex"))
 HOST_CODEX_BIN_CANDIDATES = (
     HOST_CODEX_BIN,
     USER_HOME / ".codex" / "bin" / "codex",
@@ -614,23 +615,30 @@ def preflight() -> dict:
     }
 
 
-def executable_cli_path() -> Path | None:
-    for cli_path in HOST_CODEX_BIN_CANDIDATES:
-        if cli_path.is_file() and os.access(cli_path, os.X_OK):
-            return cli_path
-        if not cli_path.is_symlink() or not HOST_USER_HOME_PATH:
-            continue
-
-        # The official installer may create an absolute host-home symlink, such
-        # as /home/ubuntu/.local/bin/codex -> /home/ubuntu/.codex/.../bin/codex.
+def mounted_executable_path(cli_path: Path) -> Path | None:
+    """Return a CLI executable visible in this container for a host path."""
+    if cli_path.is_symlink() and HOST_USER_HOME_PATH:
+        # /usr/local/bin/codex normally points into the deployment user's home.
+        # Map its absolute host target to the corresponding mounted user home.
         try:
             target = Path(os.readlink(cli_path))
             relative_target = target.relative_to(HOST_USER_HOME_PATH)
         except (OSError, ValueError):
-            continue
-        mounted_target = USER_HOME / relative_target
-        if mounted_target.is_file() and os.access(mounted_target, os.X_OK):
-            return mounted_target
+            pass
+        else:
+            mounted_target = USER_HOME / relative_target
+            if mounted_target.is_file() and os.access(mounted_target, os.X_OK):
+                return mounted_target
+    if cli_path.is_file() and os.access(cli_path, os.X_OK):
+        return cli_path
+    return None
+
+
+def executable_user_cli_path() -> Path | None:
+    for cli_path in HOST_CODEX_BIN_CANDIDATES:
+        executable_path = mounted_executable_path(cli_path)
+        if executable_path:
+            return executable_path
     return None
 
 
@@ -641,7 +649,11 @@ def health_check() -> dict:
         checks.append({"name": name, "status": status, "detail": detail})
 
     add("Codex 数据目录", "pass" if CODEX_HOME.exists() else "fail", str(CODEX_HOME) if CODEX_HOME.exists() else f"目录不存在：{CODEX_HOME}")
-    cli_path = executable_cli_path()
+    # The desktop app does not source ~/.bashrc for SSH probes. Treat the
+    # stable /usr/local/bin path as the source of truth, not a CLI found only
+    # in the deployment user's interactive shell environment.
+    cli_path = mounted_executable_path(HOST_SSH_CODEX_BIN)
+    user_cli_path = executable_user_cli_path()
     cli_version = ""
     if cli_path:
         try:
@@ -649,12 +661,21 @@ def health_check() -> dict:
         except (OSError, subprocess.SubprocessError, IndexError):
             cli_version = ""
     # The version recorded at deployment time can be stale. Only a binary that
-    # is executable from the deployment user's mounted home proves SSH can use it.
+    # resolves through /usr/local/bin/codex proves non-interactive SSH can use it.
     cli_installed = bool(cli_version)
+    if cli_installed:
+        cli_detail = f"{cli_version}；非交互 SSH 路径 /usr/local/bin/codex 可用；部署运维用户：{DEPLOY_USER}"
+    elif user_cli_path:
+        cli_detail = (
+            f"已在用户 {DEPLOY_USER} 的主目录发现 Codex CLI，但 /usr/local/bin/codex 不可用；"
+            "Codex Desktop 的非交互 SSH 可能找不到它。请重新执行部署更新以修复链接。"
+        )
+    else:
+        cli_detail = f"用户 {DEPLOY_USER} 未检测到 Codex CLI；可在此页直接安装。"
     add(
         "Codex CLI",
         "pass" if cli_installed else "fail",
-        (f"{cli_version or CODEX_CLI_VERSION}；部署运维用户：{DEPLOY_USER}" if cli_installed else f"用户 {DEPLOY_USER} 未检测到 Codex CLI；可在此页直接安装。"),
+        cli_detail,
     )
     ssh_user = str(panel_settings().get("ssh", {}).get("user", "")).strip()
     if not ssh_user:
@@ -910,7 +931,7 @@ def install_codex_from_health() -> dict:
         )
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(504, "Codex CLI 安装超时") from exc
-    cli_path = executable_cli_path()
+    cli_path = executable_user_cli_path()
     if result.returncode != 0 or not cli_path:
         detail = (result.stderr or result.stdout or "官方安装器未完成").strip()[-500:]
         raise HTTPException(502, f"Codex CLI 安装失败：{detail}")

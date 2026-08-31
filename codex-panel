@@ -23,6 +23,38 @@ run_as_cli_user() {
   fi
 }
 
+expose_codex_to_ssh() {
+  local cli_user="$1"
+  local cli_home candidate cli_bin system_bin="/usr/local/bin/codex"
+  cli_home=$(getent passwd "$cli_user" | cut -d: -f6)
+  [[ -n "$cli_home" ]] || { echo "Could not determine the home directory for ${cli_user}." >&2; return 1; }
+
+  for candidate in \
+    "$cli_home/.local/bin/codex" \
+    "$cli_home/.codex/bin/codex" \
+    "$cli_home/.codex/packages/standalone/current/bin/codex"; do
+    if [[ -x "$candidate" ]]; then
+      cli_bin="$candidate"
+      break
+    fi
+  done
+  [[ -n "${cli_bin:-}" ]] || { echo "Codex CLI executable was not found after installation." >&2; return 1; }
+
+  if [[ -e "$system_bin" && ! -L "$system_bin" ]]; then
+    echo "${system_bin} is a regular file; it was not replaced." >&2
+    return 1
+  fi
+  if [[ -w "$(dirname "$system_bin")" ]]; then
+    ln -sfn "$cli_bin" "$system_bin"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo ln -sfn "$cli_bin" "$system_bin"
+  else
+    echo "sudo is required to expose Codex CLI at ${system_bin}." >&2
+    return 1
+  fi
+  echo "Prepared non-interactive SSH CLI path: ${system_bin} -> ${cli_bin}"
+}
+
 usage() {
   cat <<'EOF'
 Usage: codex-panel <command>
@@ -65,6 +97,7 @@ case "${1:-}" in
       echo "Codex CLI installation did not complete successfully." >&2
       exit 1
     fi
+    expose_codex_to_ssh "$cli_user"
     if grep -q '^CODEX_CLI_VERSION=' "$PROJECT_DIR/.env"; then
       sed -i "s|^CODEX_CLI_VERSION=.*|CODEX_CLI_VERSION=${version}|" "$PROJECT_DIR/.env"
     else
