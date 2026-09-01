@@ -81,6 +81,10 @@ case "${1:-}" in
   logs) docker compose logs -f --tail=100 codex-provider-console ;;
   update)
     git pull --ff-only
+    cli_user=$(configured_cli_user)
+    if id "$cli_user" >/dev/null 2>&1; then
+      expose_codex_to_ssh "$cli_user" || true
+    fi
     docker compose up -d --build --force-recreate
     ;;
   install-codex)

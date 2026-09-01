@@ -24,7 +24,6 @@ CODEX_CLI_USER = os.environ.get("CODEX_CLI_USER", "unknown")
 DEPLOY_USER = os.environ.get("DEPLOY_USER", "unknown")
 USER_HOME = Path(os.environ.get("USER_HOME_PATH", "/user-home"))
 HOST_CODEX_BIN = Path(os.environ.get("HOST_CODEX_BIN", "/user-home/.local/bin/codex"))
-HOST_SSH_CODEX_BIN = Path(os.environ.get("HOST_SSH_CODEX_BIN", "/host-local-bin/codex"))
 HOST_CODEX_BIN_CANDIDATES = (
     HOST_CODEX_BIN,
     USER_HOME / ".codex" / "bin" / "codex",
@@ -621,7 +620,7 @@ def mounted_executable_path(cli_path: Path) -> Path | None:
     seen_paths: set[Path] = set()
 
     # The official installer often creates a chain such as:
-    # /usr/local/bin/codex -> ~/.local/bin/codex -> ~/.codex/.../codex.
+    # ~/.local/bin/codex -> ~/.codex/.../codex.
     # Container mounts cannot follow absolute host-home links automatically.
     for _ in range(8):
         if current_path in seen_paths:
@@ -666,27 +665,21 @@ def health_check() -> dict:
         checks.append({"name": name, "status": status, "detail": detail})
 
     add("Codex 数据目录", "pass" if CODEX_HOME.exists() else "fail", str(CODEX_HOME) if CODEX_HOME.exists() else f"目录不存在：{CODEX_HOME}")
-    # The desktop app does not source ~/.bashrc for SSH probes. Treat the
-    # stable /usr/local/bin path as the source of truth, not a CLI found only
-    # in the deployment user's interactive shell environment.
-    cli_path = mounted_executable_path(HOST_SSH_CODEX_BIN)
-    user_cli_path = executable_user_cli_path()
+    # The panel mounts the deployment user's home. This is the only filesystem
+    # view shared reliably by rootful and rootless Docker deployments.
+    cli_path = executable_user_cli_path()
     cli_version = ""
     if cli_path:
         try:
             cli_version = subprocess.run([str(cli_path), "--version"], capture_output=True, text=True, timeout=8, check=False).stdout.strip().splitlines()[0]
         except (OSError, subprocess.SubprocessError, IndexError):
             cli_version = ""
-    # The version recorded at deployment time can be stale. Only a binary that
-    # resolves through /usr/local/bin/codex proves non-interactive SSH can use it.
+    # The version recorded at deployment time can be stale. Run the resolved
+    # user CLI instead; install.sh maintains /usr/local/bin/codex as its stable
+    # non-interactive SSH entry point.
     cli_installed = bool(cli_version)
     if cli_installed:
-        cli_detail = f"{cli_version}；非交互 SSH 路径 /usr/local/bin/codex 可用；部署运维用户：{DEPLOY_USER}"
-    elif user_cli_path:
-        cli_detail = (
-            f"已在用户 {DEPLOY_USER} 的主目录发现 Codex CLI，但 /usr/local/bin/codex 不可用；"
-            "Codex Desktop 的非交互 SSH 可能找不到它。请重新执行部署更新以修复链接。"
-        )
+        cli_detail = f"{cli_version}；已验证部署用户 {DEPLOY_USER} 的实际 CLI。"
     else:
         cli_detail = f"用户 {DEPLOY_USER} 未检测到 Codex CLI；可在此页直接安装。"
     add(

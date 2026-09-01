@@ -228,7 +228,9 @@ expose_codex_to_ssh() {
   local codex_bin
   local system_bin="/usr/local/bin/codex"
 
-  codex_bin=$(codex_binary_for_user || printf '%s' "$CODEX_CLI_HOME/.codex/packages/standalone/current/bin/codex")
+  # The official installer keeps this launcher stable while standalone release
+  # directories and the `current` link may change between CLI versions.
+  codex_bin=$(codex_binary_for_user || printf '%s' "$CODEX_CLI_HOME/.local/bin/codex")
 
   # Codex Desktop probes the CLI through a non-interactive SSH command. That
   # command does not load the user's shell profile, so ~/.local/bin is absent.
