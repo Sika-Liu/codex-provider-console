@@ -616,21 +616,38 @@ def preflight() -> dict:
 
 
 def mounted_executable_path(cli_path: Path) -> Path | None:
-    """Return a CLI executable visible in this container for a host path."""
-    if cli_path.is_symlink() and HOST_USER_HOME_PATH:
-        # /usr/local/bin/codex normally points into the deployment user's home.
-        # Map its absolute host target to the corresponding mounted user home.
+    """Resolve a host CLI path through the deployment user's mounted home."""
+    current_path = cli_path
+    seen_paths: set[Path] = set()
+
+    # The official installer often creates a chain such as:
+    # /usr/local/bin/codex -> ~/.local/bin/codex -> ~/.codex/.../codex.
+    # Container mounts cannot follow absolute host-home links automatically.
+    for _ in range(8):
+        if current_path in seen_paths:
+            return None
+        seen_paths.add(current_path)
+
+        if not current_path.is_symlink():
+            if current_path.is_file() and os.access(current_path, os.X_OK):
+                return current_path
+            return None
+
         try:
-            target = Path(os.readlink(cli_path))
+            target = Path(os.readlink(current_path))
+        except OSError:
+            return None
+
+        if not target.is_absolute():
+            current_path = current_path.parent / target
+            continue
+        if not HOST_USER_HOME_PATH:
+            return None
+        try:
             relative_target = target.relative_to(HOST_USER_HOME_PATH)
-        except (OSError, ValueError):
-            pass
-        else:
-            mounted_target = USER_HOME / relative_target
-            if mounted_target.is_file() and os.access(mounted_target, os.X_OK):
-                return mounted_target
-    if cli_path.is_file() and os.access(cli_path, os.X_OK):
-        return cli_path
+        except ValueError:
+            return None
+        current_path = USER_HOME / relative_target
     return None
 
 
