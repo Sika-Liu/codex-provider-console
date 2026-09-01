@@ -808,6 +808,11 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         masked_token = 'experimental_bearer_token = "***"'
         if profile.get("bearer_token"):
             provider_config = provider_config.replace(masked_token, f'experimental_bearer_token = {toml_quote(profile["bearer_token"])}')
+        # The current UI may save feature-only settings such as [features].
+        # Those settings supplement a provider; they must not replace the
+        # model_provider entry that identifies the active provider.
+        if not re.search(r"^\s*model_provider\s*=", provider_config, re.M):
+            provider_config = "\n".join(generated) + "\n\n" + provider_config
     else:
         provider_config = "\n".join(generated)
     if profile.get("goals_configured", False):
