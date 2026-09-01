@@ -58,7 +58,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 
 再次看到 `Panel port [8787]:` 时，直接按 Enter 使用默认端口，或输入未被占用的端口后按 Enter。
 
-登录控制台后打开左侧“健康检查”，可检查 Codex 数据目录、写入权限、Codex CLI、SSH 登录用户与部署用户是否一致、`config.toml`、`auth.json`、控制台认证、当前供应商、供应商真实请求和磁盘空间。CLI 检查会实际执行部署用户目录中的 CLI，并验证其版本；部署和更新命令会维护 `/usr/local/bin/codex` 作为 Codex Desktop 非交互 SSH 的稳定入口。SSH 私钥不会上传或读取；请在“SSH 连接”中保存 Codex Desktop 使用的登录用户名。若未安装 Codex CLI，可直接在健康检查页选择安装；安装器会在部署用户的主目录中写入 CLI 和必要的 shell 配置。
+登录控制台后打开左侧“健康检查”，可检查 Codex 数据目录、写入权限、Codex CLI、`config.toml`、`auth.json`、控制台认证、当前供应商、供应商真实请求和磁盘空间。CLI 检查会实际执行部署用户目录中的 CLI，并验证其版本；部署和更新命令会维护 `/usr/local/bin/codex` 作为 Codex Desktop 非交互 SSH 的稳定入口。若未安装 Codex CLI，可直接在健康检查页选择安装；安装器会在部署用户的主目录中写入 CLI 和必要的 shell 配置。
 
 健康检查还会验证面板管理的 Codex Desktop 部署密钥。没有密钥时，可在面板生成 Ed25519 密钥、将公钥授权到部署用户的 `authorized_keys`，并下载私钥。在 Codex App 的 SSH 连接中选择下载的私钥文件；私钥不会显示在页面中，但已登录面板可重复下载，请勿分享给他人。已有密钥不会被覆盖。
 
