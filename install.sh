@@ -338,6 +338,7 @@ set_env CODEX_CLI_VERSION "$CODEX_CLI_VERSION" true
 set_env CODEX_CLI_USER "$CODEX_CLI_USER" true
 set_env DEPLOY_USER "$DEPLOY_USER" true
 set_env CODEX_USER_HOME_HOST "$CODEX_USER_HOME_HOST" true
+set_env CODEX_USER_HOME_CONTAINER_PATH "$CODEX_USER_HOME_HOST" true
 
 existing_username=$(sed -n 's/^PANEL_USERNAME=//p' "$ENV_FILE" | tail -n 1)
 existing_password=$(sed -n 's/^PANEL_PASSWORD=//p' "$ENV_FILE" | tail -n 1)

@@ -930,10 +930,27 @@ def get_health() -> dict:
 def install_codex_from_health() -> dict:
     if not HOST_CODEX_BIN.parent.parent.exists():
         raise HTTPException(409, "部署未挂载当前用户的主目录；请更新面板后重试")
+    install_env = os.environ.copy()
+    # CODEX_HOME is the panel's /codex data mount. Passing it to the official
+    # installer makes ~/.local/bin/codex point at a container-only path.
+    install_env.pop("CODEX_HOME", None)
+    install_env.update(
+        {
+            "HOME": str(USER_HOME),
+            "PATH": f"{USER_HOME}/.local/bin:{USER_HOME}/.codex/bin:{USER_HOME}/.codex/packages/standalone/current/bin:/usr/local/bin:/usr/bin:/bin",
+        }
+    )
+    launcher = USER_HOME / ".local" / "bin" / "codex"
+    if launcher.is_symlink():
+        try:
+            if os.readlink(launcher).startswith("/codex/"):
+                launcher.unlink()
+        except OSError:
+            pass
     try:
         result = subprocess.run(
             ["/bin/sh", "-c", "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh"],
-            env={**os.environ, "HOME": "/user-home", "PATH": "/user-home/.local/bin:/user-home/.codex/bin:/user-home/.codex/packages/standalone/current/bin:/usr/local/bin:/usr/bin:/bin"},
+            env=install_env,
             capture_output=True,
             text=True,
             timeout=180,

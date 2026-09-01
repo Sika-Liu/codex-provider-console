@@ -6,6 +6,7 @@ set -eu
 # such as ssh-keygen can resolve the current user without elevating privileges.
 uid=$(id -u)
 gid=$(id -g)
+home=${HOME:-/user-home}
 if ! grep -Eq "^[^:]*:[^:]*:${uid}:" /etc/passwd; then
     nss_wrapper=$(find /usr/lib -type f -name libnss_wrapper.so -print -quit 2>/dev/null || true)
     if [ -n "$nss_wrapper" ]; then
@@ -15,7 +16,7 @@ if ! grep -Eq "^[^:]*:[^:]*:${uid}:" /etc/passwd; then
         group_file="$runtime_dir/group"
         cp /etc/passwd "$passwd_file"
         cp /etc/group "$group_file"
-        printf 'codex-panel:x:%s:%s:Codex Panel:/user-home:/usr/sbin/nologin\n' "$uid" "$gid" >> "$passwd_file"
+        printf 'codex-panel:x:%s:%s:Codex Panel:%s:/usr/sbin/nologin\n' "$uid" "$gid" "$home" >> "$passwd_file"
         if ! grep -Eq "^[^:]*:[^:]*:${gid}:" /etc/group; then
             printf 'codex-panel:x:%s:\n' "$gid" >> "$group_file"
         fi

@@ -23,6 +23,19 @@ run_as_cli_user() {
   fi
 }
 
+ensure_cli_home_mount_path() {
+  local cli_user="$1"
+  local cli_home
+  cli_home=$(getent passwd "$cli_user" | cut -d: -f6)
+  [[ -n "$cli_home" ]] || { echo "Could not determine the home directory for ${cli_user}." >&2; return 1; }
+
+  if grep -q '^CODEX_USER_HOME_CONTAINER_PATH=' "$PROJECT_DIR/.env"; then
+    sed -i "s|^CODEX_USER_HOME_CONTAINER_PATH=.*|CODEX_USER_HOME_CONTAINER_PATH=${cli_home}|" "$PROJECT_DIR/.env"
+  else
+    printf 'CODEX_USER_HOME_CONTAINER_PATH=%s\n' "$cli_home" >> "$PROJECT_DIR/.env"
+  fi
+}
+
 expose_codex_to_ssh() {
   local cli_user="$1"
   local cli_home candidate cli_bin system_bin="/usr/local/bin/codex"
@@ -82,6 +95,7 @@ case "${1:-}" in
   update)
     git pull --ff-only
     cli_user=$(configured_cli_user)
+    ensure_cli_home_mount_path "$cli_user"
     if id "$cli_user" >/dev/null 2>&1; then
       expose_codex_to_ssh "$cli_user" || true
     fi

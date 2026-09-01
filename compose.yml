@@ -7,7 +7,9 @@ services:
       - "${PANEL_BIND:-127.0.0.1}:${PANEL_PORT:-8787}:8787"
     volumes:
       - "${CODEX_HOME_HOST:-./codex-data}:/codex"
-      - "${CODEX_USER_HOME_HOST:-./codex-user-home}:/user-home"
+      # Mount the home directory at its original absolute path. The official
+      # installer writes absolute symlinks, which must remain valid over SSH.
+      - "${CODEX_USER_HOME_HOST:-./codex-user-home}:${CODEX_USER_HOME_CONTAINER_PATH:-/user-home}"
     environment:
       CODEX_HOME: /codex
       PANEL_AUTH_ENABLED: "${PANEL_AUTH_ENABLED:-true}"
@@ -18,7 +20,9 @@ services:
       CODEX_CLI_VERSION: "${CODEX_CLI_VERSION:-not_installed}"
       CODEX_CLI_USER: "${CODEX_CLI_USER:-unknown}"
       DEPLOY_USER: "${DEPLOY_USER:-unknown}"
-      HOST_CODEX_BIN: /user-home/.local/bin/codex
+      HOME: "${CODEX_USER_HOME_CONTAINER_PATH:-/user-home}"
+      USER_HOME_PATH: "${CODEX_USER_HOME_CONTAINER_PATH:-/user-home}"
+      HOST_CODEX_BIN: "${CODEX_USER_HOME_CONTAINER_PATH:-/user-home}/.local/bin/codex"
       HOST_USER_HOME_PATH: "${CODEX_USER_HOME_HOST:-}"
     security_opt:
       - no-new-privileges:true
