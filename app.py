@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tomllib
 import threading
@@ -41,6 +42,9 @@ AUTH_PATH = CODEX_HOME / "auth.json"
 BACKUP_ROOT = CODEX_HOME / "backups" / "control-panel"
 AUDIT_PATH = CODEX_HOME / "control-panel-audit.jsonl"
 PROFILE_ID = re.compile(r"^[a-zA-Z0-9_-]{1,48}$")
+THREAD_ID = re.compile(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+THREAD_ID_IN_TEXT = re.compile(r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+SESSIONS_PATH = CODEX_HOME / "sessions"
 
 app = FastAPI(title="Codex Provider Console", docs_url=None, redoc_url=None)
 
@@ -345,6 +349,119 @@ def audit(action: str, **details: str | bool | None) -> None:
     with AUDIT_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
     os.chmod(AUDIT_PATH, 0o600)
+
+
+def session_id_from_path(path: Path) -> str | None:
+    """Return the rollout thread UUID embedded in a Codex session filename."""
+    match = THREAD_ID_IN_TEXT.search(path.name)
+    return match.group(1).lower() if match else None
+
+
+def read_session_summary(path: Path) -> dict:
+    """Read only the opening JSONL records; session files can be very large."""
+    title = ""
+    cwd = ""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for _ in range(24):
+                line = handle.readline()
+                if not line:
+                    break
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = record.get("payload") if isinstance(record.get("payload"), dict) else record
+                if not cwd:
+                    cwd = str(payload.get("cwd") or record.get("cwd") or "")[:500]
+                if not title:
+                    for key in ("title", "session_title", "summary"):
+                        value = payload.get(key) or record.get(key)
+                        if isinstance(value, str) and value.strip():
+                            title = value.strip().replace("\n", " ")[:180]
+                            break
+    except (OSError, UnicodeDecodeError):
+        pass
+    stat = path.stat()
+    return {
+        "id": session_id_from_path(path),
+        "title": title or path.stem,
+        "cwd": cwd,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        "size": stat.st_size,
+        "path": str(path.relative_to(CODEX_HOME)),
+    }
+
+
+def session_files(thread_id: str) -> list[Path]:
+    if not SESSIONS_PATH.is_dir():
+        return []
+    matches: list[Path] = []
+    for candidate in SESSIONS_PATH.rglob("*.jsonl"):
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(SESSIONS_PATH.resolve(strict=True))
+        except (OSError, ValueError):
+            continue
+        if session_id_from_path(resolved) == thread_id:
+            matches.append(resolved)
+    return sorted(matches)
+
+
+def list_server_sessions() -> list[dict]:
+    sessions: list[dict] = []
+    for path in SESSIONS_PATH.rglob("*.jsonl") if SESSIONS_PATH.is_dir() else ():
+        thread_id = session_id_from_path(path)
+        if thread_id:
+            sessions.append(read_session_summary(path))
+    return sorted(sessions, key=lambda item: item["modified_at"], reverse=True)
+
+
+def quote_sql_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def session_state_databases() -> list[Path]:
+    """Find Codex state databases without touching unrelated SQLite files."""
+    candidates: set[Path] = set()
+    for root in (CODEX_HOME, CODEX_HOME / "sqlite"):
+        if root.is_dir():
+            candidates.update(root.glob("state*.sqlite"))
+    return sorted(path for path in candidates if path.is_file())
+
+
+def delete_session_state(thread_id: str) -> tuple[int, list[str]]:
+    """Remove direct thread references from Codex's local SQLite state indexes."""
+    removed = 0
+    touched: list[str] = []
+    candidate_columns = {"id", "thread_id", "session_id", "rollout_id", "conversation_id"}
+    for database in session_state_databases():
+        try:
+            connection = sqlite3.connect(database, timeout=2)
+            connection.execute("PRAGMA busy_timeout = 2000")
+            tables = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+            database_removed = 0
+            for (table_name,) in tables:
+                columns = connection.execute(f"PRAGMA table_info({quote_sql_identifier(table_name)})").fetchall()
+                for column in columns:
+                    column_name = str(column[1])
+                    if column_name.lower() not in candidate_columns:
+                        continue
+                    table = quote_sql_identifier(str(table_name))
+                    field = quote_sql_identifier(column_name)
+                    cursor = connection.execute(f"DELETE FROM {table} WHERE {field} = ?", (thread_id,))
+                    database_removed += max(cursor.rowcount, 0)
+            connection.commit()
+            if database_removed:
+                touched.append(database.name)
+                removed += database_removed
+        except sqlite3.Error as exc:
+            raise HTTPException(409, f"无法更新会话状态库 {database.name}：{exc}。请关闭远程 Codex 连接后重试。") from exc
+        finally:
+            if 'connection' in locals():
+                connection.close()
+                del connection
+    return removed, touched
 
 
 def toml_quote(value: str) -> str:
@@ -1225,6 +1342,49 @@ def fetch_models_from_upstream(request: UpstreamModelFetch) -> dict:
     return fetch_upstream_models(request)
 
 
+@app.get("/api/sessions")
+def get_server_sessions() -> dict:
+    sessions = list_server_sessions()
+    return {"sessions": sessions, "count": len(sessions)}
+
+
+@app.delete("/api/sessions/{thread_id}")
+def delete_server_session(thread_id: str) -> dict:
+    normalized_id = thread_id.lower()
+    if not THREAD_ID.fullmatch(normalized_id):
+        raise HTTPException(422, "无效的会话标识")
+    files = session_files(normalized_id)
+    if not files:
+        raise HTTPException(404, "服务器的 Codex 会话文件中未找到该会话")
+    for path in files:
+        if not os.access(path, os.W_OK):
+            raise HTTPException(409, f"没有删除会话文件的权限：{path.name}")
+
+    # Delete indexes first. A locked database means the active remote Codex
+    # process could immediately recreate a stale sidebar entry.
+    state_rows, state_databases = delete_session_state(normalized_id)
+    deleted_files = 0
+    try:
+        for path in files:
+            path.unlink()
+            deleted_files += 1
+    except OSError as exc:
+        raise HTTPException(500, f"会话状态索引已清理，但删除会话文件失败：{exc}") from exc
+    audit(
+        "server_session_deleted",
+        thread_id=normalized_id,
+        files=str(deleted_files),
+        state_rows=str(state_rows),
+        state_databases=", ".join(state_databases) or None,
+    )
+    return {
+        "deleted": normalized_id,
+        "files": deleted_files,
+        "state_rows": state_rows,
+        "detail": "会话已从服务器永久删除。请在 Codex App 中重新连接远程服务器以刷新会话列表。",
+    }
+
+
 @app.get("/api/backups")
 def list_backups() -> list[dict]:
     if not BACKUP_ROOT.exists():
@@ -1301,6 +1461,23 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
  async function saveConsoleSettings(){try{const s=await api('/api/settings'),payload={provider_switching_enabled:s.provider_switching_enabled,reverse_proxy:{domain:$('#proxy-domain').value.trim(),upstream:$('#proxy-upstream').value.trim()||'127.0.0.1:8787',cert:$('#proxy-cert').value.trim(),key:$('#proxy-key').value.trim()}};await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});note('反向代理配置已保存。','proxy-notice')}catch(e){note(e.message)}}
  loadConsoleSettings();openConsoleSection(localStorage.getItem('console-section')||'providers');
  </script>'''
+    session_management_script = r'''<script>
+ (()=>{
+   const nav=document.querySelector('.console-nav');
+   if(!nav)return;
+   nav.insertAdjacentHTML('beforeend','<button data-section="sessions" onclick="openConsoleSection('sessions')">会话管理</button>');
+   document.body.insertAdjacentHTML('beforeend',`<section id="console-sessions" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>云端会话管理</h2><p class="panel-note">仅显示当前服务器 Codex 数据目录中的会话。删除为永久操作，不创建备份。</p></div><button class="btn" type="button" id="session-refresh">刷新列表</button></div><div id="session-summary" class="console-health-summary">尚未读取服务器会话。</div><div id="session-list" class="session-list"></div></div></section>`);
+   document.head.insertAdjacentHTML('beforeend','<style>.session-list{margin-top:12px}.session-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;border:1px solid #dfe3e7;border-radius:7px;padding:12px;margin-top:8px}.session-title{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-meta{margin-top:5px;color:#6b7280;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-delete{background:#fff;color:#be3030;border:1px solid #e3b3b3}.session-empty{padding:24px 0;color:#6b7280;text-align:center}@media(max-width:650px){.session-row{grid-template-columns:1fr}.session-delete{justify-self:start}}</style>');
+   const baseOpen=window.openConsoleSection;
+   window.openConsoleSection=function(section){baseOpen(section);if(section==='sessions')loadServerSessions()};
+   document.querySelector('#session-refresh')?.addEventListener('click',loadServerSessions);
+ })();
+ function sessionEscape(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+ function sessionTime(value){const time=new Date(value);return Number.isNaN(time.getTime())?value:time.toLocaleString('zh-CN',{hour12:false})}
+ function sessionSize(size){if(size<1024)return size+' B';if(size<1024*1024)return (size/1024).toFixed(1)+' KB';return (size/1024/1024).toFixed(1)+' MB'}
+ async function loadServerSessions(){const summary=document.querySelector('#session-summary'),list=document.querySelector('#session-list');if(!summary||!list)return;summary.textContent='正在读取当前服务器的 Codex 会话…';list.innerHTML='';try{const result=await api('/api/sessions');const sessions=result.sessions||[];summary.textContent=sessions.length?`发现 ${sessions.length} 个服务器会话。删除不会创建备份，完成后需在 Codex App 中重新连接远程服务器。`:'当前服务器没有可管理的 Codex 会话。';list.innerHTML=sessions.length?sessions.map(session=>`<article class="session-row"><div><div class="session-title" title="${sessionEscape(session.title)}">${sessionEscape(session.title)}</div><div class="session-meta">${sessionEscape(session.id)} · ${sessionTime(session.modified_at)} · ${sessionSize(session.size)}</div>${session.cwd?`<div class="session-meta" title="${sessionEscape(session.cwd)}">${sessionEscape(session.cwd)}</div>`:''}</div><button class="btn small session-delete" type="button" data-thread-id="${sessionEscape(session.id)}">永久删除</button></article>`).join(''):'<div class="session-empty">没有找到会话文件。</div>';list.querySelectorAll('.session-delete').forEach(button=>button.addEventListener('click',()=>deleteServerSession(button.dataset.threadId,button)))}catch(error){summary.textContent='读取会话失败：'+error.message}}
+ async function deleteServerSession(threadId,button){if(!threadId)return;if(!confirm('将永久删除此云端会话，且不会创建备份。确定继续吗？'))return;if(prompt('请输入“删除”以确认永久删除：')!=='删除')return;button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId),{method:'DELETE'});const summary=document.querySelector('#session-summary');if(summary)summary.textContent=result.detail;await loadServerSessions()}catch(error){button.disabled=false;button.textContent='永久删除';alert('删除失败：'+error.message)}}
+ </script>'''
     return (
         NEW_HTML.replace(old_panel, official_panel)
         .replace('<button class="btn outline" onclick="loadCommon()">通用配置</button>', "")
@@ -1317,7 +1494,7 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
         .replace('<div class="field"><label>名称</label><input id="p-name" placeholder="例如 chatgpt" oninput="updatePreview()"></div>', '<div class="field"><label>名称</label><input id="p-name" placeholder="例如 chatgpt_1" oninput="updatePreview()"><div class="field-help">系统会据此自动生成供应商标识，用于写入 Codex 配置；请使用英文、数字、`-` 或 `_`。</div></div>')
         .replace('<div class="field"><label>配置模型</label><input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()"><div class="field-help">默认启动 Codex 时使用的模型名称。</div></div>', '<div class="field"><label>配置模型（可选）</label><input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()"><div class="field-help">留空时不写入默认模型，可在 Codex 中自行选择。</div></div>')
         .replace('<div class="field"><label>Codex 目标</label><select id="p-target"><option value="">不启用目标功能</option></select></div>', '<div class="field"><label>Codex 目标</label><label style="display:flex;align-items:center;gap:8px;border:1px solid #d2d6da;border-radius:7px;padding:10px 12px;font-weight:400"><input id="p-goals" type="checkbox" onchange="syncGoalsConfig()" style="width:auto">启用目标功能</label></div>')
-         .replace("</body></html>", official_script + navigation_script + "</body></html>")
+         .replace("</body></html>", official_script + navigation_script + session_management_script + "</body></html>")
     )
 
 
