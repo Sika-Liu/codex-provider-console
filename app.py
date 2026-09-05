@@ -3,9 +3,9 @@ import hashlib
 import hmac
 import json
 import os
+import queue
 import re
 import shutil
-import sqlite3
 import subprocess
 import tomllib
 import threading
@@ -185,6 +185,73 @@ class DeviceLoginSession:
 
 DEVICE_LOGIN_LOCK = threading.Lock()
 DEVICE_LOGIN: DeviceLoginSession | None = None
+
+
+def app_server_request(method: str, params: dict) -> dict:
+    """Call the supported Codex app-server protocol for persistent thread state."""
+    env = os.environ.copy()
+    env["CODEX_HOME"] = str(CODEX_HOME)
+    try:
+        process = subprocess.Popen(
+            ["codex", "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("Codex CLI is unavailable in the control panel container") from exc
+
+    messages: queue.Queue[dict] = queue.Queue()
+
+    def read_messages() -> None:
+        assert process.stdout
+        for raw in process.stdout:
+            try:
+                messages.put(json.loads(raw))
+            except json.JSONDecodeError:
+                continue
+
+    def send(payload: dict) -> None:
+        assert process.stdin
+        process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        process.stdin.flush()
+
+    def request(request_id: int, request_method: str, request_params: dict) -> dict:
+        send({"method": request_method, "id": request_id, "params": request_params})
+        deadline = time.monotonic() + LOGIN_TIMEOUT_SECONDS
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"Codex app-server timed out while calling {request_method}")
+            try:
+                message = messages.get(timeout=remaining)
+            except queue.Empty as exc:
+                raise RuntimeError(f"Codex app-server timed out while calling {request_method}") from exc
+            if message.get("id") != request_id:
+                continue
+            if message.get("error"):
+                detail = message["error"].get("message") or "Codex app-server rejected the request"
+                raise RuntimeError(str(detail))
+            result = message.get("result")
+            if not isinstance(result, dict):
+                raise RuntimeError("Codex app-server returned an invalid response")
+            return result
+
+    try:
+        threading.Thread(target=read_messages, daemon=True).start()
+        request(1, "initialize", {"clientInfo": {"name": "codex_provider_console", "title": "Codex Provider Console", "version": "1.0"}})
+        send({"method": "initialized", "params": {}})
+        return request(2, method, params)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
 
 class ModelEntry(BaseModel):
@@ -415,53 +482,6 @@ def list_server_sessions() -> list[dict]:
         if thread_id:
             sessions.append(read_session_summary(path))
     return sorted(sessions, key=lambda item: item["modified_at"], reverse=True)
-
-
-def quote_sql_identifier(value: str) -> str:
-    return '"' + value.replace('"', '""') + '"'
-
-
-def session_state_databases() -> list[Path]:
-    """Find Codex state databases without touching unrelated SQLite files."""
-    candidates: set[Path] = set()
-    for root in (CODEX_HOME, CODEX_HOME / "sqlite"):
-        if root.is_dir():
-            candidates.update(root.glob("state*.sqlite"))
-    return sorted(path for path in candidates if path.is_file())
-
-
-def delete_session_state(thread_id: str) -> tuple[int, list[str]]:
-    """Remove direct thread references from Codex's local SQLite state indexes."""
-    removed = 0
-    touched: list[str] = []
-    candidate_columns = {"id", "thread_id", "session_id", "rollout_id", "conversation_id"}
-    for database in session_state_databases():
-        try:
-            connection = sqlite3.connect(database, timeout=2)
-            connection.execute("PRAGMA busy_timeout = 2000")
-            tables = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-            database_removed = 0
-            for (table_name,) in tables:
-                columns = connection.execute(f"PRAGMA table_info({quote_sql_identifier(table_name)})").fetchall()
-                for column in columns:
-                    column_name = str(column[1])
-                    if column_name.lower() not in candidate_columns:
-                        continue
-                    table = quote_sql_identifier(str(table_name))
-                    field = quote_sql_identifier(column_name)
-                    cursor = connection.execute(f"DELETE FROM {table} WHERE {field} = ?", (thread_id,))
-                    database_removed += max(cursor.rowcount, 0)
-            connection.commit()
-            if database_removed:
-                touched.append(database.name)
-                removed += database_removed
-        except sqlite3.Error as exc:
-            raise HTTPException(409, f"无法更新会话状态库 {database.name}：{exc}。请关闭远程 Codex 连接后重试。") from exc
-        finally:
-            if 'connection' in locals():
-                connection.close()
-                del connection
-    return removed, touched
 
 
 def toml_quote(value: str) -> str:
@@ -1354,34 +1374,36 @@ def delete_server_session(thread_id: str) -> dict:
     if not THREAD_ID.fullmatch(normalized_id):
         raise HTTPException(422, "无效的会话标识")
     files = session_files(normalized_id)
-    if not files:
-        raise HTTPException(404, "服务器的 Codex 会话文件中未找到该会话")
     for path in files:
         if not os.access(path, os.W_OK):
             raise HTTPException(409, f"没有删除会话文件的权限：{path.name}")
 
-    # Delete indexes first. A locked database means the active remote Codex
-    # process could immediately recreate a stale sidebar entry.
-    state_rows, state_databases = delete_session_state(normalized_id)
+    # Let Codex own the deletion. Besides removing the JSONL rollout, the
+    # supported protocol removes its persistent metadata and emits thread/deleted.
+    try:
+        app_server_request("thread/delete", {"threadId": normalized_id})
+    except RuntimeError as exc:
+        raise HTTPException(502, f"Codex 无法删除会话：{exc}") from exc
+
+    # Older Codex builds can leave an orphaned rollout after protocol deletion.
+    # Remove only that exact rollout; app-server has already handled metadata.
     deleted_files = 0
     try:
-        for path in files:
+        for path in session_files(normalized_id):
             path.unlink()
             deleted_files += 1
     except OSError as exc:
-        raise HTTPException(500, f"会话状态索引已清理，但删除会话文件失败：{exc}") from exc
+        raise HTTPException(500, f"Codex 已删除会话元数据，但删除残留会话文件失败：{exc}") from exc
     audit(
         "server_session_deleted",
         thread_id=normalized_id,
         files=str(deleted_files),
-        state_rows=str(state_rows),
-        state_databases=", ".join(state_databases) or None,
+        protocol="app-server",
     )
     return {
         "deleted": normalized_id,
         "files": deleted_files,
-        "state_rows": state_rows,
-        "detail": "会话已从服务器永久删除。请在 Codex App 中重新连接远程服务器以刷新会话列表。",
+        "detail": "会话已由 Codex 从服务器永久删除。Codex App 会在收到删除事件后移除该会话。",
     }
 
 
@@ -1468,9 +1490,12 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
    nav.insertAdjacentHTML('beforeend','<button data-section="sessions" onclick="openConsoleSection(&quot;sessions&quot;)">会话管理</button>');
    document.body.insertAdjacentHTML('beforeend',`<section id="console-sessions" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>云端会话管理</h2><p class="panel-note">仅显示当前服务器 Codex 数据目录中的会话。删除为永久操作，不创建备份。</p></div><button class="btn" type="button" id="session-refresh">刷新列表</button></div><div id="session-summary" class="console-health-summary">尚未读取服务器会话。</div><div id="session-list" class="session-list"></div></div></section>`);
    document.head.insertAdjacentHTML('beforeend','<style>.session-list{margin-top:12px}.session-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;border:1px solid #dfe3e7;border-radius:7px;padding:12px;margin-top:8px}.session-title{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-meta{margin-top:5px;color:#6b7280;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-delete{background:#fff;color:#be3030;border:1px solid #e3b3b3}.session-empty{padding:24px 0;color:#6b7280;text-align:center}.session-modal-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:rgba(20,24,28,.48)}.session-modal{width:min(440px,100%);border:1px solid #dfe3e7;border-radius:8px;background:#fff;box-shadow:0 18px 48px rgba(0,0,0,.24);padding:22px}.session-modal-kicker{color:#be3030;font-size:12px;font-weight:700}.session-modal h3{margin:7px 0 9px;font-size:18px}.session-modal p{margin:0;color:#535a63;line-height:1.6}.session-modal-session{margin:14px 0;padding:10px 11px;border:1px solid #e0e3e7;border-radius:6px;background:#f7f8fa;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-modal-confirm{display:flex;align-items:flex-start;gap:9px;margin-top:16px;color:#30353b;line-height:1.45;cursor:pointer}.session-modal-confirm input{margin:3px 0 0;width:15px;height:15px}.session-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}.session-modal-danger{background:#bd3030}.session-modal-danger:disabled{background:#e3b3b3;cursor:not-allowed}@media(max-width:650px){.session-row{grid-template-columns:1fr}.session-delete{justify-self:start}.session-modal{padding:18px}}</style>');
+   document.querySelector('#console-sessions .list-shell')?.insertAdjacentHTML('beforeend','<details class="session-residual"><summary>清理 Codex 中仍显示的残留会话</summary><p>仅在会话文件已删除、Codex 仍显示“no rollout found”时使用。</p><div><input id="session-residual-id" placeholder="粘贴会话 ID"><button class="btn small session-delete" type="button" id="session-residual-delete">清理残留</button></div></details>');
+   document.head.insertAdjacentHTML('beforeend','<style>.session-residual{margin-top:20px;padding-top:14px;border-top:1px solid #e2e5e8}.session-residual summary{cursor:pointer;font-weight:700}.session-residual p{margin:7px 0 10px;color:#666d75;font-size:12px}.session-residual div{display:flex;gap:8px}.session-residual input{min-width:0;flex:1;border:1px solid #d2d6da;border-radius:7px;padding:8px 10px;font:12px Consolas,monospace}@media(max-width:650px){.session-residual div{flex-direction:column}}</style>');
    const baseOpen=window.openConsoleSection;
    window.openConsoleSection=function(section){baseOpen(section);if(section==='sessions')loadServerSessions()};
    document.querySelector('#session-refresh')?.addEventListener('click',loadServerSessions);
+   document.querySelector('#session-residual-delete')?.addEventListener('click',event=>{const input=document.querySelector('#session-residual-id'),id=input?.value.trim();if(!id){input?.focus();return}deleteServerSession(id,event.currentTarget,'残留会话')});
  })();
  function sessionEscape(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
  function sessionTime(value){const time=new Date(value);return Number.isNaN(time.getTime())?value:time.toLocaleString('zh-CN',{hour12:false})}
