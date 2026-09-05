@@ -1465,7 +1465,7 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
  (()=>{
    const nav=document.querySelector('.console-nav');
    if(!nav)return;
-   nav.insertAdjacentHTML('beforeend','<button data-section="sessions" onclick="openConsoleSection('sessions')">会话管理</button>');
+   nav.insertAdjacentHTML('beforeend','<button data-section="sessions" onclick="openConsoleSection(&quot;sessions&quot;)">会话管理</button>');
    document.body.insertAdjacentHTML('beforeend',`<section id="console-sessions" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>云端会话管理</h2><p class="panel-note">仅显示当前服务器 Codex 数据目录中的会话。删除为永久操作，不创建备份。</p></div><button class="btn" type="button" id="session-refresh">刷新列表</button></div><div id="session-summary" class="console-health-summary">尚未读取服务器会话。</div><div id="session-list" class="session-list"></div></div></section>`);
    document.head.insertAdjacentHTML('beforeend','<style>.session-list{margin-top:12px}.session-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;border:1px solid #dfe3e7;border-radius:7px;padding:12px;margin-top:8px}.session-title{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-meta{margin-top:5px;color:#6b7280;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-delete{background:#fff;color:#be3030;border:1px solid #e3b3b3}.session-empty{padding:24px 0;color:#6b7280;text-align:center}@media(max-width:650px){.session-row{grid-template-columns:1fr}.session-delete{justify-self:start}}</style>');
    const baseOpen=window.openConsoleSection;
