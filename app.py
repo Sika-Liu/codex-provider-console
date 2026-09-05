@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import tomllib
 import threading
 import time
 import urllib.error
@@ -365,7 +366,61 @@ def remove_provider_sections(config: str) -> str:
     return "\n".join(output).strip()
 
 
+def normalize_features_sections(config: str) -> str:
+    """Merge repeated [features] tables left by older panel versions."""
+    output: list[str] = []
+    feature_lines: list[str] = []
+    in_features = False
+    features_found = False
+    top_level_keys = {"model", "model_catalog_json", "model_provider", "model_reasoning_effort"}
+
+    for line in config.splitlines():
+        section = re.match(r"^\[([^]]+)]\s*$", line)
+        if section:
+            in_features = section.group(1) == "features"
+            if in_features:
+                features_found = True
+                continue
+        if in_features:
+            assignment = re.match(r"^\s*([A-Za-z0-9_-]+)\s*=", line)
+            # Older malformed output could leave root model settings after a
+            # [features] header. Return those settings to the document root.
+            if assignment and assignment.group(1) in top_level_keys:
+                in_features = False
+        if in_features:
+            feature_lines.append(line)
+        else:
+            output.append(line)
+
+    if not features_found:
+        return "\n".join(output).strip()
+
+    # TOML rejects duplicate keys too. Preserve the last value, matching the
+    # effective value users expect after repeatedly saving the same setting.
+    seen_keys: set[str] = set()
+    normalized_reversed: list[str] = []
+    for line in reversed(feature_lines):
+        assignment = re.match(r"^\s*([A-Za-z0-9_-]+)\s*=", line)
+        if assignment:
+            key = assignment.group(1)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+        normalized_reversed.append(line)
+    normalized_features = list(reversed(normalized_reversed))
+
+    result = output
+    while result and not result[-1].strip():
+        result.pop()
+    if result:
+        result.append("")
+    result.append("[features]")
+    result.extend(normalized_features)
+    return "\n".join(result).strip()
+
+
 def set_goals_feature(config: str, enabled: bool) -> str:
+    config = normalize_features_sections(config)
     output: list[str] = []
     in_features = False
     features_found = False
@@ -396,6 +451,7 @@ def set_goals_feature(config: str, enabled: bool) -> str:
 
 
 def remove_goals_feature(config: str) -> str:
+    config = normalize_features_sections(config)
     output: list[str] = []
     in_features = False
     for line in config.splitlines():
@@ -693,6 +749,11 @@ def health_check() -> dict:
     config = config_text()
     if CONFIG_PATH.exists():
         add("config.toml", "pass" if config.strip() else "warning", "已找到配置文件" if config.strip() else "配置文件为空")
+        try:
+            tomllib.loads(config)
+            add("config.toml 语法", "pass", "TOML 格式有效")
+        except tomllib.TOMLDecodeError as exc:
+            add("config.toml 语法", "fail", f"TOML 格式无效：{exc}；可在此页修复重复的 [features] 配置段")
         provider_match = re.search(r"^\s*model_provider\s*=\s*['\"]([^'\"]+)['\"]", config, re.M)
         model_match = re.search(r"^\s*model\s*=\s*['\"]([^'\"]+)['\"]", config, re.M)
         if provider_match:
@@ -818,7 +879,8 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
     if profile.get("goals_configured", False):
         provider_config = set_goals_feature(provider_config, bool(profile.get("goals_enabled", False)))
     try:
-        write_private(CONFIG_PATH, base + "\n\n" + provider_config.rstrip() + "\n")
+        merged_config = normalize_features_sections(base + "\n\n" + provider_config.rstrip())
+        write_private(CONFIG_PATH, merged_config + "\n")
         if auth_mode == "apikey":
             api_auth = profile.get("auth_contents", "").strip()
             if not api_auth:
@@ -935,6 +997,21 @@ def get_preflight() -> dict:
 @app.get("/api/health")
 def get_health() -> dict:
     return health_check()
+
+
+@app.post("/api/health/repair-config")
+def repair_config_from_health() -> dict:
+    if not CONFIG_PATH.exists():
+        raise HTTPException(404, "未找到 config.toml")
+    repaired = normalize_features_sections(config_text())
+    try:
+        tomllib.loads(repaired)
+    except tomllib.TOMLDecodeError as exc:
+        raise HTTPException(422, f"配置还包含无法自动修复的 TOML 错误：{exc}") from exc
+    backup_id, _ = backup_state()
+    write_private(CONFIG_PATH, repaired + "\n")
+    audit("config_repaired", backup_id=backup_id)
+    return {"detail": f"已合并重复的 [features] 配置段；已创建备份 {backup_id}。"}
 
 
 @app.post("/api/health/install-codex")
@@ -1213,8 +1290,9 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
  requestAnimationFrame(()=>document.body.classList.add('console-ready'));
  async function logoutConsole(){await fetch('/logout',{method:'POST'});location.href='/login'}
  function openConsoleSection(section){document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';document.querySelector('#console-'+section).style.display='block';if(section==='health')runHealth()}localStorage.setItem('console-section',section)}
- async function runHealth(){const summary=$('#health-summary'),list=$('#health-checks');summary.textContent='正在检查服务器环境和供应商连通性…';list.innerHTML='';try{const d=await api('/api/health');summary.textContent=d.summary;list.innerHTML=(d.checks||[]).map(item=>{const cliAction=item.name==='Codex CLI'&&item.status==='fail'?'<p><button class="btn small" onclick="installCodexCli(this)">安装 Codex CLI</button></p>':'';const keyAction=item.name==='Codex Desktop 部署密钥'?`<p><button class="btn small" onclick="${item.status==='pass'?'downloadDeploymentKey()':'deployDeploymentKey(this)'}">${item.status==='pass'?'下载部署密钥':'创建并部署密钥'}</button></p>`:'';return `<div class="health-check ${item.status}"><b>${item.status==='pass'?'通过':item.status==='warning'?'提醒':'失败'} · ${esc(item.name)}</b><small>${esc(item.detail)}</small>${cliAction}${keyAction}</div>`}).join('')}catch(e){summary.textContent='健康检查失败：'+e.message}}
+ async function runHealth(){const summary=$('#health-summary'),list=$('#health-checks');summary.textContent='正在检查服务器环境和供应商连通性…';list.innerHTML='';try{const d=await api('/api/health');summary.textContent=d.summary;list.innerHTML=(d.checks||[]).map(item=>{const cliAction=item.name==='Codex CLI'&&item.status==='fail'?'<p><button class="btn small" onclick="installCodexCli(this)">安装 Codex CLI</button></p>':'';const keyAction=item.name==='Codex Desktop 部署密钥'?`<p><button class="btn small" onclick="${item.status==='pass'?'downloadDeploymentKey()':'deployDeploymentKey(this)'}">${item.status==='pass'?'下载部署密钥':'创建并部署密钥'}</button></p>`:'';const configAction=item.name==='config.toml 语法'&&item.status==='fail'?'<p><button class="btn small" onclick="repairConfig(this)">修复配置</button></p>':'';return `<div class="health-check ${item.status}"><b>${item.status==='pass'?'通过':item.status==='warning'?'提醒':'失败'} · ${esc(item.name)}</b><small>${esc(item.detail)}</small>${cliAction}${keyAction}${configAction}</div>`}).join('')}catch(e){summary.textContent='健康检查失败：'+e.message}}
  async function installCodexCli(button){const confirmed=await panelDialog({title:'安装 Codex CLI',message:'将为部署用户安装官方 Codex CLI。安装完成后会自动重新检查环境。',confirmLabel:'开始安装'});if(!confirmed)return;button.disabled=true;button.textContent='正在安装…';try{const result=await api('/api/health/install-codex',{method:'POST'});await panelDialog({title:'Codex CLI 已安装',message:result.detail,confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'安装失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='安装 Codex CLI'}}
+ async function repairConfig(button){const confirmed=await panelDialog({title:'修复 config.toml',message:'将合并重复的 [features] 配置段，并自动创建备份。不会修改 auth.json。',confirmLabel:'开始修复'});if(!confirmed)return;button.disabled=true;button.textContent='正在修复…';try{const result=await api('/api/health/repair-config',{method:'POST'});await panelDialog({title:'配置已修复',message:result.detail+' 请重新连接 Codex App 后再修改模型。',confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'修复失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='修复配置'}}
  async function deployDeploymentKey(button){const confirmed=await panelDialog({title:'创建部署密钥',message:'将为当前部署用户生成新的 SSH 私钥，并将对应公钥加入 authorized_keys。私钥不会在页面显示，但可由已登录的面板重复下载；请勿分享给他人。',confirmLabel:'创建并部署'});if(!confirmed)return;button.disabled=true;button.textContent='正在部署…';try{const result=await api('/api/health/deployment-key',{method:'POST'});const download=await panelDialog({title:'部署密钥已创建',message:`${result.detail}。私钥可在已登录面板中重复下载，请安全保存且不要分享。`,confirmLabel:'立即下载',cancelLabel:'稍后下载'});if(download)window.location.href=result.download_url;await runHealth()}catch(e){await panelDialog({title:'部署失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='创建并部署密钥'}}
  function downloadDeploymentKey(){window.location.href='/api/health/deployment-key/download'}
  function updateProxyConfig(){const domain=$('#proxy-domain')?.value.trim(),upstream=$('#proxy-upstream')?.value.trim()||'127.0.0.1:8787',cert=$('#proxy-cert')?.value.trim(),key=$('#proxy-key')?.value.trim();$('#proxy-config').textContent=domain?`server {\n    listen 443 ssl;\n    server_name ${domain};\n    ssl_certificate ${cert||'/path/to/fullchain.pem'};\n    ssl_certificate_key ${key||'/path/to/privkey.pem'};\n    location / {\n        proxy_pass http://${upstream};\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    }\n}`:'填写域名后生成'}
