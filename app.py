@@ -1403,7 +1403,7 @@ def delete_server_session(thread_id: str) -> dict:
     return {
         "deleted": normalized_id,
         "files": deleted_files,
-        "detail": "会话已由 Codex 从服务器永久删除。Codex App 会在收到删除事件后移除该会话。",
+        "detail": "会话已由 Codex 从服务器永久删除，服务器元数据也已清理。请重新读取远程会话列表；已打开的 Codex 客户端可能仍保留本地旧引用。",
     }
 
 
