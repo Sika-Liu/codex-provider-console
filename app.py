@@ -44,6 +44,7 @@ AUDIT_PATH = CODEX_HOME / "control-panel-audit.jsonl"
 PROFILE_ID = re.compile(r"^[a-zA-Z0-9_-]{1,48}$")
 THREAD_ID = re.compile(r"(?i)^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|thr_[a-z0-9_-]{1,128})$")
 THREAD_ID_IN_TEXT = re.compile(r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+ROLLOUT_PATH_IN_ERROR = re.compile(r"(?i)[`\"']([^`\"']*?\.codex[/\\]sessions[/\\][^`\"']+\.jsonl)[`\"']")
 SESSIONS_PATH = CODEX_HOME / "sessions"
 
 app = FastAPI(title="Codex Provider Console", docs_url=None, redoc_url=None)
@@ -473,6 +474,33 @@ def session_files(thread_id: str) -> list[Path]:
         if session_id_from_path(resolved) == thread_id:
             matches.append(resolved)
     return sorted(matches)
+
+
+def orphaned_rollout_marker(thread_id: str) -> Path | None:
+    """Create a temporary rollout only when Codex reports its exact missing path."""
+    try:
+        app_server_request("thread/resume", {"threadId": thread_id})
+    except RuntimeError as exc:
+        match = ROLLOUT_PATH_IN_ERROR.search(str(exc))
+        if not match:
+            return None
+        remote_path = match.group(1).replace("\\", "/")
+        marker = SESSIONS_PATH / remote_path.split("/.codex/sessions/", 1)[-1]
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            resolved = marker.resolve()
+            resolved.relative_to(SESSIONS_PATH.resolve())
+        except (OSError, ValueError):
+            return None
+        if marker.exists():
+            return None
+        marker.write_text(
+            json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), "type": "session_meta", "payload": {"id": thread_id}}) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(marker, 0o600)
+        return marker
+    return None
 
 
 def thread_timestamp(value: object) -> str:
@@ -1424,10 +1452,27 @@ def delete_server_session(thread_id: str) -> dict:
 
     # Let Codex own the deletion. Besides removing the JSONL rollout, the
     # supported protocol removes its persistent metadata and emits thread/deleted.
+    repair_marker: Path | None = None
     try:
         app_server_request("thread/delete", {"threadId": normalized_id})
     except RuntimeError as exc:
-        raise HTTPException(502, f"Codex 无法删除会话：{exc}") from exc
+        if "no rollout found" not in str(exc).lower():
+            raise HTTPException(502, f"Codex 无法删除会话：{exc}") from exc
+        # Some Codex versions refuse to delete a valid state record when its
+        # rollout was removed first. Ask Codex for the recorded path, create a
+        # minimal temporary marker at that exact path, then immediately retry
+        # the official deletion. No session contents are restored or retained.
+        repair_marker = orphaned_rollout_marker(normalized_id)
+        if not repair_marker:
+            raise HTTPException(409, "Codex 找到残留索引，但没有提供可安全修复的 rollout 路径") from exc
+        try:
+            app_server_request("thread/delete", {"threadId": normalized_id})
+        except RuntimeError as retry_exc:
+            try:
+                repair_marker.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise HTTPException(502, f"Codex 无法清理残留会话：{retry_exc}") from retry_exc
 
     # Older Codex builds can leave an orphaned rollout after protocol deletion.
     # Remove only that exact rollout; app-server has already handled metadata.
@@ -1447,7 +1492,7 @@ def delete_server_session(thread_id: str) -> dict:
     return {
         "deleted": normalized_id,
         "files": deleted_files,
-        "detail": "会话已由 Codex 从服务器永久删除，服务器元数据也已清理。请重新读取远程会话列表；已打开的 Codex 客户端可能仍保留本地旧引用。",
+        "detail": "会话已由 Codex 从服务器永久删除，服务器元数据也已清理。请重新读取远程会话列表。" if not repair_marker else "残留会话索引已由 Codex 清理；临时修复文件未保留。请重新读取远程会话列表。",
     }
 
 
