@@ -42,9 +42,8 @@ AUTH_PATH = CODEX_HOME / "auth.json"
 BACKUP_ROOT = CODEX_HOME / "backups" / "control-panel"
 AUDIT_PATH = CODEX_HOME / "control-panel-audit.jsonl"
 PROFILE_ID = re.compile(r"^[a-zA-Z0-9_-]{1,48}$")
-THREAD_ID = re.compile(r"(?i)^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|thr_[a-z0-9_-]{1,128})$")
+THREAD_ID = re.compile(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 THREAD_ID_IN_TEXT = re.compile(r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
-ROLLOUT_PATH_IN_ERROR = re.compile(r"(?i)[`\"']([^`\"']*?\.codex[/\\]sessions[/\\][^`\"']+\.jsonl)[`\"']")
 SESSIONS_PATH = CODEX_HOME / "sessions"
 
 app = FastAPI(title="Codex Provider Console", docs_url=None, redoc_url=None)
@@ -476,81 +475,13 @@ def session_files(thread_id: str) -> list[Path]:
     return sorted(matches)
 
 
-def orphaned_rollout_marker(thread_id: str) -> Path | None:
-    """Create a temporary rollout only when Codex reports its exact missing path."""
-    try:
-        app_server_request("thread/resume", {"threadId": thread_id})
-    except RuntimeError as exc:
-        match = ROLLOUT_PATH_IN_ERROR.search(str(exc))
-        if not match:
-            return None
-        remote_path = match.group(1).replace("\\", "/")
-        marker = SESSIONS_PATH / remote_path.split("/.codex/sessions/", 1)[-1]
-        try:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            resolved = marker.resolve()
-            resolved.relative_to(SESSIONS_PATH.resolve())
-        except (OSError, ValueError):
-            return None
-        if marker.exists():
-            return None
-        marker.write_text(
-            json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), "type": "session_meta", "payload": {"id": thread_id}}) + "\n",
-            encoding="utf-8",
-        )
-        os.chmod(marker, 0o600)
-        return marker
-    return None
-
-
-def thread_timestamp(value: object) -> str:
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value, timezone.utc).isoformat()
-    return str(value or "")
-
-
 def list_server_sessions() -> list[dict]:
-    """Read Codex's authoritative thread index, including orphaned rollouts."""
     sessions: list[dict] = []
-    cursor: str | None = None
-    for _ in range(20):  # Bound work even when an unexpectedly large state DB exists.
-        params: dict[str, object] = {
-            "limit": 100,
-            "sortKey": "updated_at",
-            # Do not repair the index from JSONL while listing. A missing rollout
-            # must remain visible here so thread/delete can remove its metadata.
-            "useStateDbOnly": True,
-        }
-        if cursor:
-            params["cursor"] = cursor
-        result = app_server_request("thread/list", params)
-        records = result.get("data")
-        if not isinstance(records, list):
-            raise RuntimeError("Codex app-server returned an invalid thread list")
-        for record in records:
-            if not isinstance(record, dict):
-                continue
-            thread_id = str(record.get("id") or "").lower()
-            if not THREAD_ID.fullmatch(thread_id):
-                continue
-            files = session_files(thread_id)
-            size = sum(path.stat().st_size for path in files if path.exists())
-            sessions.append(
-                {
-                    "id": thread_id,
-                    "title": str(record.get("name") or record.get("preview") or thread_id)[:180],
-                    "cwd": str(record.get("cwd") or "")[:500],
-                    "modified_at": thread_timestamp(record.get("updatedAt") or record.get("createdAt")),
-                    "size": size,
-                    "path": str(files[0].relative_to(CODEX_HOME)) if files else "",
-                    "has_rollout": bool(files),
-                }
-            )
-        next_cursor = result.get("nextCursor")
-        if not isinstance(next_cursor, str) or not next_cursor:
-            break
-        cursor = next_cursor
-    return sessions
+    for path in SESSIONS_PATH.rglob("*.jsonl") if SESSIONS_PATH.is_dir() else ():
+        thread_id = session_id_from_path(path)
+        if thread_id:
+            sessions.append(read_session_summary(path))
+    return sorted(sessions, key=lambda item: item["modified_at"], reverse=True)
 
 
 def toml_quote(value: str) -> str:
@@ -1433,10 +1364,7 @@ def fetch_models_from_upstream(request: UpstreamModelFetch) -> dict:
 
 @app.get("/api/sessions")
 def get_server_sessions() -> dict:
-    try:
-        sessions = list_server_sessions()
-    except RuntimeError as exc:
-        raise HTTPException(502, f"Codex 无法读取服务器会话：{exc}") from exc
+    sessions = list_server_sessions()
     return {"sessions": sessions, "count": len(sessions)}
 
 
@@ -1452,27 +1380,10 @@ def delete_server_session(thread_id: str) -> dict:
 
     # Let Codex own the deletion. Besides removing the JSONL rollout, the
     # supported protocol removes its persistent metadata and emits thread/deleted.
-    repair_marker: Path | None = None
     try:
         app_server_request("thread/delete", {"threadId": normalized_id})
     except RuntimeError as exc:
-        if "no rollout found" not in str(exc).lower():
-            raise HTTPException(502, f"Codex 无法删除会话：{exc}") from exc
-        # Some Codex versions refuse to delete a valid state record when its
-        # rollout was removed first. Ask Codex for the recorded path, create a
-        # minimal temporary marker at that exact path, then immediately retry
-        # the official deletion. No session contents are restored or retained.
-        repair_marker = orphaned_rollout_marker(normalized_id)
-        if not repair_marker:
-            raise HTTPException(409, "Codex 找到残留索引，但没有提供可安全修复的 rollout 路径") from exc
-        try:
-            app_server_request("thread/delete", {"threadId": normalized_id})
-        except RuntimeError as retry_exc:
-            try:
-                repair_marker.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise HTTPException(502, f"Codex 无法清理残留会话：{retry_exc}") from retry_exc
+        raise HTTPException(502, f"Codex 无法删除会话：{exc}") from exc
 
     # Older Codex builds can leave an orphaned rollout after protocol deletion.
     # Remove only that exact rollout; app-server has already handled metadata.
@@ -1492,7 +1403,7 @@ def delete_server_session(thread_id: str) -> dict:
     return {
         "deleted": normalized_id,
         "files": deleted_files,
-        "detail": "会话已由 Codex 从服务器永久删除，服务器元数据也已清理。请重新读取远程会话列表。" if not repair_marker else "残留会话索引已由 Codex 清理；临时修复文件未保留。请重新读取远程会话列表。",
+        "detail": "会话已由 Codex 从服务器永久删除。请重新读取远程会话列表。",
     }
 
 
@@ -1577,19 +1488,16 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
    const nav=document.querySelector('.console-nav');
    if(!nav)return;
    nav.insertAdjacentHTML('beforeend','<button data-section="sessions" onclick="openConsoleSection(&quot;sessions&quot;)">会话管理</button>');
-   document.body.insertAdjacentHTML('beforeend',`<section id="console-sessions" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>云端会话管理</h2><p class="panel-note">通过当前服务器的 Codex 状态库读取会话。删除为永久操作，不创建备份。</p></div><button class="btn" type="button" id="session-refresh">刷新列表</button></div><div id="session-summary" class="console-health-summary">尚未读取服务器会话。</div><div id="session-list" class="session-list"></div></div></section>`);
+   document.body.insertAdjacentHTML('beforeend',`<section id="console-sessions" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>云端会话管理</h2><p class="panel-note">仅显示当前服务器 Codex 数据目录中的会话。删除为永久操作，不创建备份。</p></div><button class="btn" type="button" id="session-refresh">刷新列表</button></div><div id="session-summary" class="console-health-summary">尚未读取服务器会话。</div><div id="session-list" class="session-list"></div></div></section>`);
    document.head.insertAdjacentHTML('beforeend','<style>.session-list{margin-top:12px}.session-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;border:1px solid #dfe3e7;border-radius:7px;padding:12px;margin-top:8px}.session-title{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-meta{margin-top:5px;color:#6b7280;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-delete{background:#fff;color:#be3030;border:1px solid #e3b3b3}.session-empty{padding:24px 0;color:#6b7280;text-align:center}.session-modal-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:rgba(20,24,28,.48)}.session-modal{width:min(440px,100%);border:1px solid #dfe3e7;border-radius:8px;background:#fff;box-shadow:0 18px 48px rgba(0,0,0,.24);padding:22px}.session-modal-kicker{color:#be3030;font-size:12px;font-weight:700}.session-modal h3{margin:7px 0 9px;font-size:18px}.session-modal p{margin:0;color:#535a63;line-height:1.6}.session-modal-session{margin:14px 0;padding:10px 11px;border:1px solid #e0e3e7;border-radius:6px;background:#f7f8fa;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-modal-confirm{display:flex;align-items:flex-start;gap:9px;margin-top:16px;color:#30353b;line-height:1.45;cursor:pointer}.session-modal-confirm input{margin:3px 0 0;width:15px;height:15px}.session-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}.session-modal-danger{background:#bd3030}.session-modal-danger:disabled{background:#e3b3b3;cursor:not-allowed}@media(max-width:650px){.session-row{grid-template-columns:1fr}.session-delete{justify-self:start}.session-modal{padding:18px}}</style>');
-   document.querySelector('#console-sessions .list-shell')?.insertAdjacentHTML('beforeend','<details class="session-residual"><summary>清理 Codex 中仍显示的残留会话</summary><p>仅在会话文件已删除、Codex 仍显示“no rollout found”时使用。</p><div><input id="session-residual-id" placeholder="粘贴会话 ID"><button class="btn small session-delete" type="button" id="session-residual-delete">清理残留</button></div></details>');
-   document.head.insertAdjacentHTML('beforeend','<style>.session-residual{margin-top:20px;padding-top:14px;border-top:1px solid #e2e5e8}.session-residual summary{cursor:pointer;font-weight:700}.session-residual p{margin:7px 0 10px;color:#666d75;font-size:12px}.session-residual div{display:flex;gap:8px}.session-residual input{min-width:0;flex:1;border:1px solid #d2d6da;border-radius:7px;padding:8px 10px;font:12px Consolas,monospace}@media(max-width:650px){.session-residual div{flex-direction:column}}</style>');
    const baseOpen=window.openConsoleSection;
    window.openConsoleSection=function(section){baseOpen(section);if(section==='sessions')loadServerSessions()};
    document.querySelector('#session-refresh')?.addEventListener('click',loadServerSessions);
-   document.querySelector('#session-residual-delete')?.addEventListener('click',event=>{const input=document.querySelector('#session-residual-id'),id=input?.value.trim();if(!id){input?.focus();return}deleteServerSession(id,event.currentTarget,'残留会话')});
  })();
  function sessionEscape(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
  function sessionTime(value){const time=new Date(value);return Number.isNaN(time.getTime())?value:time.toLocaleString('zh-CN',{hour12:false})}
  function sessionSize(size){if(size<1024)return size+' B';if(size<1024*1024)return (size/1024).toFixed(1)+' KB';return (size/1024/1024).toFixed(1)+' MB'}
- async function loadServerSessions(){const summary=document.querySelector('#session-summary'),list=document.querySelector('#session-list');if(!summary||!list)return;summary.textContent='正在读取当前服务器的 Codex 会话…';list.innerHTML='';try{const result=await api('/api/sessions');const sessions=result.sessions||[];summary.textContent=sessions.length?`发现 ${sessions.length} 个服务器会话。删除不会创建备份，完成后请在 Codex App 中重新读取远程会话列表。`:'当前服务器没有可管理的 Codex 会话。';list.innerHTML=sessions.length?sessions.map(session=>`<article class="session-row"><div><div class="session-title" title="${sessionEscape(session.title)}">${sessionEscape(session.title)}${session.has_rollout?'':'（残留索引）'}</div><div class="session-meta">${sessionEscape(session.id)} · ${sessionTime(session.modified_at)} · ${sessionSize(session.size)}</div>${session.cwd?`<div class="session-meta" title="${sessionEscape(session.cwd)}">${sessionEscape(session.cwd)}</div>`:''}</div><button class="btn small session-delete" type="button" data-thread-id="${sessionEscape(session.id)}">永久删除</button></article>`).join(''):'<div class="session-empty">没有找到会话记录。</div>';list.querySelectorAll('.session-delete').forEach(button=>button.addEventListener('click',()=>deleteServerSession(button.dataset.threadId,button)))}catch(error){summary.textContent='读取会话失败：'+error.message}}
+ async function loadServerSessions(){const summary=document.querySelector('#session-summary'),list=document.querySelector('#session-list');if(!summary||!list)return;summary.textContent='正在读取当前服务器的 Codex 会话…';list.innerHTML='';try{const result=await api('/api/sessions');const sessions=result.sessions||[];summary.textContent=sessions.length?`发现 ${sessions.length} 个服务器会话。删除不会创建备份，完成后请在 Codex App 中重新读取远程会话列表。`:'当前服务器没有可管理的 Codex 会话。';list.innerHTML=sessions.length?sessions.map(session=>`<article class="session-row"><div><div class="session-title" title="${sessionEscape(session.title)}">${sessionEscape(session.title)}</div><div class="session-meta">${sessionEscape(session.id)} · ${sessionTime(session.modified_at)} · ${sessionSize(session.size)}</div>${session.cwd?`<div class="session-meta" title="${sessionEscape(session.cwd)}">${sessionEscape(session.cwd)}</div>`:''}</div><button class="btn small session-delete" type="button" data-thread-id="${sessionEscape(session.id)}">永久删除</button></article>`).join(''):'<div class="session-empty">没有找到会话文件。</div>';list.querySelectorAll('.session-delete').forEach(button=>button.addEventListener('click',()=>deleteServerSession(button.dataset.threadId,button)))}catch(error){summary.textContent='读取会话失败：'+error.message}}
  function confirmSessionDeletion(threadId,title){return new Promise(resolve=>{const backdrop=document.createElement('div');backdrop.className='session-modal-backdrop';backdrop.innerHTML='<section class="session-modal" role="dialog" aria-modal="true" aria-labelledby="session-delete-title"><div class="session-modal-kicker">不可恢复的操作</div><h3 id="session-delete-title">永久删除云端会话</h3><p>会话记录及服务器本地索引会被删除，不会创建备份。</p><div class="session-modal-session" title="'+sessionEscape(threadId)+'">'+sessionEscape(title||'未命名会话')+'<br>'+sessionEscape(threadId)+'</div><label class="session-modal-confirm"><input type="checkbox"><span>我理解此操作无法撤销，并确认永久删除该会话。</span></label><div class="session-modal-actions"><button class="btn light" type="button" data-action="cancel">取消</button><button class="btn session-modal-danger" type="button" data-action="delete" disabled>永久删除</button></div></section>';const checkbox=backdrop.querySelector('input'),confirmButton=backdrop.querySelector('[data-action="delete"]'),onKey=event=>{if(event.key==='Escape')close(false)},close=value=>{document.removeEventListener('keydown',onKey);backdrop.remove();resolve(value)};checkbox.addEventListener('change',()=>confirmButton.disabled=!checkbox.checked);backdrop.querySelector('[data-action="cancel"]').addEventListener('click',()=>close(false));confirmButton.addEventListener('click',()=>close(true));backdrop.addEventListener('click',event=>{if(event.target===backdrop)close(false)});document.addEventListener('keydown',onKey);document.body.append(backdrop);backdrop.querySelector('[data-action="cancel"]').focus()})}
  async function deleteServerSession(threadId,button){if(!threadId)return;const title=button.closest('.session-row')?.querySelector('.session-title')?.textContent||'';if(!await confirmSessionDeletion(threadId,title))return;button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId),{method:'DELETE'});const summary=document.querySelector('#session-summary');if(summary)summary.textContent=result.detail;await loadServerSessions()}catch(error){button.disabled=false;button.textContent='永久删除';const summary=document.querySelector('#session-summary');if(summary)summary.textContent='删除失败：'+error.message}}
  </script>'''
