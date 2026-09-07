@@ -3,7 +3,6 @@ import hashlib
 import hmac
 import json
 import os
-import queue
 import re
 import shutil
 import subprocess
@@ -185,73 +184,6 @@ class DeviceLoginSession:
 
 DEVICE_LOGIN_LOCK = threading.Lock()
 DEVICE_LOGIN: DeviceLoginSession | None = None
-
-
-def app_server_request(method: str, params: dict) -> dict:
-    """Call the supported Codex app-server protocol for persistent thread state."""
-    env = os.environ.copy()
-    env["CODEX_HOME"] = str(CODEX_HOME)
-    try:
-        process = subprocess.Popen(
-            ["codex", "app-server", "--stdio"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-            env=env,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError("Codex CLI is unavailable in the control panel container") from exc
-
-    messages: queue.Queue[dict] = queue.Queue()
-
-    def read_messages() -> None:
-        assert process.stdout
-        for raw in process.stdout:
-            try:
-                messages.put(json.loads(raw))
-            except json.JSONDecodeError:
-                continue
-
-    def send(payload: dict) -> None:
-        assert process.stdin
-        process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        process.stdin.flush()
-
-    def request(request_id: int, request_method: str, request_params: dict) -> dict:
-        send({"method": request_method, "id": request_id, "params": request_params})
-        deadline = time.monotonic() + LOGIN_TIMEOUT_SECONDS
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise RuntimeError(f"Codex app-server timed out while calling {request_method}")
-            try:
-                message = messages.get(timeout=remaining)
-            except queue.Empty as exc:
-                raise RuntimeError(f"Codex app-server timed out while calling {request_method}") from exc
-            if message.get("id") != request_id:
-                continue
-            if message.get("error"):
-                detail = message["error"].get("message") or "Codex app-server rejected the request"
-                raise RuntimeError(str(detail))
-            result = message.get("result")
-            if not isinstance(result, dict):
-                raise RuntimeError("Codex app-server returned an invalid response")
-            return result
-
-    try:
-        threading.Thread(target=read_messages, daemon=True).start()
-        request(1, "initialize", {"clientInfo": {"name": "codex_provider_console", "title": "Codex Provider Console", "version": "1.0"}})
-        send({"method": "initialized", "params": {}})
-        return request(2, method, params)
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
 
 
 class ModelEntry(BaseModel):
@@ -458,21 +390,6 @@ def read_session_summary(path: Path) -> dict:
         "size": stat.st_size,
         "path": str(path.relative_to(CODEX_HOME)),
     }
-
-
-def session_files(thread_id: str) -> list[Path]:
-    if not SESSIONS_PATH.is_dir():
-        return []
-    matches: list[Path] = []
-    for candidate in SESSIONS_PATH.rglob("*.jsonl"):
-        try:
-            resolved = candidate.resolve(strict=True)
-            resolved.relative_to(SESSIONS_PATH.resolve(strict=True))
-        except (OSError, ValueError):
-            continue
-        if session_id_from_path(resolved) == thread_id:
-            matches.append(resolved)
-    return sorted(matches)
 
 
 def list_server_sessions() -> list[dict]:
@@ -1373,36 +1290,31 @@ def delete_server_session(thread_id: str) -> dict:
     normalized_id = thread_id.lower()
     if not THREAD_ID.fullmatch(normalized_id):
         raise HTTPException(422, "无效的会话标识")
-    files = session_files(normalized_id)
-    for path in files:
-        if not os.access(path, os.W_OK):
-            raise HTTPException(409, f"没有删除会话文件的权限：{path.name}")
-
-    # Let Codex own the deletion. Besides removing the JSONL rollout, the
-    # supported protocol removes its persistent metadata and emits thread/deleted.
     try:
-        app_server_request("thread/delete", {"threadId": normalized_id})
-    except RuntimeError as exc:
-        raise HTTPException(502, f"Codex 无法删除会话：{exc}") from exc
+        result = subprocess.run(
+            ["codex", "delete", "--force", normalized_id],
+            env={**os.environ, "CODEX_HOME": str(CODEX_HOME)},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(503, "Codex CLI 不可用，无法删除会话") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, "Codex 删除会话超时") from exc
+    if result.returncode != 0:
+        detail = result.stdout.strip() or "Codex 未提供失败原因"
+        raise HTTPException(502, f"Codex 无法删除会话：{detail}")
 
-    # Older Codex builds can leave an orphaned rollout after protocol deletion.
-    # Remove only that exact rollout; app-server has already handled metadata.
-    deleted_files = 0
-    try:
-        for path in session_files(normalized_id):
-            path.unlink()
-            deleted_files += 1
-    except OSError as exc:
-        raise HTTPException(500, f"Codex 已删除会话元数据，但删除残留会话文件失败：{exc}") from exc
     audit(
         "server_session_deleted",
         thread_id=normalized_id,
-        files=str(deleted_files),
-        protocol="app-server",
+        command="codex delete --force",
     )
     return {
         "deleted": normalized_id,
-        "files": deleted_files,
         "detail": "会话已由 Codex 从服务器永久删除。请重新读取远程会话列表。",
     }
 
