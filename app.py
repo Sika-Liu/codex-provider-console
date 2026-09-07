@@ -437,10 +437,59 @@ def remove_provider_sections(config: str) -> str:
             skipping = section.group(1).startswith("model_providers.")
         if skipping:
             continue
-        if re.match(r"^\s*(model_provider|model|model_catalog_json)\s*=", line):
+        if re.match(r"^\s*(model_provider|model|model_catalog_json|experimental_bearer_token)\s*=", line):
             continue
         output.append(line)
     return "\n".join(output).strip()
+
+
+ROOT_CONFIG_KEYS = {
+    "model",
+    "model_catalog_json",
+    "model_provider",
+    "model_reasoning_effort",
+    "sandbox_mode",
+    "approval_policy",
+    "file_opener",
+    "web_search",
+    "suppress_unstable_features_warning",
+    "experimental_bearer_token",
+}
+
+
+def canonicalize_base_config(config: str) -> str:
+    """Keep one copy of each existing TOML table and discard misplaced root keys."""
+    output: list[str] = []
+    seen_sections: set[str] = set()
+    current_section = ""
+    skipping_section = False
+
+    for line in remove_provider_sections(config).splitlines():
+        section = re.match(r"^\[([^]]+)]\s*$", line)
+        if section:
+            current_section = section.group(1)
+            skipping_section = current_section in seen_sections
+            if not skipping_section:
+                seen_sections.add(current_section)
+                output.append(line)
+            continue
+        if skipping_section:
+            continue
+        assignment = re.match(r"^\s*([A-Za-z0-9_-]+)\s*=", line)
+        if current_section and assignment and assignment.group(1) in ROOT_CONFIG_KEYS:
+            continue
+        output.append(line)
+
+    return normalize_features_sections("\n".join(output).strip())
+
+
+def split_toml_document(config: str) -> tuple[str, str]:
+    """Separate root assignments from TOML table declarations."""
+    lines = config.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"^\[[^]]+]\s*$", line):
+            return "\n".join(lines[:index]).strip(), "\n".join(lines[index:]).strip()
+    return config.strip(), ""
 
 
 def normalize_features_sections(config: str) -> str:
@@ -924,7 +973,7 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         audit("provider_switch_rejected", provider_id=provider_id, detail=check.get("detail"))
         raise HTTPException(422, {"message": "Provider connection test failed; configuration was not changed.", "check": check})
     backup_id, backup_dir = backup_state()
-    base = remove_goals_feature(remove_provider_sections(config_text()))
+    base = remove_goals_feature(canonicalize_base_config(config_text()))
     if auth_mode == "apikey" and not profile.get("bearer_token"):
         raise HTTPException(422, "An API key is required for a pure API provider")
     if auth_mode == "chatgpt":
@@ -934,22 +983,24 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         validate_auth_snapshot(snapshot)
     catalog_path = write_model_catalog(provider_id, profile)
     selected_model = str(model_override or profile.get("model") or "").strip()
-    generated = [
+    generated_root = [
         f'model_provider = {toml_quote(provider_id)}',
+    ]
+    generated_provider = [
         f'[model_providers.{provider_id}]',
         f'name = {toml_quote(profile["name"])}',
         f'requires_openai_auth = {str(auth_mode == "chatgpt").lower()}',
     ]
     if selected_model:
-        generated.insert(1, f'model = {toml_quote(selected_model)}')
+        generated_root.append(f'model = {toml_quote(selected_model)}')
     if auth_mode == "apikey":
-        generated.insert(5, f'wire_api = {toml_quote(profile["wire_api"])}')
+        generated_provider.append(f'wire_api = {toml_quote(profile["wire_api"])}')
     if auth_mode == "apikey" and profile.get("base_url"):
-        generated.insert(5, f'base_url = {toml_quote(profile["base_url"].rstrip("/"))}')
+        generated_provider.append(f'base_url = {toml_quote(profile["base_url"].rstrip("/"))}')
     if profile.get("bearer_token"):
-        generated.append(f'experimental_bearer_token = {toml_quote(profile["bearer_token"])}')
+        generated_provider.append(f'experimental_bearer_token = {toml_quote(profile["bearer_token"])}')
     if catalog_path:
-        generated.insert(2 if selected_model else 1, f'model_catalog_json = {toml_quote(catalog_path)}')
+        generated_root.append(f'model_catalog_json = {toml_quote(catalog_path)}')
     provider_config = profile.get("config_contents", "").strip()
     # Older profile forms saved a full config.toml preview here. Reapplying
     # that snapshot would overwrite fields the user later changed in the
@@ -960,13 +1011,25 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         masked_token = 'experimental_bearer_token = "***"'
         if profile.get("bearer_token"):
             provider_config = provider_config.replace(masked_token, f'experimental_bearer_token = {toml_quote(profile["bearer_token"])}')
-        provider_config = "\n".join(generated) + "\n\n" + provider_config
-    else:
-        provider_config = "\n".join(generated)
+        _, provider_config = split_toml_document(canonicalize_base_config(provider_config))
     if profile.get("goals_configured", False):
         provider_config = set_goals_feature(provider_config, bool(profile.get("goals_enabled", False)))
     try:
-        merged_config = normalize_features_sections(base + "\n\n" + provider_config.rstrip())
+        base_root, base_sections = split_toml_document(base)
+        merged_sections = normalize_features_sections(
+            "\n\n".join(part for part in (base_sections, provider_config) if part)
+        )
+        merged_config = "\n\n".join(
+            part
+            for part in (
+                base_root,
+                "\n".join(generated_root),
+                merged_sections,
+                "\n".join(generated_provider),
+            )
+            if part
+        )
+        tomllib.loads(merged_config)
         write_private(CONFIG_PATH, merged_config + "\n")
         if auth_mode == "apikey":
             api_auth = profile.get("auth_contents", "").strip()
@@ -975,7 +1038,7 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
             write_private(AUTH_PATH, api_auth.rstrip() + "\n")
         else:
             write_private(AUTH_PATH, profile["auth_contents"].rstrip() + "\n")
-    except OSError as exc:
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         for name, target in (("config.toml", CONFIG_PATH), ("auth.json", AUTH_PATH)):
             backup_file = backup_dir / name
             if backup_file.exists():
