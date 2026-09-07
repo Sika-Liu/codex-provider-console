@@ -48,6 +48,63 @@ SESSIONS_PATH = CODEX_HOME / "sessions"
 SESSION_INDEX_PATH = CODEX_HOME / "session_index.jsonl"
 ARCHIVED_SESSIONS_PATH = CODEX_HOME / "archived_sessions"
 APP_SERVER_LOCK = threading.Lock()
+HOST_APP_SERVER_STOP_SCRIPT = r'''
+import os
+import shlex
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+own_pid = os.getpid()
+stopped = 0
+for line in subprocess.check_output(["ps", "-eo", "pid,args"], text=True, errors="replace").splitlines()[1:]:
+    parts = line.strip().split(None, 1)
+    if len(parts) != 2:
+        continue
+    pid, command = int(parts[0]), parts[1]
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        continue
+    is_app_server = len(argv) >= 2 and Path(argv[0]).name == "codex" and "app-server" in argv and "proxy" not in argv
+    if pid != own_pid and is_app_server:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            stopped += 1
+        except ProcessLookupError:
+            pass
+
+deadline = time.monotonic() + 10
+while time.monotonic() < deadline:
+    remaining = 0
+    for raw in subprocess.check_output(["ps", "-eo", "args"], text=True, errors="replace").splitlines()[1:]:
+        try:
+            argv = shlex.split(raw.strip())
+        except ValueError:
+            continue
+        if len(argv) >= 2 and Path(argv[0]).name == "codex" and "app-server" in argv and "proxy" not in argv:
+            remaining += 1
+    if not remaining:
+        break
+    time.sleep(0.1)
+else:
+    raise SystemExit("Timed out waiting for Codex App Server to stop")
+
+try:
+    (Path.home() / ".codex" / "app-server-control" / "app-server-control.sock").unlink()
+except FileNotFoundError:
+    pass
+print(f"stopped={stopped}")
+'''
+HOST_APP_SERVER_START_SCRIPT = r'''
+import subprocess
+
+result = subprocess.run(["codex", "app-server", "daemon", "start"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+if result.returncode != 0:
+    raise SystemExit(result.stdout.strip() or "Failed to start Codex App Server")
+print(result.stdout.strip())
+'''
 
 app = FastAPI(title="Codex Provider Console", docs_url=None, redoc_url=None)
 
@@ -851,28 +908,58 @@ def executable_user_cli_path() -> Path | None:
     return None
 
 
-def run_app_server_daemon(action: Literal["start", "stop", "restart"]) -> str:
-    """Run only the fixed Codex daemon controls exposed by the panel."""
-    cli_path = shutil.which("codex")
-    if not cli_path:
-        resolved_cli = executable_user_cli_path()
-        cli_path = str(resolved_cli) if resolved_cli else None
-    if not cli_path:
-        raise RuntimeError("未找到 Codex CLI，无法管理 App Server")
+def docker_host_gateway() -> str:
+    """Resolve Docker's IPv4 default gateway without trusting a request value."""
+    try:
+        for line in Path("/proc/net/route").read_text(encoding="ascii").splitlines()[1:]:
+            fields = line.split()
+            if len(fields) >= 3 and fields[1] == "00000000":
+                gateway = fields[2]
+                return ".".join(str(int(gateway[index : index + 2], 16)) for index in range(6, -1, -2))
+    except OSError:
+        pass
+    raise RuntimeError("无法确定 Docker 宿主机地址")
+
+
+def run_host_app_server_control(action: Literal["start", "stop"]) -> str:
+    """Use the panel deployment key for one fixed host-side App Server action."""
+    if not DEPLOYMENT_KEY_PATH.is_file():
+        raise RuntimeError("缺少面板部署密钥；请先在健康检查中部署密钥")
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", DEPLOY_USER):
+        raise RuntimeError("部署用户名无效，无法管理 Codex App Server")
+    script = HOST_APP_SERVER_START_SCRIPT if action == "start" else HOST_APP_SERVER_STOP_SCRIPT
+    gateway = docker_host_gateway()
     try:
         result = subprocess.run(
-            [cli_path, "app-server", "daemon", action],
+            [
+                "ssh",
+                "-i",
+                str(DEPLOYMENT_KEY_PATH),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                f"UserKnownHostsFile={USER_HOME / '.ssh' / 'known_hosts'}",
+                "-o",
+                "LogLevel=ERROR",
+                f"{DEPLOY_USER}@{gateway}",
+                "python3",
+                "-c",
+                script,
+            ],
             capture_output=True,
             text=True,
-            timeout=35,
+            timeout=45,
             check=False,
-            env={**os.environ, "CODEX_HOME": str(CODEX_HOME)},
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Codex App Server 操作超时") from exc
+        raise RuntimeError("宿主机 Codex App Server 操作超时") from exc
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "Codex 未提供失败原因").strip()
-        raise RuntimeError(f"Codex App Server {action} 失败：{detail[-400:]}")
+        detail = (result.stderr or result.stdout or "宿主机未提供失败原因").strip()
+        raise RuntimeError(f"宿主机 Codex App Server {action} 失败：{detail[-400:]}")
     return (result.stdout or result.stderr).strip()
 
 
@@ -929,7 +1016,8 @@ def migrate_session_provider(provider_id: str) -> dict[str, int]:
 
 def restart_codex_app_server() -> dict[str, str]:
     with APP_SERVER_LOCK:
-        run_app_server_daemon("restart")
+        run_host_app_server_control("stop")
+        run_host_app_server_control("start")
     return {"detail": "Codex App Server 已重启，新的连接会读取当前供应商配置。"}
 
 
@@ -1120,7 +1208,7 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         # Stop first so the daemon cannot keep an old config in memory or
         # write its cached thread metadata while it is being migrated.
         with APP_SERVER_LOCK:
-            run_app_server_daemon("stop")
+            run_host_app_server_control("stop")
             app_server_stopped = True
             write_private(CONFIG_PATH, merged_config + "\n")
             if auth_mode == "apikey":
@@ -1131,7 +1219,7 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
             else:
                 write_private(AUTH_PATH, profile["auth_contents"].rstrip() + "\n")
             migration = migrate_session_provider(provider_id)
-            run_app_server_daemon("start")
+            run_host_app_server_control("start")
     except (OSError, RuntimeError, sqlite3.Error, tomllib.TOMLDecodeError) as exc:
         for name, target in (("config.toml", CONFIG_PATH), ("auth.json", AUTH_PATH)):
             backup_file = backup_dir / name
@@ -1141,7 +1229,7 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         if app_server_stopped:
             try:
                 with APP_SERVER_LOCK:
-                    run_app_server_daemon("start")
+                    run_host_app_server_control("start")
             except RuntimeError:
                 pass
         audit("provider_switch_failed", provider_id=provider_id, detail=str(exc))
