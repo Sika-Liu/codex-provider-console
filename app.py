@@ -635,6 +635,12 @@ def test_model_request(profile: dict, test_model: str) -> dict:
     except urllib.error.HTTPError as exc:
         body_text = exc.read().decode("utf-8", errors="replace")
         return {"ok": False, "endpoint": endpoint, "detail": f"HTTP {exc.code}{': ' + body_text[:1200] if body_text else ''}"}
+    except TimeoutError:
+        return {
+            "ok": False,
+            "endpoint": endpoint,
+            "detail": "上游在 20 秒内未返回响应；请确认该地址支持所选协议和测试模型。",
+        }
     except urllib.error.URLError as exc:
         return {"ok": False, "endpoint": endpoint, "detail": str(exc.reason)}
 
@@ -654,6 +660,9 @@ def fetch_upstream_models(request: UpstreamModelFetch) -> dict:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             failures.append(f"{endpoint}: HTTP {exc.code}")
+            continue
+        except TimeoutError:
+            failures.append(f"{endpoint}: 上游在 12 秒内未返回模型列表")
             continue
         except (urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             failures.append(f"{endpoint}: {str(exc)}")
