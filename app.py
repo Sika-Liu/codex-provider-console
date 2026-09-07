@@ -951,15 +951,16 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
     if catalog_path:
         generated.insert(2 if selected_model else 1, f'model_catalog_json = {toml_quote(catalog_path)}')
     provider_config = profile.get("config_contents", "").strip()
+    # Older profile forms saved a full config.toml preview here. Reapplying
+    # that snapshot would overwrite fields the user later changed in the
+    # provider form, such as wire_api and auth_mode.
+    if re.search(r"^\s*model_provider\s*=", provider_config, re.M):
+        provider_config = ""
     if provider_config:
         masked_token = 'experimental_bearer_token = "***"'
         if profile.get("bearer_token"):
             provider_config = provider_config.replace(masked_token, f'experimental_bearer_token = {toml_quote(profile["bearer_token"])}')
-        # The current UI may save feature-only settings such as [features].
-        # Those settings supplement a provider; they must not replace the
-        # model_provider entry that identifies the active provider.
-        if not re.search(r"^\s*model_provider\s*=", provider_config, re.M):
-            provider_config = "\n".join(generated) + "\n\n" + provider_config
+        provider_config = "\n".join(generated) + "\n\n" + provider_config
     else:
         provider_config = "\n".join(generated)
     if profile.get("goals_configured", False):
