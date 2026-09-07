@@ -947,11 +947,11 @@ def run_host_app_server_control(action: Literal["start", "stop"]) -> str:
                 "LogLevel=ERROR",
                 f"{DEPLOY_USER}@{gateway}",
                 "python3",
-                "-c",
-                script,
+                "-",
             ],
             capture_output=True,
             text=True,
+            input=script,
             timeout=45,
             check=False,
         )
