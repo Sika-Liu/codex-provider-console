@@ -44,6 +44,7 @@ PROFILE_ID = re.compile(r"^[a-zA-Z0-9_-]{1,48}$")
 THREAD_ID = re.compile(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 THREAD_ID_IN_TEXT = re.compile(r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 SESSIONS_PATH = CODEX_HOME / "sessions"
+SESSION_INDEX_PATH = CODEX_HOME / "session_index.jsonl"
 
 app = FastAPI(title="Codex Provider Console", docs_url=None, redoc_url=None)
 
@@ -356,7 +357,28 @@ def session_id_from_path(path: Path) -> str | None:
     return match.group(1).lower() if match else None
 
 
-def read_session_summary(path: Path) -> dict:
+def session_index_titles() -> dict[str, str]:
+    """Return the user-facing titles that Codex stores alongside its rollouts."""
+    titles: dict[str, str] = {}
+    if not SESSION_INDEX_PATH.exists():
+        return titles
+    try:
+        with SESSION_INDEX_PATH.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                thread_id = str(record.get("id") or "").lower()
+                title = record.get("thread_name")
+                if THREAD_ID.fullmatch(thread_id) and isinstance(title, str) and title.strip():
+                    titles[thread_id] = title.strip().replace("\n", " ")[:180]
+    except OSError:
+        pass
+    return titles
+
+
+def read_session_summary(path: Path, indexed_title: str = "") -> dict:
     """Read only the opening JSONL records; session files can be very large."""
     title = ""
     cwd = ""
@@ -384,7 +406,7 @@ def read_session_summary(path: Path) -> dict:
     stat = path.stat()
     return {
         "id": session_id_from_path(path),
-        "title": title or path.stem,
+        "title": indexed_title or title or path.stem,
         "cwd": cwd,
         "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
         "size": stat.st_size,
@@ -394,10 +416,11 @@ def read_session_summary(path: Path) -> dict:
 
 def list_server_sessions() -> list[dict]:
     sessions: list[dict] = []
+    titles = session_index_titles()
     for path in SESSIONS_PATH.rglob("*.jsonl") if SESSIONS_PATH.is_dir() else ():
         thread_id = session_id_from_path(path)
         if thread_id:
-            sessions.append(read_session_summary(path))
+            sessions.append(read_session_summary(path, titles.get(thread_id, "")))
     return sorted(sessions, key=lambda item: item["modified_at"], reverse=True)
 
 
