@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tomllib
 import threading
@@ -45,6 +46,8 @@ THREAD_ID = re.compile(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 THREAD_ID_IN_TEXT = re.compile(r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 SESSIONS_PATH = CODEX_HOME / "sessions"
 SESSION_INDEX_PATH = CODEX_HOME / "session_index.jsonl"
+ARCHIVED_SESSIONS_PATH = CODEX_HOME / "archived_sessions"
+APP_SERVER_LOCK = threading.Lock()
 
 app = FastAPI(title="Codex Provider Console", docs_url=None, redoc_url=None)
 
@@ -848,6 +851,88 @@ def executable_user_cli_path() -> Path | None:
     return None
 
 
+def run_app_server_daemon(action: Literal["start", "stop", "restart"]) -> str:
+    """Run only the fixed Codex daemon controls exposed by the panel."""
+    cli_path = shutil.which("codex")
+    if not cli_path:
+        resolved_cli = executable_user_cli_path()
+        cli_path = str(resolved_cli) if resolved_cli else None
+    if not cli_path:
+        raise RuntimeError("未找到 Codex CLI，无法管理 App Server")
+    try:
+        result = subprocess.run(
+            [cli_path, "app-server", "daemon", action],
+            capture_output=True,
+            text=True,
+            timeout=35,
+            check=False,
+            env={**os.environ, "CODEX_HOME": str(CODEX_HOME)},
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Codex App Server 操作超时") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "Codex 未提供失败原因").strip()
+        raise RuntimeError(f"Codex App Server {action} 失败：{detail[-400:]}")
+    return (result.stdout or result.stderr).strip()
+
+
+def migrate_session_provider(provider_id: str) -> dict[str, int]:
+    """Keep saved threads resumable after a provider switch while the daemon is stopped."""
+    database_changes = 0
+    if (database := CODEX_HOME / "state_5.sqlite").is_file():
+        connection = sqlite3.connect(database, timeout=10)
+        try:
+            has_threads = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'threads'"
+            ).fetchone()
+            if has_threads:
+                row = connection.execute(
+                    "UPDATE threads SET model_provider = ? WHERE model_provider IS NOT ?",
+                    (provider_id, provider_id),
+                )
+                database_changes = max(row.rowcount, 0)
+            connection.commit()
+        finally:
+            connection.close()
+
+    rollout_files = 0
+    rollout_records = 0
+    for directory in (SESSIONS_PATH, ARCHIVED_SESSIONS_PATH):
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*.jsonl"):
+            original = path.read_text(encoding="utf-8", errors="replace")
+            lines: list[str] = []
+            changed = 0
+            for line in original.splitlines(keepends=True):
+                newline = "\n" if line.endswith("\n") else ""
+                try:
+                    record = json.loads(line.rstrip("\n"))
+                except json.JSONDecodeError:
+                    lines.append(line)
+                    continue
+                payload = record.get("payload")
+                if record.get("type") == "session_meta" and isinstance(payload, dict) and payload.get("model_provider") != provider_id:
+                    payload["model_provider"] = provider_id
+                    line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + newline
+                    changed += 1
+                lines.append(line)
+            if changed:
+                temporary = path.with_name(path.name + ".provider-switch.tmp")
+                temporary.write_text("".join(lines), encoding="utf-8")
+                temporary.chmod(path.stat().st_mode)
+                temporary.replace(path)
+                rollout_files += 1
+                rollout_records += changed
+    return {"threads": database_changes, "rollout_files": rollout_files, "rollout_records": rollout_records}
+
+
+def restart_codex_app_server() -> dict[str, str]:
+    with APP_SERVER_LOCK:
+        run_app_server_daemon("restart")
+    return {"detail": "Codex App Server 已重启，新的连接会读取当前供应商配置。"}
+
+
 def health_check() -> dict:
     checks: list[dict[str, str]] = []
 
@@ -1014,6 +1099,8 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         _, provider_config = split_toml_document(canonicalize_base_config(provider_config))
     if profile.get("goals_configured", False):
         provider_config = set_goals_feature(provider_config, bool(profile.get("goals_enabled", False)))
+    app_server_stopped = False
+    migration = {"threads": 0, "rollout_files": 0, "rollout_records": 0}
     try:
         base_root, base_sections = split_toml_document(base)
         merged_sections = normalize_features_sections(
@@ -1030,24 +1117,53 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
             if part
         )
         tomllib.loads(merged_config)
-        write_private(CONFIG_PATH, merged_config + "\n")
-        if auth_mode == "apikey":
-            api_auth = profile.get("auth_contents", "").strip()
-            if not api_auth:
-                api_auth = json.dumps({"OPENAI_API_KEY": profile["bearer_token"]}, indent=2)
-            write_private(AUTH_PATH, api_auth.rstrip() + "\n")
-        else:
-            write_private(AUTH_PATH, profile["auth_contents"].rstrip() + "\n")
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+        # Stop first so the daemon cannot keep an old config in memory or
+        # write its cached thread metadata while it is being migrated.
+        with APP_SERVER_LOCK:
+            run_app_server_daemon("stop")
+            app_server_stopped = True
+            write_private(CONFIG_PATH, merged_config + "\n")
+            if auth_mode == "apikey":
+                api_auth = profile.get("auth_contents", "").strip()
+                if not api_auth:
+                    api_auth = json.dumps({"OPENAI_API_KEY": profile["bearer_token"]}, indent=2)
+                write_private(AUTH_PATH, api_auth.rstrip() + "\n")
+            else:
+                write_private(AUTH_PATH, profile["auth_contents"].rstrip() + "\n")
+            migration = migrate_session_provider(provider_id)
+            run_app_server_daemon("start")
+    except (OSError, RuntimeError, sqlite3.Error, tomllib.TOMLDecodeError) as exc:
         for name, target in (("config.toml", CONFIG_PATH), ("auth.json", AUTH_PATH)):
             backup_file = backup_dir / name
             if backup_file.exists():
                 shutil.copy2(backup_file, target)
                 os.chmod(target, 0o600)
+        if app_server_stopped:
+            try:
+                with APP_SERVER_LOCK:
+                    run_app_server_daemon("start")
+            except RuntimeError:
+                pass
         audit("provider_switch_failed", provider_id=provider_id, detail=str(exc))
-        raise HTTPException(500, "Configuration write failed and the previous configuration was restored.") from exc
-    audit("provider_switched", provider_id=provider_id, backup_id=backup_id, model=selected_model or None)
-    return {"active_provider": provider_id, "backup_id": backup_id, "check": check, "model": selected_model or None, "auth_mode": auth_mode}
+        raise HTTPException(502, "供应商配置未能完成应用；已恢复旧配置并尝试重新启动 Codex App Server。") from exc
+    runtime = {"restarted": True, "detail": "Codex App Server 已重启，新的连接会读取当前供应商配置。"}
+    audit(
+        "provider_switched",
+        provider_id=provider_id,
+        backup_id=backup_id,
+        model=selected_model or None,
+        migration=migration,
+        app_server_restarted=True,
+    )
+    return {
+        "active_provider": provider_id,
+        "backup_id": backup_id,
+        "check": check,
+        "model": selected_model or None,
+        "auth_mode": auth_mode,
+        "migration": migration,
+        "runtime": runtime,
+    }
 
 
 @app.get("/api/status")
@@ -1340,17 +1456,19 @@ def cancel_official_login() -> dict:
 
 @app.post("/api/runtime/restart")
 def restart_managed_codex_runtime() -> dict:
-    """Reset only the panel-owned device-login session, never a user shell."""
+    """Restart the managed Codex App Server through its fixed daemon control."""
     global DEVICE_LOGIN
     with DEVICE_LOGIN_LOCK:
         if DEVICE_LOGIN:
             DEVICE_LOGIN.cancel()
             DEVICE_LOGIN = None
-    audit("managed_codex_runtime_reset")
-    return {
-        "restarted": True,
-        "detail": "供应商配置已应用。控制台没有可安全重启的常驻 Codex 进程；之后从控制台发起的 Codex 会话会读取新配置，SSH 终端中手动运行的 Codex 不会被中断。",
-    }
+    try:
+        runtime = restart_codex_app_server()
+    except RuntimeError as exc:
+        audit("managed_codex_runtime_restart_failed", detail=str(exc))
+        raise HTTPException(502, str(exc)) from exc
+    audit("managed_codex_runtime_restarted")
+    return {"restarted": True, **runtime}
 
 
 @app.post("/api/providers/{provider_id}/test")
@@ -1512,7 +1630,7 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
     return (
         NEW_HTML.replace(old_panel, official_panel)
         .replace('<button class="btn outline" onclick="loadCommon()">通用配置</button>', "")
-        .replace('<button class="btn" onclick="restartHint()">重启 Codex</button>', '<button id="managed-restart-btn" class="btn" onclick="restartManagedCodex()" disabled title="请先成功切换供应商">应用配置</button>')
+        .replace('<button class="btn" onclick="restartHint()">重启 Codex</button>', '<button id="managed-restart-btn" class="btn" onclick="restartManagedCodex()" title="重启服务器上的 Codex App Server">重启 Codex</button>')
         .replace('<button class="btn light" onclick="loadCommon()">提取通用配置</button>', "")
         .replace('<button class="btn light" onclick="newProvider(\'apikey\')">＋ 添加供应商</button><button class="btn light" onclick="newProvider(\'chatgpt\')">＋ 添加官方登录供应商</button>', '<button class="btn light" onclick="newProvider()">＋ 添加供应商</button>')
         .replace('每行一个模型；上下文窗口和图片处理方式将一并保存到供应商档案。', '每行一个模型名称；可手动输入，或从上游获取后自动填入。')
@@ -1549,7 +1667,7 @@ function note(text,where='detail-notice'){const e=$('#'+where);e.textContent=tex
 function esc(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function refreshAll(){const d=await api('/api/status');state.profiles=d.profiles;state.active=d.active_provider;state.enabled=d.settings?.provider_switching_enabled??true;$('#switch').classList.toggle('on',state.enabled);renderList();populateSelectors();await loadCommon();await refreshRoutes();}
 function renderList(){const profiles=state.profiles;$('#list-count').textContent=`${profiles.length} 个供应商配置；点击编辑按钮进入详情`;$(' #provider-list'.trim()).innerHTML=profiles.length?profiles.map(p=>{const active=p.id===state.active;return `<div class="provider-card ${active?'active':''}"><div class="handle">⋮⋮</div><div class="badge">${esc((p.name||p.id).slice(0,1).toUpperCase())}</div><div class="provider-main"><div class="card-name">${esc(p.name)} ${active?'<span class="section-hint">使用中</span>':''}</div><div class="card-meta">${p.auth_mode==='chatgpt'?'官方登录':'纯 API'} · ${p.wire_api==='responses'?'Responses API':'Chat Completions'} · ${esc(p.base_url||'不写入 API 文件')}</div></div><div class="provider-actions">${active?'<span class="provider-action provider-current" aria-label="当前使用的供应商">使用中</span>':`<button class="provider-action" type="button" title="使用此供应商" onclick="activateFromList('${esc(p.id)}')">使用</button>`}<button class="provider-action" type="button" title="编辑供应商" onclick="openProvider('${esc(p.id)}')">编辑</button><button class="provider-action danger" type="button" title="删除供应商" onclick="deleteProvider('${esc(p.id)}')">删除</button></div></div>`}).join(''):'<div class="empty">尚未添加供应商。可先添加 API 供应商或官方登录档案。</div>'}
-async function activateFromList(id){try{const result=await api(`/api/providers/${encodeURIComponent(id)}/activate`,{method:'POST'});state.active=id;setManagedRestartAvailable(true);note(`已使用 ${id}，备份编号：${result.backup_id}。现在可应用配置。`,'list-notice');await refreshAll()}catch(e){note(e.message,'list-notice')}}
+async function activateFromList(id){try{const result=await api(`/api/providers/${encodeURIComponent(id)}/activate`,{method:'POST'});state.active=id;note(`已使用 ${id}，备份编号：${result.backup_id}。${result.runtime?.detail||'Codex App Server 已重启。'}`,'list-notice');await refreshAll()}catch(e){note(e.message,'list-notice')}}
 async function deleteProvider(id){if(!confirm(`确认删除供应商「${id}」？`))return;try{await api(`/api/providers/${encodeURIComponent(id)}`,{method:'DELETE'});note('供应商已删除。','list-notice');await refreshAll()}catch(e){note(e.message,'list-notice')}}
 function populateSelectors(){const o=state.profiles.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.id)})</option>`).join('');const routeProvider=$('#route-provider'),migrationTarget=$('#migration-target');if(routeProvider)routeProvider.innerHTML=o;if(migrationTarget)migrationTarget.innerHTML=o}
 function newProvider(mode='apikey'){state.current={id:'',name:'',base_url:'',model:'gpt-5.6-terra',wire_api:'responses',auth_mode:mode,models:[]};openDetail()}
@@ -1562,9 +1680,9 @@ function addModel(m={name:'',context_window:'1M',image_mode:'send-as-is'}){const
 function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),wire_api:state.protocol,auth_mode:$('#p-auth').value,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-row')].map(r=>({name:r.children[0].value.trim(),context_window:r.children[1].value.trim(),image_mode:r.children[2].value})).filter(m=>m.name)}}
 function updatePreview(){if(!state.current)return;const p=gather();const lines=[`model = "${p.model||'gpt-5.6-terra'}"`,`model_provider = "${p.id||'provider-id'}"`,`model_reasoning_effort = "medium"`];if(p.auth_mode==='apikey'){lines.push('',`[model_providers.${p.id||'provider-id'}]`,`name = "${p.name||'供应商名称'}"`,`base_url = "${p.base_url||'https://api.example.com'}"`,`wire_api = "${p.wire_api}"`,`experimental_bearer_token = "***"`)}else lines.push('','# 官方登录模式：使用已捕获的 auth.json 快照');if(p.models.length)lines.push('',`model_catalog_json = "model-catalogs/control-panel-${p.id||'provider-id'}.json"`);$('#config-preview').value=lines.join('\n');$('#auth-preview').value=p.auth_mode==='chatgpt'?'{\n  "auth_mode": "chatgpt",\n  "tokens": "已隐藏"\n}':'{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "***"\n}'}
 async function saveProvider(returnToList=false){try{const p=gather();if(!p.id||!p.name||(p.auth_mode==='apikey'&&!p.base_url)){throw Error('请填写供应商名称；纯 API 还需要 Base URL。供应商标识会由名称自动生成。')}await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});state.current=p;await refreshAll();if(returnToList)closeDetail();else note('供应商配置已保存。')}catch(e){note(e.message)}}
-async function activateCurrent(){try{await saveProvider(false);const p=gather();if(!p.id)return;const d=await api(`/api/providers/${encodeURIComponent(p.id)}/activate`,{method:'POST'});state.active=p.id;const activateButton=$('#activate-btn');activateButton.disabled=true;activateButton.textContent='使用中';activateButton.title='当前正在使用该供应商';setManagedRestartAvailable(true);note(`已设为当前供应商，备份编号：${d.backup_id}。现在可点击“重启 Codex”让面板托管服务读取新配置。`);await refreshAll()}catch(e){note(e.message)}}
-function setManagedRestartAvailable(available){const button=$('#managed-restart-btn');if(!button)return;button.disabled=!available;button.title=available?'确认后续控制台会话读取当前供应商配置':'请先成功切换供应商'}
-async function restartManagedCodex(){const button=$('#managed-restart-btn');if(!button||button.disabled)return;try{button.disabled=true;button.textContent='正在应用…';const result=await api('/api/runtime/restart',{method:'POST'});note(result.detail,'list-notice');}catch(e){note(e.message,'list-notice');button.disabled=false;}finally{button.textContent='应用配置';button.title='请先成功切换供应商'}}
+async function activateCurrent(){try{await saveProvider(false);const p=gather();if(!p.id)return;const d=await api(`/api/providers/${encodeURIComponent(p.id)}/activate`,{method:'POST'});state.active=p.id;const activateButton=$('#activate-btn');activateButton.disabled=true;activateButton.textContent='使用中';activateButton.title='当前正在使用该供应商';note(`已设为当前供应商，备份编号：${d.backup_id}。${d.runtime?.detail||'Codex App Server 已重启。'}`);await refreshAll()}catch(e){note(e.message)}}
+function setManagedRestartAvailable(){const button=$('#managed-restart-btn');if(button){button.disabled=false;button.title='重启服务器上的 Codex App Server'}}
+async function restartManagedCodex(){const button=$('#managed-restart-btn');if(!button||button.disabled)return;if(!await panelDialog({title:'重启 Codex App Server',message:'这会短暂中断当前远程 Codex 连接和正在进行的请求。新的连接将读取当前供应商配置。',confirmLabel:'重启'}))return;try{button.disabled=true;button.textContent='正在重启…';const result=await api('/api/runtime/restart',{method:'POST'});note(result.detail,'list-notice')}catch(e){note(e.message,'list-notice')}finally{button.disabled=false;button.textContent='重启 Codex';button.title='重启服务器上的 Codex App Server'}}
 async function testCurrent(){try{const p=gather();const d=await api('/api/providers/diagnose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const failed=(d.checks||[]).filter(item=>item.status==='fail').map(item=>`${item.name}：${item.detail}`);const warnings=(d.checks||[]).filter(item=>item.status==='warning').map(item=>`${item.name}：${item.detail}`);note(d.ok?`诊断通过。${warnings.length?' '+warnings.join('；'):''}`:`诊断发现问题：${failed.join('；')}`)}catch(e){note(e.message)}}
 async function loadCommon(){try{const d=await api('/api/common-config');$('#common-config').value=d.contents}catch{}}
 async function extractCommon(){try{const d=await api('/api/common-config/extract',{method:'POST'});$('#common-config').value=d.contents;note('已提取当前通用配置。')}catch(e){note(e.message)}}
