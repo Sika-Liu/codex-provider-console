@@ -689,18 +689,6 @@ def api_key_from_auth_contents(contents: str) -> str | None:
     return key if isinstance(key, str) and key else None
 
 
-def write_model_catalog(provider_id: str, profile: dict) -> str | None:
-    models = profile.get("models", [])
-    if not models:
-        return None
-    catalog_dir = CODEX_HOME / "model-catalogs"
-    catalog_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    catalog_path = catalog_dir / f"control-panel-{provider_id}.json"
-    catalog = {"models": [{"slug": item["name"], "display_name": item["name"]} for item in models]}
-    write_private(catalog_path, json.dumps(catalog, ensure_ascii=False, indent=2) + "\n")
-    return f"model-catalogs/{catalog_path.name}"
-
-
 def config_text() -> str:
     return CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else ""
 
@@ -1154,7 +1142,6 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         if not snapshot:
             raise HTTPException(422, "Capture the current ChatGPT authentication before activating this profile")
         validate_auth_snapshot(snapshot)
-    catalog_path = write_model_catalog(provider_id, profile)
     selected_model = str(model_override or profile.get("model") or "").strip()
     generated_root = [
         f'model_provider = {toml_quote(provider_id)}',
@@ -1172,8 +1159,6 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         generated_provider.append(f'base_url = {toml_quote(profile["base_url"].rstrip("/"))}')
     if profile.get("bearer_token"):
         generated_provider.append(f'experimental_bearer_token = {toml_quote(profile["bearer_token"])}')
-    if catalog_path:
-        generated_root.append(f'model_catalog_json = {toml_quote(catalog_path)}')
     provider_config = profile.get("config_contents", "").strip()
     # Older profile forms saved a full config.toml preview here. Reapplying
     # that snapshot would overwrite fields the user later changed in the
@@ -1218,6 +1203,8 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
                 write_private(AUTH_PATH, api_auth.rstrip() + "\n")
             else:
                 write_private(AUTH_PATH, profile["auth_contents"].rstrip() + "\n")
+            stale_catalog = CODEX_HOME / "model-catalogs" / f"control-panel-{provider_id}.json"
+            stale_catalog.unlink(missing_ok=True)
             migration = migrate_session_provider(provider_id)
             run_host_app_server_control("start")
     except (OSError, RuntimeError, sqlite3.Error, tomllib.TOMLDecodeError) as exc:
@@ -1766,7 +1753,7 @@ function authModeChanged(){const official=$('#p-auth').value==='chatgpt';$('#api
 function setProtocol(v){state.protocol=v;$('#responses-tab').classList.toggle('selected',v==='responses');$('#chat-tab').classList.toggle('selected',v==='chat');updatePreview()}
 function addModel(m={name:'',context_window:'1M',image_mode:'send-as-is'}){const row=document.createElement('div');row.className='model-row';row.innerHTML=`<input placeholder="例如 gpt-5.6-terra" value="${esc(m.name)}" oninput="updatePreview()"><input placeholder="1M" value="${esc(m.context_window||'')}" oninput="updatePreview()"><select onchange="updatePreview()"><option value="send-as-is">send-as-is</option><option value="omit">omit</option></select><button class="remove-model" title="删除模型" onclick="this.parentElement.remove();updatePreview()">×</button>`;row.querySelector('select').value=m.image_mode||'send-as-is';$('#model-list').append(row)}
 function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),wire_api:state.protocol,auth_mode:$('#p-auth').value,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-row')].map(r=>({name:r.children[0].value.trim(),context_window:r.children[1].value.trim(),image_mode:r.children[2].value})).filter(m=>m.name)}}
-function updatePreview(){if(!state.current)return;const p=gather();const lines=[`model = "${p.model||'gpt-5.6-terra'}"`,`model_provider = "${p.id||'provider-id'}"`,`model_reasoning_effort = "medium"`];if(p.auth_mode==='apikey'){lines.push('',`[model_providers.${p.id||'provider-id'}]`,`name = "${p.name||'供应商名称'}"`,`base_url = "${p.base_url||'https://api.example.com'}"`,`wire_api = "${p.wire_api}"`,`experimental_bearer_token = "***"`)}else lines.push('','# 官方登录模式：使用已捕获的 auth.json 快照');if(p.models.length)lines.push('',`model_catalog_json = "model-catalogs/control-panel-${p.id||'provider-id'}.json"`);$('#config-preview').value=lines.join('\n');$('#auth-preview').value=p.auth_mode==='chatgpt'?'{\n  "auth_mode": "chatgpt",\n  "tokens": "已隐藏"\n}':'{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "***"\n}'}
+function updatePreview(){if(!state.current)return;const p=gather();const lines=[`model = "${p.model||'gpt-5.6-terra'}"`,`model_provider = "${p.id||'provider-id'}"`,`model_reasoning_effort = "medium"`];if(p.auth_mode==='apikey'){lines.push('',`[model_providers.${p.id||'provider-id'}]`,`name = "${p.name||'供应商名称'}"`,`base_url = "${p.base_url||'https://api.example.com'}"`,`wire_api = "${p.wire_api}"`,`experimental_bearer_token = "***"`)}else lines.push('','# 官方登录模式：使用已捕获的 auth.json 快照');$('#config-preview').value=lines.join('\n');$('#auth-preview').value=p.auth_mode==='chatgpt'?'{\n  "auth_mode": "chatgpt",\n  "tokens": "已隐藏"\n}':'{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "***"\n}'}
 async function saveProvider(returnToList=false){try{const p=gather();if(!p.id||!p.name||(p.auth_mode==='apikey'&&!p.base_url)){throw Error('请填写供应商名称；纯 API 还需要 Base URL。供应商标识会由名称自动生成。')}await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});state.current=p;await refreshAll();if(returnToList)closeDetail();else note('供应商配置已保存。')}catch(e){note(e.message)}}
 async function activateCurrent(){try{await saveProvider(false);const p=gather();if(!p.id)return;const d=await api(`/api/providers/${encodeURIComponent(p.id)}/activate`,{method:'POST'});state.active=p.id;const activateButton=$('#activate-btn');activateButton.disabled=true;activateButton.textContent='使用中';activateButton.title='当前正在使用该供应商';note(`已设为当前供应商，备份编号：${d.backup_id}。${d.runtime?.detail||'Codex App Server 已重启。'}`);await refreshAll()}catch(e){note(e.message)}}
 function setManagedRestartAvailable(){const button=$('#managed-restart-btn');if(button){button.disabled=false;button.title='重启服务器上的 Codex App Server'}}
