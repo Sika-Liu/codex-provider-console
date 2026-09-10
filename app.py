@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from pydantic import BaseModel, Field
 
 from model_catalog import build_model_catalog
-from provider_domain import backfill_profile_model, is_profile_usable, normalize_profile
+from provider_domain import backfill_profile_model, is_profile_usable, normalize_profile, resolve_host_codex_home
 
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
@@ -35,6 +35,7 @@ HOST_CODEX_BIN_CANDIDATES = (
     USER_HOME / ".codex" / "packages" / "standalone" / "current" / "bin" / "codex",
 )
 HOST_USER_HOME_PATH = os.environ.get("HOST_USER_HOME_PATH", "")
+HOST_CODEX_HOME_PATH = os.environ.get("HOST_CODEX_HOME_PATH", "")
 DEPLOYMENT_KEY_PATH = USER_HOME / ".ssh" / "codex-provider-console_ed25519"
 DEPLOYMENT_KEY_PUBLIC_PATH = DEPLOYMENT_KEY_PATH.with_suffix(".pub")
 AUTHORIZED_KEYS_PATH = USER_HOME / ".ssh" / "authorized_keys"
@@ -1030,6 +1031,77 @@ def run_host_app_server_control(action: Literal["start", "stop"]) -> str:
     return (result.stdout or result.stderr).strip()
 
 
+def host_codex_home_path() -> str:
+    """Return the host-side Codex home used by the Desktop App Server."""
+    try:
+        return resolve_host_codex_home(HOST_CODEX_HOME_PATH, HOST_USER_HOME_PATH)
+    except ValueError as exc:
+        raise RuntimeError(f"{exc}，无法同步删除云端会话") from exc
+
+
+def run_host_session_delete(thread_id: str) -> str:
+    """Delete via the host App Server, not the container-local CLI cache."""
+    if not DEPLOYMENT_KEY_PATH.is_file():
+        raise RuntimeError("缺少面板部署密钥；请先在健康检查中部署密钥")
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", DEPLOY_USER):
+        raise RuntimeError("部署用户名无效，无法删除云端会话")
+    codex_home = host_codex_home_path()
+    script = f'''import os
+import subprocess
+from pathlib import Path
+
+session_id = {thread_id!r}
+codex_home = {codex_home!r}
+home = Path.home()
+candidates = [
+    home / ".local" / "bin" / "codex",
+    home / ".codex" / "bin" / "codex",
+    home / ".codex" / "packages" / "standalone" / "current" / "bin" / "codex",
+    Path("/usr/local/bin/codex"),
+]
+binary = next((str(path) for path in candidates if path.is_file() and os.access(path, os.X_OK)), "codex")
+env = os.environ.copy()
+env["CODEX_HOME"] = codex_home
+result = subprocess.run([binary, "delete", "--force", session_id], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+if result.returncode != 0:
+    raise SystemExit(result.stdout.strip() or "Codex delete failed")
+print(result.stdout.strip())
+'''
+    gateway = docker_host_gateway()
+    try:
+        result = subprocess.run(
+            [
+                "ssh",
+                "-i",
+                str(DEPLOYMENT_KEY_PATH),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                f"UserKnownHostsFile={USER_HOME / '.ssh' / 'known_hosts'}",
+                "-o",
+                "LogLevel=ERROR",
+                f"{DEPLOY_USER}@{gateway}",
+                "python3",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            input=script,
+            timeout=45,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("宿主机 Codex 删除会话超时") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "宿主机未提供失败原因").strip()
+        raise RuntimeError(f"宿主机 Codex 无法删除会话：{detail[-400:]}")
+    return (result.stdout or result.stderr).strip()
+
+
 def migrate_session_provider(
     provider_id: str,
     source_provider: str | None = None,
@@ -1742,31 +1814,21 @@ def delete_server_session(thread_id: str) -> dict:
     if not THREAD_ID.fullmatch(normalized_id):
         raise HTTPException(422, "无效的会话标识")
     try:
-        result = subprocess.run(
-            ["codex", "delete", "--force", normalized_id],
-            env={**os.environ, "CODEX_HOME": str(CODEX_HOME)},
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=30,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise HTTPException(503, "Codex CLI 不可用，无法删除会话") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(504, "Codex 删除会话超时") from exc
-    if result.returncode != 0:
-        detail = result.stdout.strip() or "Codex 未提供失败原因"
-        raise HTTPException(502, f"Codex 无法删除会话：{detail}")
+        backup_id, _ = backup_state(include_sessions=True)
+        run_host_session_delete(normalized_id)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
     audit(
         "server_session_deleted",
         thread_id=normalized_id,
-        command="codex delete --force",
+        command="host codex delete --force",
+        backup_id=backup_id,
     )
     return {
         "deleted": normalized_id,
-        "detail": "会话已由 Codex 从服务器永久删除。请重新读取远程会话列表。",
+        "backup_id": backup_id,
+        "detail": "会话已由宿主机 Codex App Server 删除；远程列表会同步更新。",
     }
 
 

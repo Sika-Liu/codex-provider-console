@@ -24,6 +24,7 @@ services:
       USER_HOME_PATH: "${CODEX_USER_HOME_CONTAINER_PATH:-/user-home}"
       HOST_CODEX_BIN: "${CODEX_USER_HOME_CONTAINER_PATH:-/user-home}/.local/bin/codex"
       HOST_USER_HOME_PATH: "${CODEX_USER_HOME_HOST:-}"
+      HOST_CODEX_HOME_PATH: "${CODEX_HOME_HOST:-}"
     security_opt:
       - no-new-privileges:true
     cap_drop:

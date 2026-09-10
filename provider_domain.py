@@ -101,3 +101,16 @@ def backfill_profile_model(profile: Mapping[str, Any], model: object) -> tuple[d
         return updated, False
     updated["model"] = observed[:120]
     return updated, True
+
+
+def resolve_host_codex_home(configured_path: object, user_home: object) -> str:
+    """Resolve the absolute host Codex directory for host-side operations."""
+    configured = str(configured_path or "").strip()
+    if configured:
+        if not configured.startswith("/") or "\x00" in configured:
+            raise ValueError("宿主机 Codex 数据目录无效")
+        return configured
+    home = str(user_home or "").strip()
+    if home.startswith("/"):
+        return f"{home.rstrip('/')}/.codex"
+    raise ValueError("未配置宿主机 Codex 数据目录")
