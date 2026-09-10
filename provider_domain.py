@@ -57,9 +57,12 @@ def normalize_profile(raw: Mapping[str, Any]) -> dict[str, Any]:
     profile["auth_mode"] = legacy_auth_mode(mode)
     profile["wire_api"] = legacy_wire_api(protocol)
     profile.setdefault("models", [])
-    profile.setdefault("model_windows", {})
-    profile.setdefault("model_auto_compact", {})
-    profile.setdefault("model_metadata", {})
+    # Model catalog tuning was removed from the console. Discard residual
+    # client-side metadata during normalization so saving a profile completes
+    # the migration for older installations.
+    profile.pop("model_windows", None)
+    profile.pop("model_auto_compact", None)
+    profile.pop("model_metadata", None)
     profile.setdefault("provider_config_overrides", "")
 
     if mode == "official":

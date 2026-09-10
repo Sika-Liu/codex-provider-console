@@ -15,7 +15,7 @@ RUN apt-get update \
     && curl --fail --silent --show-error --location --retry 5 --retry-all-errors --connect-timeout 20 https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh \
     && CODEX_NON_INTERACTIVE=true sh /tmp/install-codex.sh \
     && install -m 755 "$(readlink -f /root/.local/bin/codex)" /usr/local/bin/codex
-COPY app.py model_catalog.py provider_domain.py relay_domain.py relay.py ./
+COPY app.py provider_domain.py relay_domain.py relay.py ./
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 RUN chmod 755 /usr/local/bin/docker-entrypoint
 ENV PYTHONDONTWRITEBYTECODE=1

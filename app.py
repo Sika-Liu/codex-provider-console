@@ -20,7 +20,6 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from model_catalog import build_model_catalog
 from provider_domain import backfill_profile_model, is_profile_usable, normalize_profile, resolve_host_codex_home
 
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
@@ -254,9 +253,6 @@ DEVICE_LOGIN: DeviceLoginSession | None = None
 
 class ModelEntry(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    context_window: str = Field(default="", max_length=32)
-    auto_compact_limit: str = Field(default="", max_length=32)
-    metadata: dict = Field(default_factory=dict)
 
 
 class Provider(BaseModel):
@@ -275,9 +271,6 @@ class Provider(BaseModel):
     bearer_token: str | None = Field(default=None, max_length=4096)
     no_auth: bool = False
     models: list[ModelEntry] = Field(default_factory=list)
-    model_windows: dict[str, str] = Field(default_factory=dict)
-    model_auto_compact: dict[str, str] = Field(default_factory=dict)
-    model_metadata: dict[str, dict] = Field(default_factory=dict)
     provider_config_overrides: str = Field(default="", max_length=50000)
     config_contents: str = Field(default="", max_length=50000)
     auth_contents: str = Field(default="", max_length=50000)
@@ -418,16 +411,6 @@ def write_private(path: Path, text: str) -> None:
     temp.write_text(text, encoding="utf-8")
     os.chmod(temp, 0o600)
     os.replace(temp, path)
-
-
-def write_profile_model_catalog(profile: dict) -> str | None:
-    """Write an opt-in catalog under CODEX_HOME and return its config path."""
-    catalog = build_model_catalog(profile)
-    if not catalog["models"]:
-        return None
-    catalog_path = CODEX_HOME / "model-catalogs" / f"control-panel-{profile['id']}.json"
-    write_private(catalog_path, json.dumps(catalog, ensure_ascii=False, indent=2) + "\n")
-    return f"model-catalogs/{catalog_path.name}"
 
 
 def backup_state(include_sessions: bool = False) -> tuple[str, Path]:
@@ -1399,10 +1382,7 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
             raise HTTPException(422, "Capture the current ChatGPT authentication before activating this profile")
         validate_auth_snapshot(snapshot)
     selected_model = str(model_override or profile.get("model") or "").strip()
-    catalog_reference = write_profile_model_catalog(profile)
     generated_root = [f'model_provider = {toml_quote(provider_id)}']
-    if catalog_reference:
-        generated_root.append(f'model_catalog_json = {toml_quote(catalog_reference)}')
     generated_provider = [
         f'[model_providers.{provider_id}]',
         f'name = {toml_quote(profile["name"])}',
@@ -1934,10 +1914,10 @@ const migrationTarget=$('#migration-target');if(migrationTarget){const migration
 const commonConfig=$('#common-config');if(commonConfig){const commonPanel=commonConfig.parentElement;const commonSection=commonPanel?.parentElement;commonPanel?.remove();if(commonSection)commonSection.style.gridTemplateColumns='1fr'}
 const routeModel=$('#route-model');if(routeModel){const routeRow=routeModel.parentElement;const routeHelp=routeRow?.previousElementSibling;const routeTitle=routeHelp?.previousElementSibling;routeRow?.remove();routeHelp?.remove();routeTitle?.remove()}
 async function refreshRoutes(){}
-function addModel(m={name:''}){if(!m.name)return;const entry=document.createElement('div'),name=document.createElement('span'),windowLimit=document.createElement('input'),compactLimit=document.createElement('input');entry.className='model-entry';entry.dataset.name=m.name;name.textContent=m.name;windowLimit.placeholder='上下文，例如 1M';windowLimit.value=m.context_window||'';windowLimit.title='可选；填写后才会生成 model_catalog_json';windowLimit.oninput=updatePreview;compactLimit.placeholder='压缩阈值（可选）';compactLimit.value=m.auto_compact_limit||'';compactLimit.oninput=updatePreview;entry.append(name,windowLimit,compactLimit);$('#model-list').append(entry)}
+function addModel(m={name:''}){if(!m.name)return;const entry=document.createElement('div');entry.className='model-entry';entry.dataset.name=m.name;entry.textContent=m.name;$('#model-list').append(entry)}
 async function loadAuthContents(providerId){if(!providerId)return;try{const data=await api(`/api/providers/${encodeURIComponent(providerId)}/auth`);if(state.current?.id===providerId&&data.auth_mode===$('#p-auth').value)$('#auth-preview').value=data.contents||''}catch(e){note(e.message)}}
 function openDetail(){const p=state.current;const active=Boolean(p.id&&p.id===state.active),activateButton=$('#activate-btn');$('#list-view').classList.add('hidden');$('#detail').classList.add('visible');$('#detail-name').textContent=p.id?p.name:'添加供应商';$('#detail-sub').textContent=active?'当前正在使用':p.id?'编辑后保存列表，再切换模式时会使用新配置':'新建供应商需要先保存到列表';activateButton.style.display=p.id?'':'none';activateButton.disabled=active;activateButton.textContent=active?'使用中':'设为当前';activateButton.title=active?'当前正在使用该供应商':'设为当前供应商';$('#p-name').value=p.name||'';$('#p-model').value=p.model||'';$('#p-url').value=p.base_url||'';$('#p-key').value=p.auth_mode==='apikey'?(p.bearer_token||''):'';$('#p-auth').value=p.auth_mode||'apikey';$('#auth-preview').value='';$('#p-goals').checked=Boolean(p.goals_enabled);state.testModel=p.test_model||'';state.goalsConfigured=Boolean(p.goals_configured);state.protocol=p.wire_api||'responses';state.configTouched=Boolean(p.config_contents);$('#config-preview').value=p.config_contents||'';setProtocol(state.protocol);$('#model-list').innerHTML='';(p.models||[]).forEach(addModel);authModeChanged();if(state.goalsConfigured)syncGoalsConfig();updatePreview();if(p.id)loadAuthContents(p.id)}
-function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');const auth_mode=$('#p-auth').value,mode=auth_mode==='chatgpt'?'official':'pure_api',protocol=state.protocol==='chat'?'chat_completions':'responses';return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),mode,protocol,wire_api:state.protocol,auth_mode,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-entry')].map(entry=>({name:entry.dataset.name,context_window:entry.querySelectorAll('input')[0]?.value.trim()||'',auto_compact_limit:entry.querySelectorAll('input')[1]?.value.trim()||''})).filter(m=>m.name),config_contents:$('#config-preview').value,auth_contents:$('#auth-preview').value,goals_enabled:$('#p-goals').checked,goals_configured:Boolean(state.goalsConfigured),test_model:state.testModel||''}}
+function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');const auth_mode=$('#p-auth').value,mode=auth_mode==='chatgpt'?'official':'pure_api',protocol=state.protocol==='chat'?'chat_completions':'responses';return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),mode,protocol,wire_api:state.protocol,auth_mode,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-entry')].map(entry=>({name:entry.dataset.name})).filter(m=>m.name),config_contents:$('#config-preview').value,auth_contents:$('#auth-preview').value,goals_enabled:$('#p-goals').checked,goals_configured:Boolean(state.goalsConfigured),test_model:state.testModel||''}}
 function updatePreview(){if(!state.current)return;const p=gather();if(p.auth_mode==='apikey'&&!$('#auth-preview').value.trim())$('#auth-preview').value=JSON.stringify({OPENAI_API_KEY:$('#p-key').value},null,2)}
 function syncKeyToAuth(){if($('#p-auth').value==='apikey')$('#auth-preview').value=JSON.stringify({OPENAI_API_KEY:$('#p-key').value},null,2)}
 function syncAuthToKey(){if($('#p-auth').value!=='apikey')return;try{const value=JSON.parse($('#auth-preview').value);if(value&&typeof value.OPENAI_API_KEY==='string')$('#p-key').value=value.OPENAI_API_KEY}catch{}}
@@ -2035,12 +2015,12 @@ async function deleteProvider(id){if(!confirm(`确认删除供应商「${id}」�
 function populateSelectors(){const o=state.profiles.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.id)})</option>`).join('');const routeProvider=$('#route-provider'),migrationTarget=$('#migration-target');if(routeProvider)routeProvider.innerHTML=o;if(migrationTarget)migrationTarget.innerHTML=o}
 function newProvider(mode='apikey'){state.current={id:'',name:'',base_url:'',model:'gpt-5.6-terra',wire_api:'responses',auth_mode:mode,models:[]};openDetail()}
 function openProvider(id){const p=state.profiles.find(x=>x.id===id);if(!p)return;state.current=structuredClone(p);openDetail()}
-function openDetail(){const p=state.current;const active=Boolean(p.id&&p.id===state.active),activateButton=$('#activate-btn');$('#list-view').classList.add('hidden');$('#detail').classList.add('visible');$('#detail-name').textContent=p.id? p.name:'添加供应商';$('#detail-sub').textContent=active?'当前正在使用':'编辑后保存列表，再切换模式时会使用新配置';activateButton.style.display=p.id?'':'none';activateButton.disabled=active;activateButton.textContent=active?'使用中':'设为当前';activateButton.title=active?'当前正在使用该供应商':'设为当前供应商';$('#p-name').value=p.name||'';$('#p-model').value=p.model||'gpt-5.6-terra';$('#p-url').value=p.base_url||'';$('#p-key').value='';$('#p-auth').value=p.auth_mode||'apikey';state.protocol=p.wire_api||'responses';setProtocol(state.protocol);$('#model-list').innerHTML='';(p.models?.length?p.models:[{name:p.model||'',context_window:'1M',image_mode:'send-as-is'}]).forEach(addModel);authModeChanged();updatePreview()}
+function openDetail(){const p=state.current;const active=Boolean(p.id&&p.id===state.active),activateButton=$('#activate-btn');$('#list-view').classList.add('hidden');$('#detail').classList.add('visible');$('#detail-name').textContent=p.id? p.name:'添加供应商';$('#detail-sub').textContent=active?'当前正在使用':'编辑后保存列表，再切换模式时会使用新配置';activateButton.style.display=p.id?'':'none';activateButton.disabled=active;activateButton.textContent=active?'使用中':'设为当前';activateButton.title=active?'当前正在使用该供应商':'设为当前供应商';$('#p-name').value=p.name||'';$('#p-model').value=p.model||'gpt-5.6-terra';$('#p-url').value=p.base_url||'';$('#p-key').value='';$('#p-auth').value=p.auth_mode||'apikey';state.protocol=p.wire_api||'responses';setProtocol(state.protocol);$('#model-list').innerHTML='';(p.models?.length?p.models:[{name:p.model||''}]).forEach(addModel);authModeChanged();updatePreview()}
 function closeDetail(){$('#detail').classList.remove('visible');$('#list-view').classList.remove('hidden');state.current=null;refreshAll()}
 function authModeChanged(){const official=$('#p-auth').value==='chatgpt';$('#api-fields').style.display=official?'none':'grid';$('#official-fields').style.display=official?'block':'none';$('#p-url').required=!official;updatePreview()}
 function setProtocol(v){state.protocol=v;$('#responses-tab').classList.toggle('selected',v==='responses');$('#chat-tab').classList.toggle('selected',v==='chat');updatePreview()}
-function addModel(m={name:'',context_window:'1M',image_mode:'send-as-is'}){const row=document.createElement('div');row.className='model-row';row.innerHTML=`<input placeholder="例如 gpt-5.6-terra" value="${esc(m.name)}" oninput="updatePreview()"><input placeholder="1M" value="${esc(m.context_window||'')}" oninput="updatePreview()"><select onchange="updatePreview()"><option value="send-as-is">send-as-is</option><option value="omit">omit</option></select><button class="remove-model" title="删除模型" onclick="this.parentElement.remove();updatePreview()">×</button>`;row.querySelector('select').value=m.image_mode||'send-as-is';$('#model-list').append(row)}
-function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),wire_api:state.protocol,auth_mode:$('#p-auth').value,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-row')].map(r=>({name:r.children[0].value.trim(),context_window:r.children[1].value.trim(),image_mode:r.children[2].value})).filter(m=>m.name)}}
+function addModel(m={name:''}){const row=document.createElement('div');row.className='model-row';row.innerHTML=`<input placeholder="例如 gpt-5.6-terra" value="${esc(m.name)}" oninput="updatePreview()"><button class="remove-model" title="删除模型" onclick="this.parentElement.remove();updatePreview()">×</button>`;$('#model-list').append(row)}
+function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),wire_api:state.protocol,auth_mode:$('#p-auth').value,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-row')].map(r=>({name:r.children[0].value.trim()})).filter(m=>m.name)}}
 function updatePreview(){if(!state.current)return;const p=gather();const lines=[`model = "${p.model||'gpt-5.6-terra'}"`,`model_provider = "${p.id||'provider-id'}"`,`model_reasoning_effort = "medium"`];if(p.auth_mode==='apikey'){lines.push('',`[model_providers.${p.id||'provider-id'}]`,`name = "${p.name||'供应商名称'}"`,`base_url = "${p.base_url||'https://api.example.com'}"`,`wire_api = "${p.wire_api}"`,`experimental_bearer_token = "***"`)}else lines.push('','# 官方登录模式：使用已捕获的 auth.json 快照');$('#config-preview').value=lines.join('\n');$('#auth-preview').value=p.auth_mode==='chatgpt'?'{\n  "auth_mode": "chatgpt",\n  "tokens": "已隐藏"\n}':'{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "***"\n}'}
 async function saveProvider(returnToList=false){try{const p=gather();if(!p.id||!p.name||(p.auth_mode==='apikey'&&!p.base_url)){throw Error('请填写供应商名称；纯 API 还需要 Base URL。供应商标识会由名称自动生成。')}await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});state.current=p;await refreshAll();if(returnToList)closeDetail();else note('供应商配置已保存。')}catch(e){note(e.message)}}
 async function activateCurrent(){try{await saveProvider(false);const p=gather();if(!p.id)return;const d=await api(`/api/providers/${encodeURIComponent(p.id)}/activate`,{method:'POST'});state.active=p.id;const activateButton=$('#activate-btn');activateButton.disabled=true;activateButton.textContent='使用中';activateButton.title='当前正在使用该供应商';const restored=d.backfilled_provider_id?`已保存「${d.backfilled_provider_id}」的最近模型。`:'';note(`已设为当前供应商，备份编号：${d.backup_id}。${restored}${d.runtime?.detail||'Codex App Server 已重启。'}`);await refreshAll()}catch(e){note(e.message)}}
@@ -2079,7 +2059,7 @@ async function activate(id){if(!confirm(`切换到 ${id}？系统会先测试连
 async function testProvider(id){try{const d=await api(`/api/providers/${id}/test`,{method:'POST'});message(d.ok?`连接正常（HTTP ${d.status}）`:(d.detail||'连接失败'))}catch(err){message(err.message)}}
 function edit(p){for(const [k,v]of Object.entries(p)){const e=q(`[name="${k}"]`);if(e&&e.type!=='checkbox'&&k!=='models')e.value=v}q('[name="model_lines"]').value=(p.models||[]).map(m=>m.name).join('\n');window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})}
 async function removeProvider(id){if(!confirm(`删除档案 ${id}？`))return;await api(`/api/providers/${id}`,{method:'DELETE'});refresh()}
-q('#form').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);const data=Object.fromEntries(f);data.models=(data.model_lines||'').split('\n').map(x=>x.trim()).filter(Boolean).map(name=>({name,context_window:'',image_mode:'send-as-is'}));delete data.model_lines;try{await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});message('供应商档案已保存。');e.target.reset();q('[name="model"]').value='gpt-5.6-terra';refresh();refreshRoutes()}catch(err){message(err.message)}};refresh();
+q('#form').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);const data=Object.fromEntries(f);data.models=(data.model_lines||'').split('\n').map(x=>x.trim()).filter(Boolean).map(name=>({name}));delete data.model_lines;try{await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});message('供应商档案已保存。');e.target.reset();q('[name="model"]').value='gpt-5.6-terra';refresh();refreshRoutes()}catch(err){message(err.message)}};refresh();
 async function captureAuth(){const id=q('[name="id"]').value;if(!id){message('请先填写并保存官方登录档案的标识。');return}try{await api(`/api/providers/${encodeURIComponent(id)}/capture-auth`,{method:'POST'});message('已捕获当前 ChatGPT 登录认证，密钥不会显示。')}catch(err){message(err.message)}}
 async function loadCommon(){const d=await api('/api/common-config');q('#common-config').value=d.contents}
 async function extractCommon(){try{const d=await api('/api/common-config/extract',{method:'POST'});q('#common-config').value=d.contents;message('已提取当前通用配置。')}catch(err){message(err.message)}}
