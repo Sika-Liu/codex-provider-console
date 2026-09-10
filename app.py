@@ -51,6 +51,10 @@ THREAD_ID = re.compile(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 THREAD_ID_IN_TEXT = re.compile(r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 SESSIONS_PATH = CODEX_HOME / "sessions"
 SESSION_INDEX_PATH = CODEX_HOME / "session_index.jsonl"
+# Codex stores a model-provider identifier with every conversation.  Keep
+# that identifier independent of a panel profile so changing profiles does
+# not make old conversations refer to a deleted TOML provider table.
+SESSION_PROVIDER_ID = "custom"
 ARCHIVED_SESSIONS_PATH = CODEX_HOME / "archived_sessions"
 APP_SERVER_LOCK = threading.Lock()
 ACTIVATION_JOBS: dict[str, dict] = {}
@@ -397,7 +401,7 @@ def read_profiles() -> dict[str, dict]:
 
 def panel_settings() -> dict:
     if not SETTINGS_PATH.exists():
-        return {"provider_switching_enabled": True, "reverse_proxy": {}}
+        return {"provider_switching_enabled": True, "reverse_proxy": {}, "active_provider_id": ""}
     try:
         settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -405,6 +409,7 @@ def panel_settings() -> dict:
     return {
         "provider_switching_enabled": bool(settings.get("provider_switching_enabled", True)),
         "reverse_proxy": settings.get("reverse_proxy") if isinstance(settings.get("reverse_proxy"), dict) else {},
+        "active_provider_id": str(settings.get("active_provider_id") or ""),
     }
 
 
@@ -419,7 +424,7 @@ def write_private(path: Path, text: str) -> None:
 def backup_state(include_sessions: bool = False) -> tuple[str, Path]:
     destination = BACKUP_ROOT / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     destination.mkdir(parents=True, mode=0o700)
-    for source in (CONFIG_PATH, PROFILE_PATH, AUTH_PATH):
+    for source in (CONFIG_PATH, PROFILE_PATH, SETTINGS_PATH, AUTH_PATH):
         if source.exists():
             target = destination / source.name
             shutil.copy2(source, target)
@@ -444,6 +449,27 @@ def backup_state(include_sessions: bool = False) -> tuple[str, Path]:
             shutil.copy2(SESSION_INDEX_PATH, target)
             os.chmod(target, 0o600)
     return destination.name, destination
+
+
+def restore_session_state(backup_dir: Path) -> None:
+    """Restore the session files touched by a failed provider switch."""
+    database_backup = backup_dir / "state_5.sqlite"
+    if database_backup.is_file():
+        shutil.copy2(database_backup, CODEX_HOME / "state_5.sqlite")
+        os.chmod(CODEX_HOME / "state_5.sqlite", 0o600)
+    index_backup = backup_dir / SESSION_INDEX_PATH.name
+    if index_backup.is_file():
+        shutil.copy2(index_backup, SESSION_INDEX_PATH)
+        os.chmod(SESSION_INDEX_PATH, 0o600)
+    for directory_name in ("sessions", "archived_sessions"):
+        source_root = backup_dir / directory_name
+        if not source_root.is_dir():
+            continue
+        for source in source_root.rglob("*.jsonl"):
+            target = CODEX_HOME / source.relative_to(backup_dir)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            os.chmod(target, 0o600)
 
 
 def audit(action: str, **details: str | bool | None) -> None:
@@ -739,11 +765,23 @@ def remove_goals_feature(config: str) -> str:
     return "\n".join(output).strip()
 
 
-def active_provider() -> str | None:
+def active_config_provider() -> str | None:
     if not CONFIG_PATH.exists():
         return None
     match = re.search(r"^\s*model_provider\s*=\s*['\"]([^'\"]+)['\"]", CONFIG_PATH.read_text(encoding="utf-8"), re.M)
     return match.group(1) if match else None
+
+
+def active_provider() -> str | None:
+    """Return the active panel profile, not Codex's stable session identity."""
+    profiles = read_profiles()
+    selected = panel_settings().get("active_provider_id", "")
+    if selected in profiles:
+        return selected
+    # Compatibility with configurations written before the stable `custom`
+    # session identity was introduced.
+    legacy_provider = active_config_provider()
+    return legacy_provider if legacy_provider in profiles else None
 
 
 def active_default_model() -> str | None:
@@ -1158,11 +1196,7 @@ def migrate_session_provider(
     apply: bool = True,
     backup_dir: Path | None = None,
 ) -> dict[str, int]:
-    """Preview or apply an explicit session-provider migration.
-
-    Activating a new default provider must not silently rewrite historical
-    sessions. This operation is only invoked by the dedicated migration API.
-    """
+    """Preview or apply a migration to Codex's stable session provider ID."""
     database_changes = 0
     if (database := CODEX_HOME / "state_5.sqlite").is_file():
         connection = sqlite3.connect(database, timeout=10)
@@ -1376,8 +1410,8 @@ def switch_provider(
         raise HTTPException(422, {"message": "Provider connection test failed; configuration was not changed.", "check": check})
     report(38, "诊断通过，正在保存当前状态")
     # Keep the most recently observed config-level model with the provider
-    # being left. This matches Codex++'s provider-level restoration behavior;
-    # it deliberately does not alter any session metadata.
+    # being left. Provider selection is stored separately from Codex's stable
+    # per-session model-provider identity.
     previous_provider_id = active_provider()
     previous_model = active_default_model()
     backfilled_provider_id = None
@@ -1388,7 +1422,7 @@ def switch_provider(
             backfilled_provider_id = previous_provider_id
 
     report(48, "正在创建配置备份")
-    backup_id, backup_dir = backup_state()
+    backup_id, backup_dir = backup_state(include_sessions=True)
     base = remove_goals_feature(canonicalize_base_config(config_text()))
     if mode == "pure_api" and not profile.get("bearer_token") and not profile.get("no_auth", False):
         raise HTTPException(422, "An API key is required for a pure API provider")
@@ -1398,10 +1432,10 @@ def switch_provider(
             raise HTTPException(422, "Capture the current ChatGPT authentication before activating this profile")
         validate_auth_snapshot(snapshot)
     selected_model = str(model_override or profile.get("model") or "").strip()
-    generated_root = [f'model_provider = {toml_quote(provider_id)}']
+    generated_root = [f'model_provider = {toml_quote(SESSION_PROVIDER_ID)}']
     generated_provider = [
-        f'[model_providers.{provider_id}]',
-        f'name = {toml_quote(profile["name"])}',
+        f'[model_providers.{SESSION_PROVIDER_ID}]',
+        f'name = {toml_quote(SESSION_PROVIDER_ID)}',
         f'requires_openai_auth = {str(auth_mode == "chatgpt").lower()}',
     ]
     if selected_model:
@@ -1460,17 +1494,31 @@ def switch_provider(
                 write_private(AUTH_PATH, api_auth.rstrip() + "\n")
             else:
                 write_private(AUTH_PATH, profile["auth_contents"].rstrip() + "\n")
-            # Switching changes the default for subsequent sessions only.
-            # Existing sessions retain their recorded provider until explicitly
-            # migrated from the session-management view.
+            report(82, "正在更新已有会话的供应商身份")
+            # Codex++ uses a stable `custom` session identity for API-backed
+            # profiles. Convert legacy profile-specific identifiers while the
+            # App Server is stopped, so existing conversations continue using
+            # the supplier selected by this switch.
+            migration = migrate_session_provider(
+                SESSION_PROVIDER_ID,
+                apply=True,
+                backup_dir=backup_dir,
+            )
+            settings = panel_settings()
+            settings["active_provider_id"] = provider_id
+            write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
             report(88, "正在启动 Codex App Server")
             run_host_app_server_control("start")
     except (OSError, RuntimeError, sqlite3.Error, tomllib.TOMLDecodeError) as exc:
-        for name, target in (("config.toml", CONFIG_PATH), ("auth.json", AUTH_PATH), ("control-panel-profiles.json", PROFILE_PATH)):
+        for name, target in (("config.toml", CONFIG_PATH), ("auth.json", AUTH_PATH), ("control-panel-profiles.json", PROFILE_PATH), ("control-panel-settings.json", SETTINGS_PATH)):
             backup_file = backup_dir / name
             if backup_file.exists():
                 shutil.copy2(backup_file, target)
                 os.chmod(target, 0o600)
+        try:
+            restore_session_state(backup_dir)
+        except OSError:
+            pass
         if app_server_stopped:
             try:
                 with APP_SERVER_LOCK:
@@ -1515,6 +1563,8 @@ def status() -> dict:
 class PanelSettings(BaseModel):
     provider_switching_enabled: bool = True
     reverse_proxy: dict = Field(default_factory=dict)
+    # Internal selection state. Browser settings forms do not need to send it.
+    active_provider_id: str | None = Field(default=None, pattern=r"^(|[a-zA-Z0-9_-]{1,48})$")
 
 
 class SessionMigrationRequest(BaseModel):
@@ -1530,7 +1580,11 @@ def get_settings() -> dict:
 
 @app.post("/api/settings")
 def save_settings(request: PanelSettings) -> dict:
-    settings = request.model_dump()
+    settings = panel_settings()
+    settings["provider_switching_enabled"] = request.provider_switching_enabled
+    settings["reverse_proxy"] = request.reverse_proxy
+    if request.active_provider_id is not None:
+        settings["active_provider_id"] = request.active_provider_id
     write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
     audit("provider_switching_setting_changed", enabled=request.provider_switching_enabled)
     return settings
@@ -1937,7 +1991,7 @@ def migrate_server_sessions(request: SessionMigrationRequest) -> dict:
     if request.apply:
         backup_id, backup_dir = backup_state(include_sessions=True)
     result = migrate_session_provider(
-        request.target_provider,
+        SESSION_PROVIDER_ID,
         request.source_provider,
         apply=request.apply,
         backup_dir=backup_dir,
@@ -1945,10 +1999,11 @@ def migrate_server_sessions(request: SessionMigrationRequest) -> dict:
     audit(
         "session_provider_migrated" if request.apply else "session_provider_migration_previewed",
         provider_id=request.target_provider,
-        detail=f"source={request.source_provider or '*'}; changes={sum(result.values())}",
+        detail=f"session_provider={SESSION_PROVIDER_ID}; source={request.source_provider or '*'}; changes={sum(result.values())}",
     )
     return {
         "target_provider": request.target_provider,
+        "session_provider": SESSION_PROVIDER_ID,
         "source_provider": request.source_provider,
         "applied": request.apply,
         "backup_id": backup_id,
@@ -2135,7 +2190,7 @@ function authModeChanged(){const official=$('#p-auth').value==='chatgpt';$('#api
 function setProtocol(v){state.protocol=v;$('#responses-tab').classList.toggle('selected',v==='responses');$('#chat-tab').classList.toggle('selected',v==='chat');updatePreview()}
 function addModel(m={name:''}){const row=document.createElement('div');row.className='model-row';row.innerHTML=`<input placeholder="例如 gpt-5.6-terra" value="${esc(m.name)}" oninput="updatePreview()"><button class="remove-model" title="删除模型" onclick="this.parentElement.remove();updatePreview()">×</button>`;$('#model-list').append(row)}
 function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),wire_api:state.protocol,auth_mode:$('#p-auth').value,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-row')].map(r=>({name:r.children[0].value.trim()})).filter(m=>m.name)}}
-function updatePreview(){if(!state.current)return;const p=gather();const lines=[`model = "${p.model||'gpt-5.6-terra'}"`,`model_provider = "${p.id||'provider-id'}"`,`model_reasoning_effort = "medium"`];if(p.auth_mode==='apikey'){lines.push('',`[model_providers.${p.id||'provider-id'}]`,`name = "${p.name||'供应商名称'}"`,`base_url = "${p.base_url||'https://api.example.com'}"`,`wire_api = "${p.wire_api}"`,`experimental_bearer_token = "***"`)}else lines.push('','# 官方登录模式：使用已捕获的 auth.json 快照');$('#config-preview').value=lines.join('\n');$('#auth-preview').value=p.auth_mode==='chatgpt'?'{\n  "auth_mode": "chatgpt",\n  "tokens": "已隐藏"\n}':'{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "***"\n}'}
+function updatePreview(){if(!state.current)return;const p=gather();const lines=[`model = "${p.model||'gpt-5.6-terra'}"`,'model_provider = "custom"','model_reasoning_effort = "medium"'];if(p.auth_mode==='apikey'){lines.push('','[model_providers.custom]','name = "custom"',`base_url = "${p.base_url||'https://api.example.com'}"`,`wire_api = "${p.wire_api}"`,`experimental_bearer_token = "***"`)}else lines.push('','# 官方登录模式：使用已捕获的 auth.json 快照');$('#config-preview').value=lines.join('\n');$('#auth-preview').value=p.auth_mode==='chatgpt'?'{\n  "auth_mode": "chatgpt",\n  "tokens": "已隐藏"\n}':'{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "***"\n}'}
 async function saveProvider(returnToList=false){try{const p=gather();if(!p.id||!p.name||(p.auth_mode==='apikey'&&!p.base_url)){throw Error('请填写供应商名称；纯 API 还需要 Base URL。供应商标识会由名称自动生成。')}await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});state.current=p;await refreshAll();if(returnToList)closeDetail();else note('供应商配置已保存。')}catch(e){note(e.message)}}
 async function activateCurrent(){try{await saveProvider(false);const p=gather();if(!p.id)return;const activateButton=$('#activate-btn');activateButton.disabled=true;await activateWithProgress(p.id);activateButton.disabled=false}catch(e){note(e.message)}}
 function setManagedRestartAvailable(){const button=$('#managed-restart-btn');if(button){button.disabled=false;button.title='重启服务器上的 Codex App Server'}}
