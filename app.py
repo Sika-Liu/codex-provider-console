@@ -12,9 +12,10 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -52,6 +53,8 @@ SESSIONS_PATH = CODEX_HOME / "sessions"
 SESSION_INDEX_PATH = CODEX_HOME / "session_index.jsonl"
 ARCHIVED_SESSIONS_PATH = CODEX_HOME / "archived_sessions"
 APP_SERVER_LOCK = threading.Lock()
+ACTIVATION_JOBS: dict[str, dict] = {}
+ACTIVATION_JOBS_LOCK = threading.Lock()
 HOST_APP_SERVER_STOP_SCRIPT = r'''
 import os
 import shlex
@@ -1342,7 +1345,17 @@ def deployment_key_status() -> tuple[bool, str]:
     return False, "部署密钥尚未写入 authorized_keys；可在此页重新部署。"
 
 
-def switch_provider(provider_id: str, verify: bool = True, model_override: str | None = None) -> dict:
+def switch_provider(
+    provider_id: str,
+    verify: bool = True,
+    model_override: str | None = None,
+    progress: Callable[[int, str], None] | None = None,
+) -> dict:
+    def report(percent: int, stage: str) -> None:
+        if progress:
+            progress(percent, stage)
+
+    report(8, "正在验证供应商配置")
     if not panel_settings()["provider_switching_enabled"]:
         raise HTTPException(409, "Provider switching is disabled in the control panel")
     profiles = read_profiles()
@@ -1355,11 +1368,13 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
     usable, unusable_reason = is_profile_usable(profile)
     if not usable:
         raise HTTPException(422, unusable_reason)
+    report(18, "正在诊断上游连通性")
     diagnostic = diagnose_profile(profile) if verify else {"ok": True, "checks": [], "summary": "诊断已跳过"}
     check = {"ok": diagnostic["ok"], "detail": diagnostic["summary"], "diagnostic": diagnostic}
     if not check["ok"]:
         audit("provider_switch_rejected", provider_id=provider_id, detail=check.get("detail"))
         raise HTTPException(422, {"message": "Provider connection test failed; configuration was not changed.", "check": check})
+    report(38, "诊断通过，正在保存当前状态")
     # Keep the most recently observed config-level model with the provider
     # being left. This matches Codex++'s provider-level restoration behavior;
     # it deliberately does not alter any session metadata.
@@ -1372,6 +1387,7 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
             profiles[previous_provider_id] = backfilled_profile
             backfilled_provider_id = previous_provider_id
 
+    report(48, "正在创建配置备份")
     backup_id, backup_dir = backup_state()
     base = remove_goals_feature(canonicalize_base_config(config_text()))
     if mode == "pure_api" and not profile.get("bearer_token") and not profile.get("no_auth", False):
@@ -1429,9 +1445,11 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         tomllib.loads(merged_config)
         # Stop first so the daemon cannot keep an old config in memory or
         # write its cached thread metadata while it is being migrated.
+        report(62, "正在停止 Codex App Server")
         with APP_SERVER_LOCK:
             run_host_app_server_control("stop")
             app_server_stopped = True
+            report(74, "正在写入供应商配置")
             if backfilled_provider_id:
                 write_private(PROFILE_PATH, json.dumps(profiles, ensure_ascii=False, indent=2) + "\n")
             write_private(CONFIG_PATH, merged_config + "\n")
@@ -1445,6 +1463,7 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
             # Switching changes the default for subsequent sessions only.
             # Existing sessions retain their recorded provider until explicitly
             # migrated from the session-management view.
+            report(88, "正在启动 Codex App Server")
             run_host_app_server_control("start")
     except (OSError, RuntimeError, sqlite3.Error, tomllib.TOMLDecodeError) as exc:
         for name, target in (("config.toml", CONFIG_PATH), ("auth.json", AUTH_PATH), ("control-panel-profiles.json", PROFILE_PATH)):
@@ -1460,6 +1479,7 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
                 pass
         audit("provider_switch_failed", provider_id=provider_id, detail=str(exc))
         raise HTTPException(502, "供应商配置未能完成应用；已恢复旧配置并尝试重新启动 Codex App Server。") from exc
+    report(96, "正在确认新配置")
     runtime = {"restarted": True, "detail": "Codex App Server 已重启，新的连接会读取当前供应商配置。"}
     audit(
         "provider_switched",
@@ -1571,6 +1591,83 @@ def provider_auth_contents(provider_id: str) -> dict:
 @app.post("/api/providers/{provider_id}/activate")
 def activate_provider(provider_id: str, verify: bool = True) -> dict:
     return switch_provider(provider_id, verify=verify)
+
+
+def activation_error_message(detail: object) -> str:
+    if isinstance(detail, dict):
+        return str(detail.get("message") or detail.get("detail") or "供应商切换失败")
+    return str(detail or "供应商切换失败")
+
+
+def activation_job_snapshot(job_id: str) -> dict:
+    with ACTIVATION_JOBS_LOCK:
+        job = ACTIVATION_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "切换任务不存在或已过期")
+        return dict(job)
+
+
+@app.post("/api/providers/{provider_id}/activate-progress")
+def start_provider_activation(provider_id: str) -> dict:
+    job_id = uuid.uuid4().hex
+    with ACTIVATION_JOBS_LOCK:
+        ACTIVATION_JOBS[job_id] = {
+            "id": job_id,
+            "status": "running",
+            "progress": 2,
+            "stage": "正在准备切换任务",
+            "detail": "",
+            "result": None,
+            "updated_at": time.time(),
+        }
+
+    def report(percent: int, stage: str) -> None:
+        with ACTIVATION_JOBS_LOCK:
+            job = ACTIVATION_JOBS.get(job_id)
+            if job:
+                job.update(progress=percent, stage=stage, updated_at=time.time())
+
+    def run() -> None:
+        try:
+            result = switch_provider(provider_id, progress=report)
+        except HTTPException as exc:
+            with ACTIVATION_JOBS_LOCK:
+                job = ACTIVATION_JOBS.get(job_id)
+                if job:
+                    job.update(
+                        status="failed",
+                        stage="切换未完成",
+                        detail=activation_error_message(exc.detail),
+                        updated_at=time.time(),
+                    )
+            return
+        except Exception as exc:  # pragma: no cover - defensive boundary for background work
+            with ACTIVATION_JOBS_LOCK:
+                job = ACTIVATION_JOBS.get(job_id)
+                if job:
+                    job.update(status="failed", stage="切换未完成", detail=str(exc), updated_at=time.time())
+            return
+        with ACTIVATION_JOBS_LOCK:
+            job = ACTIVATION_JOBS.get(job_id)
+            if job:
+                job.update(
+                    status="completed",
+                    progress=100,
+                    stage="供应商切换完成",
+                    detail=result["runtime"]["detail"],
+                    result=result,
+                    updated_at=time.time(),
+                )
+
+    threading.Thread(target=run, name=f"provider-activation-{job_id[:8]}", daemon=True).start()
+    return activation_job_snapshot(job_id)
+
+
+@app.get("/api/provider-activations/{job_id}")
+def get_provider_activation(job_id: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise HTTPException(422, "无效的切换任务标识")
+    return activation_job_snapshot(job_id)
 
 
 @app.delete("/api/providers/{provider_id}")
@@ -1905,6 +2002,8 @@ document.head.insertAdjacentHTML('beforeend','<style>.detail-top .provider-back{
 const detailBack=document.querySelector('.detail-top .back');if(detailBack){detailBack.className='provider-back';detailBack.type='button';detailBack.title='返回供应商列表';detailBack.setAttribute('aria-label','返回供应商列表');detailBack.innerHTML='<span class="return-icon" aria-hidden="true">↩</span>'}
 document.body.insertAdjacentHTML('beforeend','<div id="doctor-mask" class="doctor-mask"><div class="doctor-card"><div class="row-between"><div class="doctor-title">Provider Doctor</div><button class="back" onclick="closeDoctor()">×</button></div><div id="doctor-summary" class="doctor-summary"></div><div class="doctor-progress"><i id="doctor-progress"></i></div><div id="doctor-checks"></div><div id="doctor-advice" class="doctor-advice"></div><p style="margin:16px 0 0"><button id="doctor-close" class="btn light" onclick="closeDoctor()">关闭</button></p></div></div>');
 document.body.insertAdjacentHTML('beforeend','<div id="panel-dialog-mask" role="dialog" aria-modal="true" aria-labelledby="panel-dialog-title"><div class="panel-dialog"><h3 id="panel-dialog-title"></h3><p id="panel-dialog-message"></p><div class="panel-dialog-actions"><button id="panel-dialog-cancel" class="btn light" type="button">取消</button><button id="panel-dialog-confirm" class="btn" type="button">确认</button></div></div></div>');
+document.head.insertAdjacentHTML('beforeend','<style>.switch-progress-mask{display:none;position:fixed;inset:0;z-index:1300;align-items:center;justify-content:center;padding:20px;background:#11182773}.switch-progress-mask.show{display:flex}.switch-progress-card{width:min(460px,100%);background:#fff;border:1px solid #dfe3e7;border-radius:10px;padding:22px;box-shadow:0 22px 60px #0003}.switch-progress-card h3{margin:0;font-size:18px}.switch-progress-stage{margin:12px 0 9px;color:#4d5560}.switch-progress-track{height:9px;overflow:hidden;border-radius:999px;background:#e8ebee}.switch-progress-fill{height:100%;width:0;border-radius:inherit;background:#1683ff;transition:width .22s}.switch-progress-meta{display:flex;justify-content:space-between;margin-top:8px;color:#707780;font-size:12px}.switch-progress-error{display:none;margin-top:14px;color:#b42318;line-height:1.5}.switch-progress-close{display:none;margin-top:18px;margin-left:auto}</style>');
+document.body.insertAdjacentHTML('beforeend','<div id="switch-progress-mask" class="switch-progress-mask" role="dialog" aria-modal="true" aria-labelledby="switch-progress-title"><section class="switch-progress-card"><h3 id="switch-progress-title">正在切换供应商</h3><div id="switch-progress-stage" class="switch-progress-stage">正在准备切换任务</div><div class="switch-progress-track"><div id="switch-progress-fill" class="switch-progress-fill"></div></div><div class="switch-progress-meta"><span id="switch-progress-percent">0%</span><span>请勿关闭此页面</span></div><div id="switch-progress-error" class="switch-progress-error"></div><button id="switch-progress-close" class="btn light switch-progress-close" type="button" onclick="closeSwitchProgress()">关闭</button></section></div>');
 const modelList=$('#model-list');const modelHead=modelList?.previousElementSibling,modelHelp=modelHead?.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;if(modelHead){modelHead.remove()}if(modelTitle){modelTitle.querySelector('button')?.remove()}if(modelList){modelList.classList.add('model-list-box');modelList.setAttribute('aria-readonly','true')}if(modelHelp)modelHelp.textContent='模型名称仅能通过“从上游获取”填入。';
 function setModelListVisibility(official){const list=$('#model-list');if(!list)return;const modelHelp=list.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;[list,modelHelp,modelTitle].forEach(node=>{if(node)node.style.display=official?'none':''})}
 let officialLoginPoll=null;
@@ -1916,6 +2015,11 @@ async function cancelOfficialLogin(){try{const status=await api('/api/official-l
 async function fetchModelsFromUpstream(){try{if($('#p-auth').value!=='apikey')throw Error('从上游获取仅适用于纯 API 供应商。');const base_url=$('#p-url').value.trim(),bearer_token=$('#p-key').value;if(!base_url||!bearer_token)throw Error('请先填写 Base URL 和 Key。');const button=$('#fetch-models-btn');button.disabled=true;button.textContent='正在获取…';const result=await api('/api/upstream/models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url,bearer_token})});$('#model-list').innerHTML='';result.models.forEach(name=>addModel({name}));refreshConfigModelOptions();if(!state.testModel&&result.models.length)state.testModel=result.models[0];note(`已从上游获取 ${result.models.length} 个模型。`);updatePreview()}catch(e){note(e.message)}finally{const button=$('#fetch-models-btn');if(button){button.disabled=false;button.textContent='⇩ 从上游获取'}}}
 function installFetchModelsButton(){const list=$('#model-list');if(!list||$('#fetch-models-btn'))return;const modelHelp=list.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;if(!modelTitle)return;const button=document.createElement('button');button.id='fetch-models-btn';button.type='button';button.className='btn light small';button.textContent='⇩ 从上游获取';button.onclick=fetchModelsFromUpstream;modelTitle.append(button)}
 installFetchModelsButton()
+let activationPoll=null;
+function renderSwitchProgress(job){const progress=Math.max(0,Math.min(100,Number(job.progress)||0));$('#switch-progress-fill').style.width=progress+'%';$('#switch-progress-percent').textContent=progress+'%';$('#switch-progress-stage').textContent=job.stage||'正在切换供应商';const error=$('#switch-progress-error'),close=$('#switch-progress-close');error.style.display=job.status==='failed'?'block':'none';error.textContent=job.status==='failed'?(job.detail||'供应商切换失败。'):'';close.style.display=(job.status==='failed'||job.status==='completed')?'block':'none'}
+function closeSwitchProgress(){if(activationPoll)return;$('#switch-progress-mask').classList.remove('show')}
+async function activateWithProgress(id,where='list-notice'){if(activationPoll)return;const mask=$('#switch-progress-mask');mask.classList.add('show');renderSwitchProgress({progress:2,stage:'正在准备切换任务',status:'running'});try{const started=await api(`/api/providers/${encodeURIComponent(id)}/activate-progress`,{method:'POST'});const poll=async()=>{try{const job=await api(`/api/provider-activations/${encodeURIComponent(started.id)}`);renderSwitchProgress(job);if(job.status==='running'){activationPoll=setTimeout(poll,450);return}activationPoll=null;if(job.status==='completed'){state.active=id;note(`已使用 ${id}，备份编号：${job.result?.backup_id||'未知'}。${job.detail||''}`,where);await refreshAll();setTimeout(()=>$('#switch-progress-mask').classList.remove('show'),500)}else note(job.detail||'供应商切换失败。',where)}catch(e){activationPoll=null;renderSwitchProgress({status:'failed',stage:'切换未完成',detail:e.message})}};activationPoll=setTimeout(poll,120)}catch(e){activationPoll=null;renderSwitchProgress({status:'failed',stage:'切换未开始',detail:e.message})}}
+async function activateFromList(id){await activateWithProgress(id,'list-notice')}
 function newProvider(){state.current={id:'',name:'',base_url:'',model:'',mode:'official',protocol:'responses',wire_api:'responses',auth_mode:'chatgpt',models:[],goals_enabled:false,goals_configured:false,test_model:''};openDetail()}
 function setManagedRestartAvailable(available){const button=$('#managed-restart-btn');if(!button)return;button.disabled=!available;button.title=available?'重启面板托管的 Codex 服务并读取当前配置':'请先成功切换供应商'}
 async function restartManagedCodex(){const button=$('#managed-restart-btn');if(!button||button.disabled)return;try{button.disabled=true;button.textContent='正在重启…';const result=await api('/api/runtime/restart',{method:'POST'});note(result.detail,'list-notice');}catch(e){note(e.message,'list-notice');button.disabled=false;}finally{button.textContent='重启 Codex';button.title='请先成功切换供应商'}}
@@ -2033,7 +2137,7 @@ function addModel(m={name:''}){const row=document.createElement('div');row.class
 function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),wire_api:state.protocol,auth_mode:$('#p-auth').value,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-row')].map(r=>({name:r.children[0].value.trim()})).filter(m=>m.name)}}
 function updatePreview(){if(!state.current)return;const p=gather();const lines=[`model = "${p.model||'gpt-5.6-terra'}"`,`model_provider = "${p.id||'provider-id'}"`,`model_reasoning_effort = "medium"`];if(p.auth_mode==='apikey'){lines.push('',`[model_providers.${p.id||'provider-id'}]`,`name = "${p.name||'供应商名称'}"`,`base_url = "${p.base_url||'https://api.example.com'}"`,`wire_api = "${p.wire_api}"`,`experimental_bearer_token = "***"`)}else lines.push('','# 官方登录模式：使用已捕获的 auth.json 快照');$('#config-preview').value=lines.join('\n');$('#auth-preview').value=p.auth_mode==='chatgpt'?'{\n  "auth_mode": "chatgpt",\n  "tokens": "已隐藏"\n}':'{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "***"\n}'}
 async function saveProvider(returnToList=false){try{const p=gather();if(!p.id||!p.name||(p.auth_mode==='apikey'&&!p.base_url)){throw Error('请填写供应商名称；纯 API 还需要 Base URL。供应商标识会由名称自动生成。')}await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});state.current=p;await refreshAll();if(returnToList)closeDetail();else note('供应商配置已保存。')}catch(e){note(e.message)}}
-async function activateCurrent(){try{await saveProvider(false);const p=gather();if(!p.id)return;const d=await api(`/api/providers/${encodeURIComponent(p.id)}/activate`,{method:'POST'});state.active=p.id;const activateButton=$('#activate-btn');activateButton.disabled=true;activateButton.textContent='使用中';activateButton.title='当前正在使用该供应商';const restored=d.backfilled_provider_id?`已保存「${d.backfilled_provider_id}」的最近模型。`:'';note(`已设为当前供应商，备份编号：${d.backup_id}。${restored}${d.runtime?.detail||'Codex App Server 已重启。'}`);await refreshAll()}catch(e){note(e.message)}}
+async function activateCurrent(){try{await saveProvider(false);const p=gather();if(!p.id)return;const activateButton=$('#activate-btn');activateButton.disabled=true;await activateWithProgress(p.id);activateButton.disabled=false}catch(e){note(e.message)}}
 function setManagedRestartAvailable(){const button=$('#managed-restart-btn');if(button){button.disabled=false;button.title='重启服务器上的 Codex App Server'}}
 async function restartManagedCodex(){const button=$('#managed-restart-btn');if(!button||button.disabled)return;if(!await panelDialog({title:'重启 Codex App Server',message:'这会短暂中断当前远程 Codex 连接和正在进行的请求。新的连接将读取当前供应商配置。',confirmLabel:'重启'}))return;try{button.disabled=true;button.textContent='正在重启…';const result=await api('/api/runtime/restart',{method:'POST'});note(result.detail,'list-notice')}catch(e){note(e.message,'list-notice')}finally{button.disabled=false;button.textContent='重启 Codex';button.title='重启服务器上的 Codex App Server'}}
 async function testCurrent(){try{const p=gather();const d=await api('/api/providers/diagnose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const failed=(d.checks||[]).filter(item=>item.status==='fail').map(item=>`${item.name}：${item.detail}`);const warnings=(d.checks||[]).filter(item=>item.status==='warning').map(item=>`${item.name}：${item.detail}`);note(d.ok?`诊断通过。${warnings.length?' '+warnings.join('；'):''}`:`诊断发现问题：${failed.join('；')}`)}catch(e){note(e.message)}}
