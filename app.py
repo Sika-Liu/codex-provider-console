@@ -494,6 +494,26 @@ def session_index_titles() -> dict[str, str]:
     return titles
 
 
+def session_index_records() -> dict[str, dict]:
+    """Read persistent index records, including entries without a rollout."""
+    records: dict[str, dict] = {}
+    if not SESSION_INDEX_PATH.exists():
+        return records
+    try:
+        with SESSION_INDEX_PATH.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                thread_id = str(record.get("id") or "").lower()
+                if THREAD_ID.fullmatch(thread_id):
+                    records[thread_id] = record
+    except OSError:
+        pass
+    return records
+
+
 def read_session_summary(path: Path, indexed_title: str = "") -> dict:
     """Read only the opening JSONL records; session files can be very large."""
     title = ""
@@ -536,11 +556,34 @@ def read_session_summary(path: Path, indexed_title: str = "") -> dict:
 
 def list_server_sessions() -> list[dict]:
     sessions: list[dict] = []
-    titles = session_index_titles()
+    indexes = session_index_records()
+    titles = {
+        thread_id: str(record.get("thread_name") or "").strip().replace("\n", " ")[:180]
+        for thread_id, record in indexes.items()
+    }
+    rollout_ids: set[str] = set()
     for path in SESSIONS_PATH.rglob("*.jsonl") if SESSIONS_PATH.is_dir() else ():
         thread_id = session_id_from_path(path)
         if thread_id:
-            sessions.append(read_session_summary(path, titles.get(thread_id, "")))
+            rollout_ids.add(thread_id)
+            session = read_session_summary(path, titles.get(thread_id, ""))
+            session["kind"] = "rollout"
+            sessions.append(session)
+    for thread_id, record in indexes.items():
+        if thread_id in rollout_ids:
+            continue
+        sessions.append(
+            {
+                "id": thread_id,
+                "title": titles.get(thread_id) or thread_id,
+                "cwd": "",
+                "provider_id": "",
+                "modified_at": str(record.get("updated_at") or ""),
+                "size": 0,
+                "path": "session_index.jsonl",
+                "kind": "orphaned_index",
+            }
+        )
     return sorted(sessions, key=lambda item: item["modified_at"], reverse=True)
 
 
@@ -1063,9 +1106,30 @@ binary = next((str(path) for path in candidates if path.is_file() and os.access(
 env = os.environ.copy()
 env["CODEX_HOME"] = codex_home
 result = subprocess.run([binary, "delete", "--force", session_id], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-if result.returncode != 0:
+index_path = Path(codex_home) / "session_index.jsonl"
+removed_index = False
+if index_path.is_file():
+    kept = []
+    for line in index_path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            kept.append(line)
+            continue
+        if str(record.get("id") or "").lower() == session_id:
+            removed_index = True
+        else:
+            kept.append(line)
+    if removed_index:
+        temp_path = index_path.with_suffix(".jsonl.tmp")
+        temp_path.write_text("".join(kept), encoding="utf-8")
+        os.replace(temp_path, index_path)
+if result.returncode != 0 and not removed_index:
     raise SystemExit(result.stdout.strip() or "Codex delete failed")
-print(result.stdout.strip())
+message = result.stdout.strip()
+if removed_index:
+    message = (message + "\n" if message else "") + "Removed stale session-index entry."
+print(message)
 '''
     gateway = docker_host_gateway()
     try:
@@ -1913,7 +1977,7 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
    const nav=document.querySelector('.console-nav');
    if(!nav)return;
    nav.insertAdjacentHTML('beforeend','<button data-section="sessions" onclick="openConsoleSection(&quot;sessions&quot;)">会话管理</button>');
-   document.body.insertAdjacentHTML('beforeend',`<section id="console-sessions" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>云端会话管理</h2><p class="panel-note">仅显示当前服务器 Codex 数据目录中的会话。删除为永久操作，不创建备份。</p></div><button class="btn" type="button" id="session-refresh">刷新列表</button></div><div id="session-summary" class="console-health-summary">尚未读取服务器会话。</div><div id="session-list" class="session-list"></div></div></section>`);
+   document.body.insertAdjacentHTML('beforeend',`<section id="console-sessions" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>云端会话管理</h2><p class="panel-note">显示服务器会话文件及孤立索引。删除为永久操作，不创建备份。</p></div><button class="btn" type="button" id="session-refresh">刷新列表</button></div><div id="session-summary" class="console-health-summary">尚未读取服务器会话。</div><div id="session-list" class="session-list"></div></div></section>`);
    document.head.insertAdjacentHTML('beforeend','<style>.session-list{margin-top:12px}.session-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;border:1px solid #dfe3e7;border-radius:7px;padding:12px;margin-top:8px}.session-title{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-meta{margin-top:5px;color:#6b7280;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-delete{background:#fff;color:#be3030;border:1px solid #e3b3b3}.session-empty{padding:24px 0;color:#6b7280;text-align:center}.session-modal-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:rgba(20,24,28,.48)}.session-modal{width:min(440px,100%);border:1px solid #dfe3e7;border-radius:8px;background:#fff;box-shadow:0 18px 48px rgba(0,0,0,.24);padding:22px}.session-modal-kicker{color:#be3030;font-size:12px;font-weight:700}.session-modal h3{margin:7px 0 9px;font-size:18px}.session-modal p{margin:0;color:#535a63;line-height:1.6}.session-modal-session{margin:14px 0;padding:10px 11px;border:1px solid #e0e3e7;border-radius:6px;background:#f7f8fa;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-modal-confirm{display:flex;align-items:flex-start;gap:9px;margin-top:16px;color:#30353b;line-height:1.45;cursor:pointer}.session-modal-confirm input{margin:3px 0 0;width:15px;height:15px}.session-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}.session-modal-danger{background:#bd3030}.session-modal-danger:disabled{background:#e3b3b3;cursor:not-allowed}@media(max-width:650px){.session-row{grid-template-columns:1fr}.session-delete{justify-self:start}.session-modal{padding:18px}}</style>');
    const baseOpen=window.openConsoleSection;
    window.openConsoleSection=function(section){baseOpen(section);if(section==='sessions')loadServerSessions()};
@@ -1922,7 +1986,7 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
  function sessionEscape(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
  function sessionTime(value){const time=new Date(value);return Number.isNaN(time.getTime())?value:time.toLocaleString('zh-CN',{hour12:false})}
  function sessionSize(size){if(size<1024)return size+' B';if(size<1024*1024)return (size/1024).toFixed(1)+' KB';return (size/1024/1024).toFixed(1)+' MB'}
- async function loadServerSessions(){const summary=document.querySelector('#session-summary'),list=document.querySelector('#session-list');if(!summary||!list)return;summary.textContent='正在读取当前服务器的 Codex 会话…';list.innerHTML='';try{const result=await api('/api/sessions');const sessions=result.sessions||[];summary.textContent=sessions.length?`发现 ${sessions.length} 个服务器会话。切换默认供应商不会改写这些历史标签；需要变更时请在供应商页先预览再迁移。`:'当前服务器没有可管理的 Codex 会话。';list.innerHTML=sessions.length?sessions.map(session=>`<article class="session-row"><div><div class="session-title" title="${sessionEscape(session.title)}">${sessionEscape(session.title)}</div><div class="session-meta">${sessionEscape(session.id)} · ${sessionTime(session.modified_at)} · ${sessionSize(session.size)}</div>${session.provider_id?`<div class="session-meta">供应商：${sessionEscape(session.provider_id)}</div>`:''}${session.cwd?`<div class="session-meta" title="${sessionEscape(session.cwd)}">${sessionEscape(session.cwd)}</div>`:''}</div><button class="btn small session-delete" type="button" data-thread-id="${sessionEscape(session.id)}">永久删除</button></article>`).join(''):'<div class="session-empty">没有找到会话文件。</div>';list.querySelectorAll('.session-delete').forEach(button=>button.addEventListener('click',()=>deleteServerSession(button.dataset.threadId,button)))}catch(error){summary.textContent='读取会话失败：'+error.message}}
+ async function loadServerSessions(){const summary=document.querySelector('#session-summary'),list=document.querySelector('#session-list');if(!summary||!list)return;summary.textContent='正在读取当前服务器的 Codex 会话…';list.innerHTML='';try{const result=await api('/api/sessions');const sessions=result.sessions||[],orphans=sessions.filter(s=>s.kind==='orphaned_index').length;summary.textContent=sessions.length?`发现 ${sessions.length} 项服务器记录${orphans?`，其中 ${orphans} 项为无会话文件的孤立索引，可直接清理。`:''}`:'当前服务器没有可管理的 Codex 会话或索引。';list.innerHTML=sessions.length?sessions.map(session=>`<article class="session-row"><div><div class="session-title" title="${sessionEscape(session.title)}">${sessionEscape(session.title)}</div><div class="session-meta">${sessionEscape(session.id)} · ${session.kind==='orphaned_index'?'孤立索引':sessionTime(session.modified_at)+' · '+sessionSize(session.size)}</div>${session.provider_id?`<div class="session-meta">供应商：${sessionEscape(session.provider_id)}</div>`:''}${session.cwd?`<div class="session-meta" title="${sessionEscape(session.cwd)}">${sessionEscape(session.cwd)}</div>`:''}</div><button class="btn small session-delete" type="button" data-thread-id="${sessionEscape(session.id)}">${session.kind==='orphaned_index'?'清理索引':'永久删除'}</button></article>`).join(''):'<div class="session-empty">没有找到会话文件或孤立索引。</div>';list.querySelectorAll('.session-delete').forEach(button=>button.addEventListener('click',()=>deleteServerSession(button.dataset.threadId,button)))}catch(error){summary.textContent='读取会话失败：'+error.message}}
  function confirmSessionDeletion(threadId,title){return new Promise(resolve=>{const backdrop=document.createElement('div');backdrop.className='session-modal-backdrop';backdrop.innerHTML='<section class="session-modal" role="dialog" aria-modal="true" aria-labelledby="session-delete-title"><div class="session-modal-kicker">不可恢复的操作</div><h3 id="session-delete-title">永久删除云端会话</h3><p>会话记录及服务器本地索引会被删除，不会创建备份。</p><div class="session-modal-session" title="'+sessionEscape(threadId)+'">'+sessionEscape(title||'未命名会话')+'<br>'+sessionEscape(threadId)+'</div><label class="session-modal-confirm"><input type="checkbox"><span>我理解此操作无法撤销，并确认永久删除该会话。</span></label><div class="session-modal-actions"><button class="btn light" type="button" data-action="cancel">取消</button><button class="btn session-modal-danger" type="button" data-action="delete" disabled>永久删除</button></div></section>';const checkbox=backdrop.querySelector('input'),confirmButton=backdrop.querySelector('[data-action="delete"]'),onKey=event=>{if(event.key==='Escape')close(false)},close=value=>{document.removeEventListener('keydown',onKey);backdrop.remove();resolve(value)};checkbox.addEventListener('change',()=>confirmButton.disabled=!checkbox.checked);backdrop.querySelector('[data-action="cancel"]').addEventListener('click',()=>close(false));confirmButton.addEventListener('click',()=>close(true));backdrop.addEventListener('click',event=>{if(event.target===backdrop)close(false)});document.addEventListener('keydown',onKey);document.body.append(backdrop);backdrop.querySelector('[data-action="cancel"]').focus()})}
  async function deleteServerSession(threadId,button){if(!threadId)return;const title=button.closest('.session-row')?.querySelector('.session-title')?.textContent||'';if(!await confirmSessionDeletion(threadId,title))return;button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId),{method:'DELETE'});const summary=document.querySelector('#session-summary');if(summary)summary.textContent=result.detail;await loadServerSessions()}catch(error){button.disabled=false;button.textContent='永久删除';const summary=document.querySelector('#session-summary');if(summary)summary.textContent='删除失败：'+error.message}}
  </script>'''
