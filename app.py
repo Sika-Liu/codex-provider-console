@@ -20,6 +20,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
+from model_catalog import build_model_catalog
+from provider_domain import backfill_profile_model, is_profile_usable, normalize_profile
+
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
 CODEX_CLI_USER = os.environ.get("CODEX_CLI_USER", "unknown")
@@ -39,6 +42,7 @@ CONFIG_PATH = CODEX_HOME / "config.toml"
 PROFILE_PATH = CODEX_HOME / "control-panel-profiles.json"
 SETTINGS_PATH = CODEX_HOME / "control-panel-settings.json"
 AUTH_PATH = CODEX_HOME / "auth.json"
+RELAY_BASE_URL = os.environ.get("RELAY_BASE_URL", "http://codex-provider-relay:57321/v1")
 BACKUP_ROOT = CODEX_HOME / "backups" / "control-panel"
 AUDIT_PATH = CODEX_HOME / "control-panel-audit.jsonl"
 PROFILE_ID = re.compile(r"^[a-zA-Z0-9_-]{1,48}$")
@@ -249,6 +253,9 @@ DEVICE_LOGIN: DeviceLoginSession | None = None
 
 class ModelEntry(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    context_window: str = Field(default="", max_length=32)
+    auto_compact_limit: str = Field(default="", max_length=32)
+    metadata: dict = Field(default_factory=dict)
 
 
 class Provider(BaseModel):
@@ -258,9 +265,19 @@ class Provider(BaseModel):
     wire_api: str = Field(default="responses", pattern=r"^(responses|chat)$")
     model: str = Field(default="", max_length=120)
     auth_mode: Literal["apikey", "chatgpt"] = "apikey"
+    # The version-2 schema is explicit about the two supported modes. Legacy
+    # fields stay accepted while existing browser clients and stored profiles
+    # migrate incrementally.
+    mode: Literal["official", "pure_api"] | None = None
+    protocol: Literal["responses", "chat_completions"] | None = None
     requires_openai_auth: bool = False
     bearer_token: str | None = Field(default=None, max_length=4096)
+    no_auth: bool = False
     models: list[ModelEntry] = Field(default_factory=list)
+    model_windows: dict[str, str] = Field(default_factory=dict)
+    model_auto_compact: dict[str, str] = Field(default_factory=dict)
+    model_metadata: dict[str, dict] = Field(default_factory=dict)
+    provider_config_overrides: str = Field(default="", max_length=50000)
     config_contents: str = Field(default="", max_length=50000)
     auth_contents: str = Field(default="", max_length=50000)
     goals_enabled: bool = False
@@ -280,7 +297,10 @@ class ProviderDiagnosticRequest(BaseModel):
     wire_api: str = "responses"
     model: str = ""
     auth_mode: Literal["apikey", "chatgpt"] = "apikey"
+    mode: Literal["official", "pure_api"] | None = None
+    protocol: Literal["responses", "chat_completions"] | None = None
     bearer_token: str | None = None
+    no_auth: bool = False
     config_contents: str = ""
     auth_contents: str = ""
     test_model: str = ""
@@ -366,8 +386,15 @@ def read_profiles() -> dict[str, dict]:
     if not PROFILE_PATH.exists():
         return {}
     try:
-        return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        raw = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("profile store must be an object")
+        return {
+            profile_id: normalize_profile(profile)
+            for profile_id, profile in raw.items()
+            if isinstance(profile_id, str) and isinstance(profile, dict)
+        }
+    except (ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(500, "Provider profile store is invalid") from exc
 
 
@@ -385,10 +412,21 @@ def panel_settings() -> dict:
 
 
 def write_private(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".new")
     temp.write_text(text, encoding="utf-8")
     os.chmod(temp, 0o600)
     os.replace(temp, path)
+
+
+def write_profile_model_catalog(profile: dict) -> str | None:
+    """Write an opt-in catalog under CODEX_HOME and return its config path."""
+    catalog = build_model_catalog(profile)
+    if not catalog["models"]:
+        return None
+    catalog_path = CODEX_HOME / "model-catalogs" / f"control-panel-{profile['id']}.json"
+    write_private(catalog_path, json.dumps(catalog, ensure_ascii=False, indent=2) + "\n")
+    return f"model-catalogs/{catalog_path.name}"
 
 
 def backup_state(include_sessions: bool = False) -> tuple[str, Path]:
@@ -401,6 +439,23 @@ def backup_state(include_sessions: bool = False) -> tuple[str, Path]:
             os.chmod(target, 0o600)
     if include_sessions:
         (destination / "sessions").mkdir(mode=0o700)
+        # SQLite's backup API gives a consistent snapshot even when Codex has
+        # the database open. JSONL rollout files are copied lazily immediately
+        # before this panel rewrites an affected file.
+        database = CODEX_HOME / "state_5.sqlite"
+        if database.is_file():
+            source_connection = sqlite3.connect(database, timeout=10)
+            target_connection = sqlite3.connect(destination / database.name)
+            try:
+                source_connection.backup(target_connection)
+            finally:
+                target_connection.close()
+                source_connection.close()
+            os.chmod(destination / database.name, 0o600)
+        if SESSION_INDEX_PATH.is_file():
+            target = destination / SESSION_INDEX_PATH.name
+            shutil.copy2(SESSION_INDEX_PATH, target)
+            os.chmod(target, 0o600)
     return destination.name, destination
 
 
@@ -442,6 +497,7 @@ def read_session_summary(path: Path, indexed_title: str = "") -> dict:
     """Read only the opening JSONL records; session files can be very large."""
     title = ""
     cwd = ""
+    provider_id = ""
     try:
         with path.open("r", encoding="utf-8") as handle:
             for _ in range(24):
@@ -455,6 +511,8 @@ def read_session_summary(path: Path, indexed_title: str = "") -> dict:
                 payload = record.get("payload") if isinstance(record.get("payload"), dict) else record
                 if not cwd:
                     cwd = str(payload.get("cwd") or record.get("cwd") or "")[:500]
+                if not provider_id:
+                    provider_id = str(payload.get("model_provider") or record.get("model_provider") or "")[:80]
                 if not title:
                     for key in ("title", "session_title", "summary"):
                         value = payload.get(key) or record.get(key)
@@ -468,6 +526,7 @@ def read_session_summary(path: Path, indexed_title: str = "") -> dict:
         "id": session_id_from_path(path),
         "title": indexed_title or title or path.stem,
         "cwd": cwd,
+        "provider_id": provider_id,
         "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
         "size": stat.st_size,
         "path": str(path.relative_to(CODEX_HOME)),
@@ -653,17 +712,26 @@ def remove_goals_feature(config: str) -> str:
 def active_provider() -> str | None:
     if not CONFIG_PATH.exists():
         return None
-    match = re.search(r'^\s*model_provider\s*=\s*"([^"]+)"', CONFIG_PATH.read_text(encoding="utf-8"), re.M)
+    match = re.search(r"^\s*model_provider\s*=\s*['\"]([^'\"]+)['\"]", CONFIG_PATH.read_text(encoding="utf-8"), re.M)
     return match.group(1) if match else None
 
 
+def active_default_model() -> str | None:
+    """Read the model that Codex most recently persisted as its default."""
+    if not CONFIG_PATH.exists():
+        return None
+    match = re.search(r"^\s*model\s*=\s*['\"]([^'\"]+)['\"]", CONFIG_PATH.read_text(encoding="utf-8"), re.M)
+    return match.group(1).strip() if match and match.group(1).strip() else None
+
+
 def public_profile(profile: dict) -> dict:
-    result = profile.copy()
+    result = normalize_profile(profile)
     result["has_bearer_token"] = bool(result.get("bearer_token"))
     result["has_auth_snapshot"] = bool(result.get("auth_contents"))
-    if result.get("auth_mode") != "apikey":
-        result.pop("bearer_token", None)
-        result.pop("auth_contents", None)
+    # List/status responses never need credentials. Auth snapshots remain
+    # available only through the dedicated no-store endpoint.
+    result.pop("bearer_token", None)
+    result.pop("auth_contents", None)
     return result
 
 
@@ -693,8 +761,14 @@ def config_text() -> str:
     return CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else ""
 
 
+def upstream_endpoint(base_url: str, path: str) -> str:
+    """Join an upstream base URL with an OpenAI v1 endpoint exactly once."""
+    base = base_url.rstrip("/")
+    return f"{base}{path}" if base.endswith("/v1") else f"{base}/v1{path}"
+
+
 def test_profile(profile: dict) -> dict:
-    endpoint = profile["base_url"].rstrip("/") + "/v1/models"
+    endpoint = upstream_endpoint(profile["base_url"], "/models")
     headers = {"Accept": "application/json", "User-Agent": "CodexProviderConsole/1.0"}
     if profile.get("bearer_token"):
         headers["Authorization"] = f'Bearer {profile["bearer_token"]}'
@@ -712,17 +786,20 @@ def test_model_request(profile: dict, test_model: str) -> dict:
     base = profile["base_url"].rstrip("/")
     wire_api = profile.get("wire_api", "responses")
     suffix = "/chat/completions" if wire_api == "chat" else "/responses"
-    endpoint = f"{base[:-3] if base.endswith('/v1') else base}{suffix}"
+    endpoint = upstream_endpoint(base, suffix)
     payload = (
         {"model": test_model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
         if wire_api == "chat"
         else {"model": test_model, "input": "hi", "max_output_tokens": 1}
     )
     body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "CodexPlusPlus/RelayTest"}
+    if profile.get("bearer_token"):
+        headers["Authorization"] = f'Bearer {profile["bearer_token"]}'
     request = urllib.request.Request(
         endpoint,
         data=body,
-        headers={"Content-Type": "application/json", "Accept": "application/json", "Authorization": f'Bearer {profile["bearer_token"]}', "User-Agent": "CodexPlusPlus/RelayTest"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -781,14 +858,15 @@ def fetch_upstream_models(request: UpstreamModelFetch) -> dict:
 
 
 def diagnose_profile(profile: dict) -> dict:
+    profile = normalize_profile(profile)
     checks: list[dict[str, str]] = []
 
     def add(name: str, status: str, detail: str) -> None:
         checks.append({"name": name, "status": status, "detail": detail})
 
-    auth_mode = profile.get("auth_mode", "apikey")
+    mode = profile["mode"]
     model = str(profile.get("model", "")).strip()
-    if auth_mode == "chatgpt":
+    if mode == "official":
         snapshot = profile.get("auth_contents", "")
         try:
             validate_auth_snapshot(snapshot)
@@ -800,9 +878,10 @@ def diagnose_profile(profile: dict) -> dict:
         api_key = str(profile.get("bearer_token") or "").strip()
         protocol = profile.get("wire_api")
         add("Base URL", "pass" if re.match(r"^https?://.+", base_url) else "fail", base_url if re.match(r"^https?://.+", base_url) else "请输入有效的 http(s) Base URL")
-        add("API Key", "pass" if api_key else "fail", "已配置" if api_key else "未配置")
+        no_auth = bool(profile.get("no_auth", False))
+        add("API Key", "pass" if api_key or no_auth else "fail", "无需认证" if no_auth else "已配置" if api_key else "未配置")
         add("上游协议", "pass" if protocol in {"responses", "chat"} else "fail", "Responses API" if protocol == "responses" else "Chat Completions" if protocol == "chat" else "协议无效")
-        if base_url and api_key:
+        if base_url and (api_key or no_auth):
             try:
                 upstream = fetch_upstream_models(UpstreamModelFetch(base_url=base_url, bearer_token=api_key))
                 names = upstream["models"]
@@ -951,8 +1030,17 @@ def run_host_app_server_control(action: Literal["start", "stop"]) -> str:
     return (result.stdout or result.stderr).strip()
 
 
-def migrate_session_provider(provider_id: str) -> dict[str, int]:
-    """Keep saved threads resumable after a provider switch while the daemon is stopped."""
+def migrate_session_provider(
+    provider_id: str,
+    source_provider: str | None = None,
+    apply: bool = True,
+    backup_dir: Path | None = None,
+) -> dict[str, int]:
+    """Preview or apply an explicit session-provider migration.
+
+    Activating a new default provider must not silently rewrite historical
+    sessions. This operation is only invoked by the dedicated migration API.
+    """
     database_changes = 0
     if (database := CODEX_HOME / "state_5.sqlite").is_file():
         connection = sqlite3.connect(database, timeout=10)
@@ -961,12 +1049,19 @@ def migrate_session_provider(provider_id: str) -> dict[str, int]:
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'threads'"
             ).fetchone()
             if has_threads:
-                row = connection.execute(
-                    "UPDATE threads SET model_provider = ? WHERE model_provider IS NOT ?",
-                    (provider_id, provider_id),
-                )
-                database_changes = max(row.rowcount, 0)
-            connection.commit()
+                if source_provider:
+                    predicate, arguments = "model_provider = ?", (source_provider,)
+                else:
+                    predicate, arguments = "model_provider IS NOT ?", (provider_id,)
+                if apply:
+                    row = connection.execute(
+                        f"UPDATE threads SET model_provider = ? WHERE {predicate}",
+                        (provider_id, *arguments),
+                    )
+                    database_changes = max(row.rowcount, 0)
+                    connection.commit()
+                else:
+                    database_changes = int(connection.execute(f"SELECT COUNT(*) FROM threads WHERE {predicate}", arguments).fetchone()[0])
         finally:
             connection.close()
 
@@ -987,16 +1082,24 @@ def migrate_session_provider(provider_id: str) -> dict[str, int]:
                     lines.append(line)
                     continue
                 payload = record.get("payload")
-                if record.get("type") == "session_meta" and isinstance(payload, dict) and payload.get("model_provider") != provider_id:
+                matches_source = isinstance(payload, dict) and (not source_provider or payload.get("model_provider") == source_provider)
+                if record.get("type") == "session_meta" and isinstance(payload, dict) and matches_source and payload.get("model_provider") != provider_id:
                     payload["model_provider"] = provider_id
                     line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + newline
                     changed += 1
                 lines.append(line)
-            if changed:
+            if changed and apply:
+                if backup_dir:
+                    relative = path.relative_to(CODEX_HOME)
+                    snapshot = backup_dir / relative
+                    snapshot.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, snapshot)
+                    os.chmod(snapshot, 0o600)
                 temporary = path.with_name(path.name + ".provider-switch.tmp")
                 temporary.write_text("".join(lines), encoding="utf-8")
                 temporary.chmod(path.stat().st_mode)
                 temporary.replace(path)
+            if changed:
                 rollout_files += 1
                 rollout_records += changed
     return {"threads": database_changes, "rollout_files": rollout_files, "rollout_records": rollout_records}
@@ -1127,25 +1230,43 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
     profile = profiles.get(provider_id)
     if not profile:
         raise HTTPException(404, "Provider profile not found")
-    auth_mode = profile.get("auth_mode", "apikey")
+    profile = normalize_profile(profile)
+    mode = profile["mode"]
+    auth_mode = profile["auth_mode"]
+    usable, unusable_reason = is_profile_usable(profile)
+    if not usable:
+        raise HTTPException(422, unusable_reason)
     diagnostic = diagnose_profile(profile) if verify else {"ok": True, "checks": [], "summary": "诊断已跳过"}
     check = {"ok": diagnostic["ok"], "detail": diagnostic["summary"], "diagnostic": diagnostic}
     if not check["ok"]:
         audit("provider_switch_rejected", provider_id=provider_id, detail=check.get("detail"))
         raise HTTPException(422, {"message": "Provider connection test failed; configuration was not changed.", "check": check})
+    # Keep the most recently observed config-level model with the provider
+    # being left. This matches Codex++'s provider-level restoration behavior;
+    # it deliberately does not alter any session metadata.
+    previous_provider_id = active_provider()
+    previous_model = active_default_model()
+    backfilled_provider_id = None
+    if previous_provider_id and previous_provider_id != provider_id and previous_provider_id in profiles:
+        backfilled_profile, changed = backfill_profile_model(profiles[previous_provider_id], previous_model)
+        if changed:
+            profiles[previous_provider_id] = backfilled_profile
+            backfilled_provider_id = previous_provider_id
+
     backup_id, backup_dir = backup_state()
     base = remove_goals_feature(canonicalize_base_config(config_text()))
-    if auth_mode == "apikey" and not profile.get("bearer_token"):
+    if mode == "pure_api" and not profile.get("bearer_token") and not profile.get("no_auth", False):
         raise HTTPException(422, "An API key is required for a pure API provider")
-    if auth_mode == "chatgpt":
+    if mode == "official":
         snapshot = profile.get("auth_contents")
         if not snapshot:
             raise HTTPException(422, "Capture the current ChatGPT authentication before activating this profile")
         validate_auth_snapshot(snapshot)
     selected_model = str(model_override or profile.get("model") or "").strip()
-    generated_root = [
-        f'model_provider = {toml_quote(provider_id)}',
-    ]
+    catalog_reference = write_profile_model_catalog(profile)
+    generated_root = [f'model_provider = {toml_quote(provider_id)}']
+    if catalog_reference:
+        generated_root.append(f'model_catalog_json = {toml_quote(catalog_reference)}')
     generated_provider = [
         f'[model_providers.{provider_id}]',
         f'name = {toml_quote(profile["name"])}',
@@ -1153,12 +1274,12 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
     ]
     if selected_model:
         generated_root.append(f'model = {toml_quote(selected_model)}')
-    if auth_mode == "apikey":
-        generated_provider.append(f'wire_api = {toml_quote(profile["wire_api"])}')
-    if auth_mode == "apikey" and profile.get("base_url"):
-        generated_provider.append(f'base_url = {toml_quote(profile["base_url"].rstrip("/"))}')
-    if profile.get("bearer_token"):
-        generated_provider.append(f'experimental_bearer_token = {toml_quote(profile["bearer_token"])}')
+    if mode == "pure_api":
+        # Codex always speaks Responses to the Docker-internal relay. The relay
+        # owns the real upstream URL, key and Responses/Chat conversion.
+        generated_provider.append('wire_api = "responses"')
+        generated_provider.append(f'base_url = {toml_quote(RELAY_BASE_URL)}')
+        generated_provider.append('experimental_bearer_token = "codex-provider-console-relay"')
     provider_config = profile.get("config_contents", "").strip()
     # Older profile forms saved a full config.toml preview here. Reapplying
     # that snapshot would overwrite fields the user later changed in the
@@ -1195,20 +1316,22 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         with APP_SERVER_LOCK:
             run_host_app_server_control("stop")
             app_server_stopped = True
+            if backfilled_provider_id:
+                write_private(PROFILE_PATH, json.dumps(profiles, ensure_ascii=False, indent=2) + "\n")
             write_private(CONFIG_PATH, merged_config + "\n")
-            if auth_mode == "apikey":
+            if mode == "pure_api":
                 api_auth = profile.get("auth_contents", "").strip()
                 if not api_auth:
                     api_auth = json.dumps({"OPENAI_API_KEY": profile["bearer_token"]}, indent=2)
                 write_private(AUTH_PATH, api_auth.rstrip() + "\n")
             else:
                 write_private(AUTH_PATH, profile["auth_contents"].rstrip() + "\n")
-            stale_catalog = CODEX_HOME / "model-catalogs" / f"control-panel-{provider_id}.json"
-            stale_catalog.unlink(missing_ok=True)
-            migration = migrate_session_provider(provider_id)
+            # Switching changes the default for subsequent sessions only.
+            # Existing sessions retain their recorded provider until explicitly
+            # migrated from the session-management view.
             run_host_app_server_control("start")
     except (OSError, RuntimeError, sqlite3.Error, tomllib.TOMLDecodeError) as exc:
-        for name, target in (("config.toml", CONFIG_PATH), ("auth.json", AUTH_PATH)):
+        for name, target in (("config.toml", CONFIG_PATH), ("auth.json", AUTH_PATH), ("control-panel-profiles.json", PROFILE_PATH)):
             backup_file = backup_dir / name
             if backup_file.exists():
                 shutil.copy2(backup_file, target)
@@ -1227,6 +1350,8 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         provider_id=provider_id,
         backup_id=backup_id,
         model=selected_model or None,
+        previous_provider_id=previous_provider_id,
+        backfilled_provider_id=backfilled_provider_id,
         migration=migration,
         app_server_restarted=True,
     )
@@ -1235,7 +1360,8 @@ def switch_provider(provider_id: str, verify: bool = True, model_override: str |
         "backup_id": backup_id,
         "check": check,
         "model": selected_model or None,
-        "auth_mode": auth_mode,
+        "backfilled_provider_id": backfilled_provider_id,
+        "mode": mode,
         "migration": migration,
         "runtime": runtime,
     }
@@ -1255,6 +1381,12 @@ class PanelSettings(BaseModel):
     reverse_proxy: dict = Field(default_factory=dict)
 
 
+class SessionMigrationRequest(BaseModel):
+    target_provider: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,48}$")
+    source_provider: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,48}$")
+    apply: bool = False
+
+
 @app.get("/api/settings")
 def get_settings() -> dict:
     return panel_settings()
@@ -1271,9 +1403,9 @@ def save_settings(request: PanelSettings) -> dict:
 @app.post("/api/providers")
 def save_provider(provider: Provider) -> dict:
     profiles = read_profiles()
-    data = provider.model_dump()
+    data = normalize_profile(provider.model_dump())
     existing = profiles.get(provider.id, {})
-    if data["auth_mode"] == "apikey":
+    if data["mode"] == "pure_api":
         entered_key = data["bearer_token"]
         key_from_auth = api_key_from_auth_contents(data["auth_contents"])
         if key_from_auth:
@@ -1288,7 +1420,7 @@ def save_provider(provider: Provider) -> dict:
         data["auth_contents"] = existing["auth_contents"]
     if not data["bearer_token"] and provider.id in profiles:
         data["bearer_token"] = profiles[provider.id].get("bearer_token")
-    data["requires_openai_auth"] = data["auth_mode"] == "chatgpt"
+    data["requires_openai_auth"] = data["mode"] == "official"
     backup_state()
     profiles[provider.id] = data
     write_private(PROFILE_PATH, json.dumps(profiles, ensure_ascii=False, indent=2) + "\n")
@@ -1574,6 +1706,36 @@ def get_server_sessions() -> dict:
     return {"sessions": sessions, "count": len(sessions)}
 
 
+@app.post("/api/sessions/migrate")
+def migrate_server_sessions(request: SessionMigrationRequest) -> dict:
+    if request.target_provider not in read_profiles():
+        raise HTTPException(404, "Target provider profile not found")
+    backup_id = None
+    backup_dir = None
+    if request.apply:
+        backup_id, backup_dir = backup_state(include_sessions=True)
+    result = migrate_session_provider(
+        request.target_provider,
+        request.source_provider,
+        apply=request.apply,
+        backup_dir=backup_dir,
+    )
+    audit(
+        "session_provider_migrated" if request.apply else "session_provider_migration_previewed",
+        provider_id=request.target_provider,
+        detail=f"source={request.source_provider or '*'}; changes={sum(result.values())}",
+    )
+    return {
+        "target_provider": request.target_provider,
+        "source_provider": request.source_provider,
+        "applied": request.apply,
+        "backup_id": backup_id,
+        "matching_sessions": result["threads"] + result["rollout_records"],
+        "changed_sessions": result["threads"] + result["rollout_records"],
+        "details": result,
+    }
+
+
 @app.delete("/api/sessions/{thread_id}")
 def delete_server_session(thread_id: str) -> dict:
     normalized_id = thread_id.lower()
@@ -1639,17 +1801,17 @@ async function cancelOfficialLogin(){try{const status=await api('/api/official-l
 async function fetchModelsFromUpstream(){try{if($('#p-auth').value!=='apikey')throw Error('从上游获取仅适用于纯 API 供应商。');const base_url=$('#p-url').value.trim(),bearer_token=$('#p-key').value;if(!base_url||!bearer_token)throw Error('请先填写 Base URL 和 Key。');const button=$('#fetch-models-btn');button.disabled=true;button.textContent='正在获取…';const result=await api('/api/upstream/models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url,bearer_token})});$('#model-list').innerHTML='';result.models.forEach(name=>addModel({name}));if(!state.testModel&&result.models.length)state.testModel=result.models[0];note(`已从上游获取 ${result.models.length} 个模型。`);updatePreview()}catch(e){note(e.message)}finally{const button=$('#fetch-models-btn');if(button){button.disabled=false;button.textContent='⇩ 从上游获取'}}}
 function installFetchModelsButton(){const list=$('#model-list');if(!list||$('#fetch-models-btn'))return;const modelHelp=list.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;if(!modelTitle)return;const button=document.createElement('button');button.id='fetch-models-btn';button.type='button';button.className='btn light small';button.textContent='⇩ 从上游获取';button.onclick=fetchModelsFromUpstream;modelTitle.append(button)}
 installFetchModelsButton()
-function newProvider(){state.current={id:'',name:'',base_url:'',model:'',wire_api:'responses',auth_mode:'chatgpt',models:[],goals_enabled:false,goals_configured:false,test_model:''};openDetail()}
+function newProvider(){state.current={id:'',name:'',base_url:'',model:'',mode:'official',protocol:'responses',wire_api:'responses',auth_mode:'chatgpt',models:[],goals_enabled:false,goals_configured:false,test_model:''};openDetail()}
 function setManagedRestartAvailable(available){const button=$('#managed-restart-btn');if(!button)return;button.disabled=!available;button.title=available?'重启面板托管的 Codex 服务并读取当前配置':'请先成功切换供应商'}
 async function restartManagedCodex(){const button=$('#managed-restart-btn');if(!button||button.disabled)return;try{button.disabled=true;button.textContent='正在重启…';const result=await api('/api/runtime/restart',{method:'POST'});note(result.detail,'list-notice');}catch(e){note(e.message,'list-notice');button.disabled=false;}finally{button.textContent='重启 Codex';button.title='请先成功切换供应商'}}
 const migrationTarget=$('#migration-target');if(migrationTarget){const migrationPanel=migrationTarget.parentElement;const migrationSection=migrationPanel?.parentElement;migrationPanel?.remove();if(migrationSection)migrationSection.style.gridTemplateColumns='1fr'}
 const commonConfig=$('#common-config');if(commonConfig){const commonPanel=commonConfig.parentElement;const commonSection=commonPanel?.parentElement;commonPanel?.remove();if(commonSection)commonSection.style.gridTemplateColumns='1fr'}
 const routeModel=$('#route-model');if(routeModel){const routeRow=routeModel.parentElement;const routeHelp=routeRow?.previousElementSibling;const routeTitle=routeHelp?.previousElementSibling;routeRow?.remove();routeHelp?.remove();routeTitle?.remove()}
 async function refreshRoutes(){}
-function addModel(m={name:''}){if(!m.name)return;const entry=document.createElement('div');entry.className='model-entry';entry.dataset.name=m.name;entry.textContent=m.name;$('#model-list').append(entry)}
+function addModel(m={name:''}){if(!m.name)return;const entry=document.createElement('div'),name=document.createElement('span'),windowLimit=document.createElement('input'),compactLimit=document.createElement('input');entry.className='model-entry';entry.dataset.name=m.name;name.textContent=m.name;windowLimit.placeholder='上下文，例如 1M';windowLimit.value=m.context_window||'';windowLimit.title='可选；填写后才会生成 model_catalog_json';windowLimit.oninput=updatePreview;compactLimit.placeholder='压缩阈值（可选）';compactLimit.value=m.auto_compact_limit||'';compactLimit.oninput=updatePreview;entry.append(name,windowLimit,compactLimit);$('#model-list').append(entry)}
 async function loadAuthContents(providerId){if(!providerId)return;try{const data=await api(`/api/providers/${encodeURIComponent(providerId)}/auth`);if(state.current?.id===providerId&&data.auth_mode===$('#p-auth').value)$('#auth-preview').value=data.contents||''}catch(e){note(e.message)}}
 function openDetail(){const p=state.current;const active=Boolean(p.id&&p.id===state.active),activateButton=$('#activate-btn');$('#list-view').classList.add('hidden');$('#detail').classList.add('visible');$('#detail-name').textContent=p.id?p.name:'添加供应商';$('#detail-sub').textContent=active?'当前正在使用':p.id?'编辑后保存列表，再切换模式时会使用新配置':'新建供应商需要先保存到列表';activateButton.style.display=p.id?'':'none';activateButton.disabled=active;activateButton.textContent=active?'使用中':'设为当前';activateButton.title=active?'当前正在使用该供应商':'设为当前供应商';$('#p-name').value=p.name||'';$('#p-model').value=p.model||'';$('#p-url').value=p.base_url||'';$('#p-key').value=p.auth_mode==='apikey'?(p.bearer_token||''):'';$('#p-auth').value=p.auth_mode||'apikey';$('#auth-preview').value='';$('#p-goals').checked=Boolean(p.goals_enabled);state.testModel=p.test_model||'';state.goalsConfigured=Boolean(p.goals_configured);state.protocol=p.wire_api||'responses';state.configTouched=Boolean(p.config_contents);$('#config-preview').value=p.config_contents||'';setProtocol(state.protocol);$('#model-list').innerHTML='';(p.models||[]).forEach(addModel);authModeChanged();if(state.goalsConfigured)syncGoalsConfig();updatePreview();if(p.id)loadAuthContents(p.id)}
-function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');const auth_mode=$('#p-auth').value;return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),wire_api:state.protocol,auth_mode,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-entry')].map(entry=>({name:entry.dataset.name})).filter(m=>m.name),config_contents:$('#config-preview').value,auth_contents:$('#auth-preview').value,goals_enabled:$('#p-goals').checked,goals_configured:Boolean(state.goalsConfigured),test_model:state.testModel||''}}
+function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');const auth_mode=$('#p-auth').value,mode=auth_mode==='chatgpt'?'official':'pure_api',protocol=state.protocol==='chat'?'chat_completions':'responses';return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),mode,protocol,wire_api:state.protocol,auth_mode,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-entry')].map(entry=>({name:entry.dataset.name,context_window:entry.querySelectorAll('input')[0]?.value.trim()||'',auto_compact_limit:entry.querySelectorAll('input')[1]?.value.trim()||''})).filter(m=>m.name),config_contents:$('#config-preview').value,auth_contents:$('#auth-preview').value,goals_enabled:$('#p-goals').checked,goals_configured:Boolean(state.goalsConfigured),test_model:state.testModel||''}}
 function updatePreview(){if(!state.current)return;const p=gather();if(p.auth_mode==='apikey'&&!$('#auth-preview').value.trim())$('#auth-preview').value=JSON.stringify({OPENAI_API_KEY:$('#p-key').value},null,2)}
 function syncKeyToAuth(){if($('#p-auth').value==='apikey')$('#auth-preview').value=JSON.stringify({OPENAI_API_KEY:$('#p-key').value},null,2)}
 function syncAuthToKey(){if($('#p-auth').value!=='apikey')return;try{const value=JSON.parse($('#auth-preview').value);if(value&&typeof value.OPENAI_API_KEY==='string')$('#p-key').value=value.OPENAI_API_KEY}catch{}}
@@ -1698,7 +1860,7 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
  function sessionEscape(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
  function sessionTime(value){const time=new Date(value);return Number.isNaN(time.getTime())?value:time.toLocaleString('zh-CN',{hour12:false})}
  function sessionSize(size){if(size<1024)return size+' B';if(size<1024*1024)return (size/1024).toFixed(1)+' KB';return (size/1024/1024).toFixed(1)+' MB'}
- async function loadServerSessions(){const summary=document.querySelector('#session-summary'),list=document.querySelector('#session-list');if(!summary||!list)return;summary.textContent='正在读取当前服务器的 Codex 会话…';list.innerHTML='';try{const result=await api('/api/sessions');const sessions=result.sessions||[];summary.textContent=sessions.length?`发现 ${sessions.length} 个服务器会话。删除不会创建备份，完成后请在 Codex App 中重新读取远程会话列表。`:'当前服务器没有可管理的 Codex 会话。';list.innerHTML=sessions.length?sessions.map(session=>`<article class="session-row"><div><div class="session-title" title="${sessionEscape(session.title)}">${sessionEscape(session.title)}</div><div class="session-meta">${sessionEscape(session.id)} · ${sessionTime(session.modified_at)} · ${sessionSize(session.size)}</div>${session.cwd?`<div class="session-meta" title="${sessionEscape(session.cwd)}">${sessionEscape(session.cwd)}</div>`:''}</div><button class="btn small session-delete" type="button" data-thread-id="${sessionEscape(session.id)}">永久删除</button></article>`).join(''):'<div class="session-empty">没有找到会话文件。</div>';list.querySelectorAll('.session-delete').forEach(button=>button.addEventListener('click',()=>deleteServerSession(button.dataset.threadId,button)))}catch(error){summary.textContent='读取会话失败：'+error.message}}
+ async function loadServerSessions(){const summary=document.querySelector('#session-summary'),list=document.querySelector('#session-list');if(!summary||!list)return;summary.textContent='正在读取当前服务器的 Codex 会话…';list.innerHTML='';try{const result=await api('/api/sessions');const sessions=result.sessions||[];summary.textContent=sessions.length?`发现 ${sessions.length} 个服务器会话。切换默认供应商不会改写这些历史标签；需要变更时请在供应商页先预览再迁移。`:'当前服务器没有可管理的 Codex 会话。';list.innerHTML=sessions.length?sessions.map(session=>`<article class="session-row"><div><div class="session-title" title="${sessionEscape(session.title)}">${sessionEscape(session.title)}</div><div class="session-meta">${sessionEscape(session.id)} · ${sessionTime(session.modified_at)} · ${sessionSize(session.size)}</div>${session.provider_id?`<div class="session-meta">供应商：${sessionEscape(session.provider_id)}</div>`:''}${session.cwd?`<div class="session-meta" title="${sessionEscape(session.cwd)}">${sessionEscape(session.cwd)}</div>`:''}</div><button class="btn small session-delete" type="button" data-thread-id="${sessionEscape(session.id)}">永久删除</button></article>`).join(''):'<div class="session-empty">没有找到会话文件。</div>';list.querySelectorAll('.session-delete').forEach(button=>button.addEventListener('click',()=>deleteServerSession(button.dataset.threadId,button)))}catch(error){summary.textContent='读取会话失败：'+error.message}}
  function confirmSessionDeletion(threadId,title){return new Promise(resolve=>{const backdrop=document.createElement('div');backdrop.className='session-modal-backdrop';backdrop.innerHTML='<section class="session-modal" role="dialog" aria-modal="true" aria-labelledby="session-delete-title"><div class="session-modal-kicker">不可恢复的操作</div><h3 id="session-delete-title">永久删除云端会话</h3><p>会话记录及服务器本地索引会被删除，不会创建备份。</p><div class="session-modal-session" title="'+sessionEscape(threadId)+'">'+sessionEscape(title||'未命名会话')+'<br>'+sessionEscape(threadId)+'</div><label class="session-modal-confirm"><input type="checkbox"><span>我理解此操作无法撤销，并确认永久删除该会话。</span></label><div class="session-modal-actions"><button class="btn light" type="button" data-action="cancel">取消</button><button class="btn session-modal-danger" type="button" data-action="delete" disabled>永久删除</button></div></section>';const checkbox=backdrop.querySelector('input'),confirmButton=backdrop.querySelector('[data-action="delete"]'),onKey=event=>{if(event.key==='Escape')close(false)},close=value=>{document.removeEventListener('keydown',onKey);backdrop.remove();resolve(value)};checkbox.addEventListener('change',()=>confirmButton.disabled=!checkbox.checked);backdrop.querySelector('[data-action="cancel"]').addEventListener('click',()=>close(false));confirmButton.addEventListener('click',()=>close(true));backdrop.addEventListener('click',event=>{if(event.target===backdrop)close(false)});document.addEventListener('keydown',onKey);document.body.append(backdrop);backdrop.querySelector('[data-action="cancel"]').focus()})}
  async function deleteServerSession(threadId,button){if(!threadId)return;const title=button.closest('.session-row')?.querySelector('.session-title')?.textContent||'';if(!await confirmSessionDeletion(threadId,title))return;button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId),{method:'DELETE'});const summary=document.querySelector('#session-summary');if(summary)summary.textContent=result.detail;await loadServerSessions()}catch(error){button.disabled=false;button.textContent='永久删除';const summary=document.querySelector('#session-summary');if(summary)summary.textContent='删除失败：'+error.message}}
  </script>'''
@@ -1716,7 +1878,7 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
         .replace('placeholder="例如 fhl"', 'placeholder="例如 chatgpt"')
         .replace('<input id="p-model" value="gpt-5.6-terra" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()">', '<input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()">')
         .replace('<div class="field"><label>名称</label><input id="p-name" placeholder="例如 chatgpt" oninput="updatePreview()"></div>', '<div class="field"><label>名称</label><input id="p-name" placeholder="例如 chatgpt_1" oninput="updatePreview()"><div class="field-help">系统会据此自动生成供应商标识，用于写入 Codex 配置；请使用英文、数字、`-` 或 `_`。</div></div>')
-        .replace('<div class="field"><label>配置模型</label><input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()"><div class="field-help">默认启动 Codex 时使用的模型名称。</div></div>', '<div class="field"><label>配置模型（可选）</label><input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()"><div class="field-help">留空时不写入默认模型，可在 Codex 中自行选择。</div></div>')
+        .replace('<div class="field"><label>配置模型</label><input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()"><div class="field-help">默认启动 Codex 时使用的模型名称。</div></div>', '<div class="field"><label>配置模型（可选）</label><input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()"><div class="field-help">留空时不写入默认模型，可在 Codex 中自行选择。切走供应商时会保存当前 config.toml 的模型，切回时恢复最近使用值。</div></div>')
         .replace('<div class="field"><label>Codex 目标</label><select id="p-target"><option value="">不启用目标功能</option></select></div>', '<div class="field"><label>Codex 目标</label><label style="display:flex;align-items:center;gap:8px;border:1px solid #d2d6da;border-radius:7px;padding:10px 12px;font-weight:400"><input id="p-goals" type="checkbox" onchange="syncGoalsConfig()" style="width:auto">启用目标功能</label></div>')
          .replace("</body></html>", official_script + navigation_script + session_management_script + "</body></html>")
     )
@@ -1755,7 +1917,7 @@ function addModel(m={name:'',context_window:'1M',image_mode:'send-as-is'}){const
 function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),wire_api:state.protocol,auth_mode:$('#p-auth').value,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-row')].map(r=>({name:r.children[0].value.trim(),context_window:r.children[1].value.trim(),image_mode:r.children[2].value})).filter(m=>m.name)}}
 function updatePreview(){if(!state.current)return;const p=gather();const lines=[`model = "${p.model||'gpt-5.6-terra'}"`,`model_provider = "${p.id||'provider-id'}"`,`model_reasoning_effort = "medium"`];if(p.auth_mode==='apikey'){lines.push('',`[model_providers.${p.id||'provider-id'}]`,`name = "${p.name||'供应商名称'}"`,`base_url = "${p.base_url||'https://api.example.com'}"`,`wire_api = "${p.wire_api}"`,`experimental_bearer_token = "***"`)}else lines.push('','# 官方登录模式：使用已捕获的 auth.json 快照');$('#config-preview').value=lines.join('\n');$('#auth-preview').value=p.auth_mode==='chatgpt'?'{\n  "auth_mode": "chatgpt",\n  "tokens": "已隐藏"\n}':'{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "***"\n}'}
 async function saveProvider(returnToList=false){try{const p=gather();if(!p.id||!p.name||(p.auth_mode==='apikey'&&!p.base_url)){throw Error('请填写供应商名称；纯 API 还需要 Base URL。供应商标识会由名称自动生成。')}await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});state.current=p;await refreshAll();if(returnToList)closeDetail();else note('供应商配置已保存。')}catch(e){note(e.message)}}
-async function activateCurrent(){try{await saveProvider(false);const p=gather();if(!p.id)return;const d=await api(`/api/providers/${encodeURIComponent(p.id)}/activate`,{method:'POST'});state.active=p.id;const activateButton=$('#activate-btn');activateButton.disabled=true;activateButton.textContent='使用中';activateButton.title='当前正在使用该供应商';note(`已设为当前供应商，备份编号：${d.backup_id}。${d.runtime?.detail||'Codex App Server 已重启。'}`);await refreshAll()}catch(e){note(e.message)}}
+async function activateCurrent(){try{await saveProvider(false);const p=gather();if(!p.id)return;const d=await api(`/api/providers/${encodeURIComponent(p.id)}/activate`,{method:'POST'});state.active=p.id;const activateButton=$('#activate-btn');activateButton.disabled=true;activateButton.textContent='使用中';activateButton.title='当前正在使用该供应商';const restored=d.backfilled_provider_id?`已保存「${d.backfilled_provider_id}」的最近模型。`:'';note(`已设为当前供应商，备份编号：${d.backup_id}。${restored}${d.runtime?.detail||'Codex App Server 已重启。'}`);await refreshAll()}catch(e){note(e.message)}}
 function setManagedRestartAvailable(){const button=$('#managed-restart-btn');if(button){button.disabled=false;button.title='重启服务器上的 Codex App Server'}}
 async function restartManagedCodex(){const button=$('#managed-restart-btn');if(!button||button.disabled)return;if(!await panelDialog({title:'重启 Codex App Server',message:'这会短暂中断当前远程 Codex 连接和正在进行的请求。新的连接将读取当前供应商配置。',confirmLabel:'重启'}))return;try{button.disabled=true;button.textContent='正在重启…';const result=await api('/api/runtime/restart',{method:'POST'});note(result.detail,'list-notice')}catch(e){note(e.message,'list-notice')}finally{button.disabled=false;button.textContent='重启 Codex';button.title='重启服务器上的 Codex App Server'}}
 async function testCurrent(){try{const p=gather();const d=await api('/api/providers/diagnose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const failed=(d.checks||[]).filter(item=>item.status==='fail').map(item=>`${item.name}：${item.detail}`);const warnings=(d.checks||[]).filter(item=>item.status==='warning').map(item=>`${item.name}：${item.detail}`);note(d.ok?`诊断通过。${warnings.length?' '+warnings.join('；'):''}`:`诊断发现问题：${failed.join('；')}`)}catch(e){note(e.message)}}

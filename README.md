@@ -2,6 +2,23 @@
 
 通用的 Codex 供应商控制台，可部署到安装了 Docker 的 Linux 云服务器（Ubuntu、Debian、CentOS、RHEL、Rocky、AlmaLinux 等）。
 
+## 供应商模式与协议
+
+控制台只支持两种供应商模式：
+
+- **官方登录**：远程 Codex 使用服务器保存的 ChatGPT / Codex 登录状态。
+- **纯 API**：远程 Codex 通过容器内部 Relay 调用自定义上游。Relay 保存真实上游地址和密钥，并将 Codex 的 Responses 请求转换为上游所需的 Responses 或 Chat Completions 协议。
+
+切换默认供应商只影响之后创建的会话；历史会话不会被静默重写。需要变更历史会话的 Provider 标签时，请在会话管理中先预览、再执行显式迁移。
+
+纯 API 档案的模型列表可按模型填写可选的上下文窗口与自动压缩阈值，支持 `128K`、`1M` 或纯数字 Token。只有填写了合法上下文窗口的模型才会生成 `model_catalog_json`；未填写时保持 Codex 默认目录，避免错误的目录覆盖客户端默认值。Relay 仅在 Docker 内部网络监听，不对公网单独暴露端口。
+
+本地开发可执行标准库测试：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 ## 快速部署
 
 ### 部署前准备
