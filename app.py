@@ -1549,11 +1549,17 @@ def provider_auth_contents(provider_id: str) -> dict:
     profile = read_profiles().get(provider_id)
     if not profile:
         raise HTTPException(404, "Provider profile not found")
+    contents = profile.get("auth_contents", "")
+    # Older pure-API profiles may have stored their key only in the profile.
+    # The authenticated edit view uses this no-store endpoint to populate the
+    # Key field, so preserve that behavior after upgrading those profiles.
+    if profile.get("auth_mode") == "apikey" and not contents and profile.get("bearer_token"):
+        contents = json.dumps({"OPENAI_API_KEY": profile["bearer_token"]}, indent=2)
     audit("provider_auth_viewed", provider_id=provider_id)
     return JSONResponse(
         {
             "auth_mode": profile.get("auth_mode", "apikey"),
-            "contents": profile.get("auth_contents", ""),
+            "contents": contents,
         },
         headers={"Cache-Control": "no-store"},
     )
@@ -1915,7 +1921,7 @@ const commonConfig=$('#common-config');if(commonConfig){const commonPanel=common
 const routeModel=$('#route-model');if(routeModel){const routeRow=routeModel.parentElement;const routeHelp=routeRow?.previousElementSibling;const routeTitle=routeHelp?.previousElementSibling;routeRow?.remove();routeHelp?.remove();routeTitle?.remove()}
 async function refreshRoutes(){}
 function addModel(m={name:''}){if(!m.name)return;const entry=document.createElement('div');entry.className='model-entry';entry.dataset.name=m.name;entry.textContent=m.name;$('#model-list').append(entry)}
-async function loadAuthContents(providerId){if(!providerId)return;try{const data=await api(`/api/providers/${encodeURIComponent(providerId)}/auth`);if(state.current?.id===providerId&&data.auth_mode===$('#p-auth').value)$('#auth-preview').value=data.contents||''}catch(e){note(e.message)}}
+async function loadAuthContents(providerId){if(!providerId)return;try{const data=await api(`/api/providers/${encodeURIComponent(providerId)}/auth`);if(state.current?.id===providerId&&data.auth_mode===$('#p-auth').value){$('#auth-preview').value=data.contents||'';if(data.auth_mode==='apikey')syncAuthToKey()}}catch(e){note(e.message)}}
 function openDetail(){const p=state.current;const active=Boolean(p.id&&p.id===state.active),activateButton=$('#activate-btn');$('#list-view').classList.add('hidden');$('#detail').classList.add('visible');$('#detail-name').textContent=p.id?p.name:'添加供应商';$('#detail-sub').textContent=active?'当前正在使用':p.id?'编辑后保存列表，再切换模式时会使用新配置':'新建供应商需要先保存到列表';activateButton.style.display=p.id?'':'none';activateButton.disabled=active;activateButton.textContent=active?'使用中':'设为当前';activateButton.title=active?'当前正在使用该供应商':'设为当前供应商';$('#p-name').value=p.name||'';$('#p-model').value=p.model||'';$('#p-url').value=p.base_url||'';$('#p-key').value=p.auth_mode==='apikey'?(p.bearer_token||''):'';$('#p-auth').value=p.auth_mode||'apikey';$('#auth-preview').value='';$('#p-goals').checked=Boolean(p.goals_enabled);state.testModel=p.test_model||'';state.goalsConfigured=Boolean(p.goals_configured);state.protocol=p.wire_api||'responses';state.configTouched=Boolean(p.config_contents);$('#config-preview').value=p.config_contents||'';setProtocol(state.protocol);$('#model-list').innerHTML='';(p.models||[]).forEach(addModel);authModeChanged();if(state.goalsConfigured)syncGoalsConfig();updatePreview();if(p.id)loadAuthContents(p.id)}
 function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');const auth_mode=$('#p-auth').value,mode=auth_mode==='chatgpt'?'official':'pure_api',protocol=state.protocol==='chat'?'chat_completions':'responses';return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),mode,protocol,wire_api:state.protocol,auth_mode,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-entry')].map(entry=>({name:entry.dataset.name})).filter(m=>m.name),config_contents:$('#config-preview').value,auth_contents:$('#auth-preview').value,goals_enabled:$('#p-goals').checked,goals_configured:Boolean(state.goalsConfigured),test_model:state.testModel||''}}
 function updatePreview(){if(!state.current)return;const p=gather();if(p.auth_mode==='apikey'&&!$('#auth-preview').value.trim())$('#auth-preview').value=JSON.stringify({OPENAI_API_KEY:$('#p-key').value},null,2)}
