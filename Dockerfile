@@ -4,7 +4,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 FROM base AS relay
-COPY relay_domain.py relay.py ./
+COPY provider_domain.py relay_domain.py relay.py ./
+RUN python -c "import relay"
 CMD ["uvicorn", "relay:app", "--host", "0.0.0.0", "--port", "57321"]
 
 FROM base AS console
