@@ -59,6 +59,8 @@ ARCHIVED_SESSIONS_PATH = CODEX_HOME / "archived_sessions"
 APP_SERVER_LOCK = threading.Lock()
 ACTIVATION_JOBS: dict[str, dict] = {}
 ACTIVATION_JOBS_LOCK = threading.Lock()
+MODEL_DIAGNOSTIC_JOBS: dict[str, dict] = {}
+MODEL_DIAGNOSTIC_JOBS_LOCK = threading.Lock()
 HOST_APP_SERVER_STOP_SCRIPT = r'''
 import os
 import shlex
@@ -303,6 +305,12 @@ class ProviderDiagnosticRequest(BaseModel):
     no_auth: bool = False
     config_contents: str = ""
     auth_contents: str = ""
+
+
+class ModelDiagnosticRequest(ProviderDiagnosticRequest):
+    """An unsaved pure-API profile plus the catalog models to probe."""
+
+    models: list[ModelEntry] = Field(default_factory=list)
 
 
 class LoginRequest(BaseModel):
@@ -2002,6 +2010,95 @@ def diagnose_unsaved_provider(request: ProviderDiagnosticRequest) -> dict:
     return result
 
 
+def model_diagnostic_snapshot(job_id: str) -> dict:
+    with MODEL_DIAGNOSTIC_JOBS_LOCK:
+        job = MODEL_DIAGNOSTIC_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "模型诊断任务不存在或已过期")
+        return dict(job)
+
+
+@app.post("/api/providers/diagnose-models-progress")
+def start_model_diagnostics(request: ModelDiagnosticRequest) -> dict:
+    profile = normalize_profile(request.model_dump(exclude={"models"}))
+    if profile["mode"] != "pure_api":
+        raise HTTPException(422, "全面模型诊断仅适用于纯 API 供应商")
+    if not is_profile_usable(profile):
+        raise HTTPException(422, "请先填写有效的 Base URL 与 API Key")
+
+    names: list[str] = []
+    for entry in request.models:
+        name = entry.name.strip()
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        raise HTTPException(422, "请先从上游获取模型列表")
+
+    job_id = uuid.uuid4().hex
+    with MODEL_DIAGNOSTIC_JOBS_LOCK:
+        MODEL_DIAGNOSTIC_JOBS[job_id] = {
+            "id": job_id,
+            "status": "running",
+            "total": len(names),
+            "completed": 0,
+            "passed": 0,
+            "failed": 0,
+            "stage": "正在准备全面模型诊断",
+            "results": [],
+            "updated_at": time.time(),
+        }
+
+    def run() -> None:
+        for index, name in enumerate(names, start=1):
+            with MODEL_DIAGNOSTIC_JOBS_LOCK:
+                job = MODEL_DIAGNOSTIC_JOBS.get(job_id)
+                if job:
+                    job.update(stage=f"正在测试（{index}/{len(names)}）{name}", updated_at=time.time())
+            started_at = time.monotonic()
+            try:
+                result = test_model_request(profile, name)
+            except Exception as exc:  # pragma: no cover - defensive background boundary
+                result = {"ok": False, "detail": str(exc)}
+            elapsed_ms = round((time.monotonic() - started_at) * 1000)
+            passed = bool(result.get("ok"))
+            detail = str(result.get("detail") or result.get("body") or "请求成功")
+            item = {
+                "model": name,
+                "status": "pass" if passed else "fail",
+                "http_status": result.get("status"),
+                "elapsed_ms": elapsed_ms,
+                "detail": detail[:600],
+            }
+            with MODEL_DIAGNOSTIC_JOBS_LOCK:
+                job = MODEL_DIAGNOSTIC_JOBS.get(job_id)
+                if job:
+                    job["results"].append(item)
+                    job["completed"] = index
+                    job["passed"] += int(passed)
+                    job["failed"] += int(not passed)
+                    job["updated_at"] = time.time()
+        with MODEL_DIAGNOSTIC_JOBS_LOCK:
+            job = MODEL_DIAGNOSTIC_JOBS.get(job_id)
+            if job:
+                job.update(status="completed", stage="全部模型诊断完成", updated_at=time.time())
+                audit(
+                    "provider_models_diagnosed",
+                    provider_id=profile.get("id") or None,
+                    passed=str(job["passed"]),
+                    failed=str(job["failed"]),
+                )
+
+    threading.Thread(target=run, name=f"model-diagnostic-{job_id[:8]}", daemon=True).start()
+    return model_diagnostic_snapshot(job_id)
+
+
+@app.get("/api/model-diagnostics/{job_id}")
+def get_model_diagnostics(job_id: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise HTTPException(422, "无效的模型诊断任务标识")
+    return model_diagnostic_snapshot(job_id)
+
+
 @app.post("/api/upstream/models")
 def fetch_models_from_upstream(request: UpstreamModelFetch) -> dict:
     return fetch_upstream_models(request)
@@ -2130,6 +2227,16 @@ function showDoctorProgress(){const stages=[['配置完整性','正在检查配�
 function showDoctor(result){const all=result.checks||[];const configuration=all.filter(item=>['Base URL','API Key','上游协议','官方认证'].includes(item.name));const models=all.filter(item=>item.name.includes('模型目录')||item.name==='配置模型可见性');const real=all.filter(item=>item.name==='真实请求');const groups=[['配置完整性',configuration],['模型列表',models],['真实请求',real]];$('#doctor-summary').textContent=result.summary;$('#doctor-progress').style.width='100%';$('#doctor-checks').innerHTML=groups.map(([name,items])=>{const status=doctorStatus(items),detail=items.length?items.map(item=>item.detail).join('；'):'该步骤未执行。';const expanded=name==='真实请求'&&items.some(item=>item.status==='pass');return `<div class="doctor-check ${status} ${expanded?'real-result expanded':''}"><b>${esc(name)}</b><small>${esc(detail)}</small></div>`}).join('');const failed=all.filter(item=>item.status==='fail'),modelWarning=all.find(item=>item.name==='配置模型可见性'&&item.status==='warning'),modelFailure=all.find(item=>item.name==='模型目录'||item.name==='上游模型目录'),realFailure=all.find(item=>item.name==='真实请求'&&item.status==='fail');const advice=result.passed?'可以作为 Codex 供应商使用；如果真实对话仍失败，请查看协议代理日志里的上游响应。':failed.some(item=>item.name==='Base URL'||item.name==='API Key')?'先补齐 Base URL 和 API Key；如果使用官方账号，请切换到官方登录模式。':modelWarning?'连接可用，但测试模型没有出现在模型列表里；建议改用上游返回的模型名。':modelFailure?.status==='fail'?'优先检查 Base URL 是否包含正确的 /v1 前缀，以及供应商是否支持 /v1/models。':realFailure?'优先检查测试模型名称、上游协议选择和 Key 权限；如果 Chat Completions 可用，请切到对应协议。':'请检查上游服务配置。';$('#doctor-advice').innerHTML=`<div class="doctor-check"><b>处理建议</b><small>${esc(advice)}</small></div>`;$('#doctor-close').style.display='';$('#doctor-mask').classList.add('show')}
 async function testCurrent(){const timer=showDoctorProgress();try{const [d]=await Promise.all([api('/api/providers/diagnose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(gather())}),new Promise(resolve=>setTimeout(resolve,450))]);clearInterval(timer);showDoctor(d)}catch(e){clearInterval(timer);$('#doctor-summary').textContent='诊断请求失败。';$('#doctor-progress').style.width='100%';$('#doctor-checks').innerHTML=`<div class="doctor-check fail"><b>诊断错误</b><small>${esc(e.message)}</small></div>`;$('#doctor-advice').textContent='请检查控制台服务、网络连接和上游配置。';$('#doctor-close').style.display='';}}
  </script>'''
+    model_diagnostics_script = r'''<script>
+document.head.insertAdjacentHTML('beforeend','<style>.model-diagnostic-panel{display:none;margin-top:12px;border:1px solid #d8dde2;border-radius:8px;padding:12px;background:#fafbfc}.model-diagnostic-panel.show{display:block}.model-diagnostic-title{font-weight:750}.model-diagnostic-copy{margin-top:4px;color:#656b73;font-size:12px;line-height:1.45}.model-diagnostic-track{height:7px;background:#e8ebee;border-radius:999px;overflow:hidden;margin:10px 0 7px}.model-diagnostic-track i{display:block;height:100%;width:0;background:#1683ff;transition:width .2s}.model-diagnostic-meta{color:#656b73;font-size:12px}.model-diagnostic-results{margin-top:10px;max-height:250px;overflow:auto}.model-diagnostic-result{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;border-top:1px solid #e6e9ed;padding:8px 0;font-size:13px}.model-diagnostic-result:first-child{border-top:0}.model-diagnostic-result b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.model-diagnostic-result small{grid-column:1 / -1;color:#6a7078;line-height:1.4;word-break:break-word}.model-diagnostic-status{font-weight:700}.model-diagnostic-status.pass{color:#14804a}.model-diagnostic-status.fail{color:#c23434}</style>');
+const modelDiagnosticList=$('#model-list');
+if(modelDiagnosticList&&!$('#diagnose-all-models-btn')){const modelHelp=modelDiagnosticList.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;const button=document.createElement('button');button.id='diagnose-all-models-btn';button.type='button';button.className='btn light small';button.textContent='全面诊断全部模型';button.onclick=diagnoseAllModels;modelTitle?.append(button);modelDiagnosticList.insertAdjacentHTML('afterend','<section id="model-diagnostic-panel" class="model-diagnostic-panel"><div class="model-diagnostic-title">模型全面诊断</div><div class="model-diagnostic-copy">逐个发送最小真实请求；不会保存档案或切换供应商。</div><div class="model-diagnostic-track"><i id="model-diagnostic-fill"></i></div><div id="model-diagnostic-meta" class="model-diagnostic-meta"></div><div id="model-diagnostic-results" class="model-diagnostic-results"></div></section>')}
+let modelDiagnosticPoll=null;
+function renderModelDiagnostics(job){const panel=$('#model-diagnostic-panel'),button=$('#diagnose-all-models-btn');if(!panel)return;panel.classList.add('show');const total=Number(job.total)||0,completed=Number(job.completed)||0,pct=total?Math.round(completed*100/total):0;$('#model-diagnostic-fill').style.width=pct+'%';$('#model-diagnostic-meta').textContent=`${job.stage||'正在诊断'} · ${completed}/${total}，成功 ${job.passed||0}，失败 ${job.failed||0}`;const results=job.results||[];$('#model-diagnostic-results').innerHTML=results.map(item=>{const ok=item.status==='pass',http=item.http_status?`HTTP ${item.http_status}`:'无 HTTP 响应',elapsed=typeof item.elapsed_ms==='number'?`${(item.elapsed_ms/1000).toFixed(2)} 秒`:'';return `<div class="model-diagnostic-result"><b title="${esc(item.model)}">${esc(item.model)}</b><span class="model-diagnostic-status ${ok?'pass':'fail'}">${ok?'通过':'失败'} · ${esc(http)}${elapsed?' · '+esc(elapsed):''}</span><small>${esc(item.detail||'')}</small></div>`}).join('');if(button){button.disabled=job.status==='running';button.textContent=job.status==='running'?'正在全面诊断…':'全面诊断全部模型'}}
+function setFullModelDiagnosticsVisibility(official){const button=$('#diagnose-all-models-btn'),panel=$('#model-diagnostic-panel');if(button)button.style.display=official?'none':'';if(panel&&official)panel.classList.remove('show')}
+async function diagnoseAllModels(){if(modelDiagnosticPoll)return;try{const profile=gather(),models=profile.models||[];if(profile.auth_mode!=='apikey')throw Error('全面模型诊断仅适用于纯 API 供应商。');if(!models.length)throw Error('请先从上游获取模型列表。');const confirmed=await panelDialog({title:'全面诊断全部模型',message:`将对 ${models.length} 个模型逐个发送最小真实请求。该操作可能产生 API 费用并受上游速率限制影响，不会保存档案或切换供应商。`,confirmLabel:'开始诊断'});if(!confirmed)return;const started=await api('/api/providers/diagnose-models-progress',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(profile)});renderModelDiagnostics(started);const poll=async()=>{try{const job=await api(`/api/model-diagnostics/${encodeURIComponent(started.id)}`);renderModelDiagnostics(job);if(job.status==='running'){modelDiagnosticPoll=setTimeout(poll,450);return}modelDiagnosticPoll=null}catch(error){modelDiagnosticPoll=null;renderModelDiagnostics({status:'completed',stage:'模型诊断失败',total:0,completed:0,passed:0,failed:0,results:[{model:'诊断任务',status:'fail',detail:error.message}]})}};modelDiagnosticPoll=setTimeout(poll,120)}catch(error){modelDiagnosticPoll=null;note(error.message)}}
+const baseModelDiagnosticAuthModeChanged=authModeChanged;authModeChanged=function(){baseModelDiagnosticAuthModeChanged();setFullModelDiagnosticsVisibility($('#p-auth').value==='chatgpt')};setFullModelDiagnosticsVisibility($('#p-auth').value==='chatgpt');
+</script>'''
     navigation_script = r'''<script>
  document.head.insertAdjacentHTML('beforeend', `<style>
  .console-sidebar{position:fixed;inset:0 auto 0 0;width:228px;background:#202124;color:#f7f8fa;padding:22px 14px;z-index:20;display:flex;flex-direction:column;gap:22px}.console-brand{font-size:17px;font-weight:750;padding:0 12px}.console-brand small{display:block;color:#aeb4bb;font-size:11px;font-weight:400;margin-top:5px}.console-nav{display:grid;gap:5px}.console-nav button{border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-nav button:hover,.console-nav button.active{background:#34373b;color:#fff}.console-logout{margin-top:auto;border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-logout:hover{background:#34373b;color:#fff}.console-content{margin-left:228px}.console-panel{max-width:1320px;margin:22px auto;padding:0 26px}.console-panel .list-shell{background:#fff;border:1px solid #dde1e6;border-radius:11px;padding:18px}.console-panel h2{margin:0 0 7px;font-size:18px}.console-panel .panel-note{color:#686e76;font-size:13px;margin:0 0 18px}.console-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.console-form label{display:block;color:#555c64;font-size:12px;margin-bottom:5px}.console-form input,.console-form select,.console-form textarea{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d2d6da;border-radius:7px;font:inherit;background:#fff}.console-form textarea{min-height:104px;resize:vertical}.console-form .wide{grid-column:1/-1}.console-form-actions{display:flex;gap:8px;margin-top:17px}.console-code{font:12px Consolas,monospace;background:#f4f5f6;color:#30343a;padding:12px;border-radius:7px;white-space:pre-wrap;overflow:auto}.console-muted{color:#727982;font-size:12px}.console-health-summary{margin:8px 0 14px;padding:11px 13px;background:#f4f5f6;border-radius:7px;color:#4b525a}.health-check{border:1px solid #dfe3e7;border-left:4px solid #2f9e63;border-radius:7px;padding:10px 12px;margin-top:8px}.health-check.warning{border-left-color:#d18b16;background:#fffaf0}.health-check.fail{border-left-color:#d64545;background:#fff5f5}.health-check b,.health-check small{display:block}.health-check small{margin-top:4px;color:#686e76;line-height:1.45}
@@ -2186,7 +2293,7 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
         .replace('<div class="field"><label>名称</label><input id="p-name" placeholder="例如 chatgpt" oninput="updatePreview()"></div>', '<div class="field"><label>名称</label><input id="p-name" placeholder="例如 chatgpt_1" oninput="updatePreview()"><div class="field-help">系统会据此自动生成供应商标识，用于写入 Codex 配置；请使用英文、数字、`-` 或 `_`。</div></div>')
         .replace('<div class="field"><label>配置模型</label><input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()"><div class="field-help">默认启动 Codex 时使用的模型名称。</div></div>', '<div id="p-model-field" class="field"><label>配置模型（可选）</label><select id="p-model" onchange="updatePreview()"><option value="">不设置默认模型</option></select><div class="field-help">仅可从“从上游获取”的模型列表中选择。</div></div>')
         .replace('<div class="field"><label>Codex 目标</label><select id="p-target"><option value="">不启用目标功能</option></select></div>', '<div class="field"><label>Codex 目标</label><label style="display:flex;align-items:center;gap:8px;border:1px solid #d2d6da;border-radius:7px;padding:10px 12px;font-weight:400"><input id="p-goals" type="checkbox" onchange="syncGoalsConfig()" style="width:auto">启用目标功能</label></div>')
-         .replace("</body></html>", official_script + navigation_script + session_management_script + "</body></html>")
+         .replace("</body></html>", official_script + model_diagnostics_script + navigation_script + session_management_script + "</body></html>")
     )
 
 
