@@ -856,6 +856,15 @@ def test_profile(profile: dict) -> dict:
         return {"ok": False, "endpoint": endpoint, "detail": f"Connection failed: {exc.reason}"}
 
 
+MODEL_DIAGNOSTIC_TIMEOUT_SECONDS = 45
+MODEL_DIAGNOSTIC_TIMEOUT_ATTEMPTS = 2
+
+
+def is_timeout_error(error: object) -> bool:
+    """Recognize direct and urllib-wrapped network timeouts."""
+    return isinstance(error, TimeoutError) or "timed out" in str(error).lower()
+
+
 def test_model_request(profile: dict, test_model: str) -> dict:
     base = profile["base_url"].rstrip("/")
     wire_api = profile.get("wire_api", "responses")
@@ -876,21 +885,35 @@ def test_model_request(profile: dict, test_model: str) -> dict:
         headers=headers,
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            body_text = response.read().decode("utf-8", errors="replace")
-            return {"ok": 200 <= response.status < 300 and bool(body_text.strip()), "endpoint": endpoint, "status": response.status, "body": body_text[:2400], "detail": "响应内容为空" if not body_text.strip() else ""}
-    except urllib.error.HTTPError as exc:
-        body_text = exc.read().decode("utf-8", errors="replace")
-        return {"ok": False, "endpoint": endpoint, "detail": f"HTTP {exc.code}{': ' + body_text[:1200] if body_text else ''}"}
-    except TimeoutError:
-        return {
-            "ok": False,
-            "endpoint": endpoint,
-            "detail": "上游在 20 秒内未返回响应；请确认该地址支持所选协议和测试模型。",
-        }
-    except urllib.error.URLError as exc:
-        return {"ok": False, "endpoint": endpoint, "detail": str(exc.reason)}
+    for attempt in range(1, MODEL_DIAGNOSTIC_TIMEOUT_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=MODEL_DIAGNOSTIC_TIMEOUT_SECONDS) as response:
+                body_text = response.read().decode("utf-8", errors="replace")
+                return {
+                    "ok": 200 <= response.status < 300 and bool(body_text.strip()),
+                    "endpoint": endpoint,
+                    "status": response.status,
+                    "body": body_text[:2400],
+                    "detail": "响应内容为空" if not body_text.strip() else "",
+                    "attempts": attempt,
+                }
+        except urllib.error.HTTPError as exc:
+            body_text = exc.read().decode("utf-8", errors="replace")
+            return {"ok": False, "endpoint": endpoint, "detail": f"HTTP {exc.code}{': ' + body_text[:1200] if body_text else ''}", "attempts": attempt}
+        except (TimeoutError, urllib.error.URLError) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if not is_timeout_error(reason):
+                return {"ok": False, "endpoint": endpoint, "detail": str(reason), "attempts": attempt}
+            if attempt < MODEL_DIAGNOSTIC_TIMEOUT_ATTEMPTS:
+                continue
+            return {
+                "ok": False,
+                "endpoint": endpoint,
+                "detail": f"上游在 {MODEL_DIAGNOSTIC_TIMEOUT_SECONDS} 秒内未返回响应（已尝试 {attempt} 次）；请确认该地址支持所选协议和测试模型。",
+                "attempts": attempt,
+            }
+
+    raise AssertionError("timeout retry loop did not return")  # pragma: no cover
 
 
 def fetch_upstream_models(request: UpstreamModelFetch) -> dict:
@@ -965,7 +988,8 @@ def diagnose_profile(profile: dict) -> dict:
                 if names:
                     test_model = model or names[0]
                     real_request = test_model_request(profile, test_model)
-                    detail = f'{real_request.get("endpoint", "请求")} 返回 HTTP {real_request.get("status", "")}：{real_request.get("body", "")}' if real_request["ok"] else f'测试「{test_model}」失败：{real_request.get("endpoint", "请求")} {real_request.get("detail", "请求失败")}'
+                    retry_note = f'（第 {real_request.get("attempts", 1)} 次请求成功）' if real_request["ok"] and real_request.get("attempts", 1) > 1 else ""
+                    detail = f'{real_request.get("endpoint", "请求")} 返回 HTTP {real_request.get("status", "")}：{real_request.get("body", "")}{retry_note}' if real_request["ok"] else f'测试「{test_model}」失败：{real_request.get("endpoint", "请求")} {real_request.get("detail", "请求失败")}'
                     # A successful model catalog proves that the endpoint and
                     # credential are usable. Some reasoning models need longer
                     # than a small diagnostic request to produce their first
@@ -2061,7 +2085,11 @@ def start_model_diagnostics(request: ModelDiagnosticRequest) -> dict:
                 result = {"ok": False, "detail": str(exc)}
             elapsed_ms = round((time.monotonic() - started_at) * 1000)
             passed = bool(result.get("ok"))
-            detail = str(result.get("detail") or result.get("body") or "请求成功")
+            detail = (
+                f'第 {result.get("attempts", 1)} 次请求成功'
+                if passed
+                else str(result.get("detail") or "请求失败")
+            )
             item = {
                 "model": name,
                 "status": "pass" if passed else "fail",
