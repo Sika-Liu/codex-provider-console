@@ -1,9 +1,27 @@
 import unittest
 
-from relay_domain import chat_sse_to_responses_events, chat_to_response, responses_to_chat_request
+from relay_domain import chat_sse_to_responses_events, chat_to_response, resolve_active_profile, responses_to_chat_request
 
 
 class RelayDomainTests(unittest.TestCase):
+    def test_relay_uses_panel_selection_when_sessions_use_stable_custom_provider(self):
+        profile = {"id": "fhl", "mode": "pure_api"}
+        result = resolve_active_profile(
+            {"fhl": profile},
+            {"model_provider": "custom"},
+            {"active_provider_id": "fhl"},
+        )
+        self.assertIs(result, profile)
+
+    def test_relay_keeps_legacy_config_lookup_when_panel_setting_is_missing(self):
+        profile = {"id": "legacy", "mode": "pure_api"}
+        result = resolve_active_profile(
+            {"legacy": profile},
+            {"model_provider": "legacy"},
+            {},
+        )
+        self.assertIs(result, profile)
+
     def test_responses_request_becomes_chat_request(self):
         result = responses_to_chat_request({"model": "example", "instructions": "Be brief", "input": "Hello", "max_output_tokens": 20})
         self.assertEqual(result["model"], "example")

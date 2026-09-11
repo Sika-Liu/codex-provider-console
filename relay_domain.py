@@ -2,6 +2,30 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+
+def resolve_active_profile(
+    profiles: object,
+    config: object,
+    settings: object,
+) -> dict[str, Any] | None:
+    """Find the panel profile behind Codex's stable session identity.
+
+    `config.toml` deliberately uses the stable provider id ``custom`` so that
+    conversations created before a supplier switch remain resumable. The actual
+    supplier id is stored separately by the control panel. Config lookup remains
+    available for installations created before the stable identity change.
+    """
+    if not isinstance(profiles, dict):
+        return None
+    selected = settings.get("active_provider_id") if isinstance(settings, dict) else None
+    if isinstance(selected, str) and isinstance(profiles.get(selected), dict):
+        return profiles[selected]
+    legacy_provider = config.get("model_provider") if isinstance(config, dict) else None
+    if isinstance(legacy_provider, str) and isinstance(profiles.get(legacy_provider), dict):
+        return profiles[legacy_provider]
+    return None
 import json
 from collections.abc import Iterable, Iterator
 from typing import Any

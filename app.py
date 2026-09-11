@@ -960,7 +960,12 @@ def diagnose_profile(profile: dict) -> dict:
                     test_model = str(profile.get("test_model") or model or names[0]).strip()
                     real_request = test_model_request(profile, test_model)
                     detail = f'{real_request.get("endpoint", "请求")} 返回 HTTP {real_request.get("status", "")}：{real_request.get("body", "")}' if real_request["ok"] else f'测试「{test_model}」失败：{real_request.get("endpoint", "请求")} {real_request.get("detail", "请求失败")}'
-                    add("真实请求", "pass" if real_request["ok"] else "fail", detail)
+                    # A successful model catalog proves that the endpoint and
+                    # credential are usable. Some reasoning models need longer
+                    # than a small diagnostic request to produce their first
+                    # response, so a failed live probe is a warning rather than
+                    # a reason to reject a supplier switch (Codex++ behavior).
+                    add("真实请求", "pass" if real_request["ok"] else "warning", detail)
                 else:
                     add("真实请求", "warning", "上游未返回可测试模型，该步骤未执行")
             except HTTPException as exc:
@@ -1406,9 +1411,20 @@ def switch_provider(
     diagnostic = diagnose_profile(profile) if verify else {"ok": True, "checks": [], "summary": "诊断已跳过"}
     check = {"ok": diagnostic["ok"], "detail": diagnostic["summary"], "diagnostic": diagnostic}
     if not check["ok"]:
-        audit("provider_switch_rejected", provider_id=provider_id, detail=check.get("detail"))
-        raise HTTPException(422, {"message": "Provider connection test failed; configuration was not changed.", "check": check})
-    report(38, "诊断通过，正在保存当前状态")
+        detail = activation_error_message(
+            {
+                "message": "供应商连通性测试失败；配置未改动。",
+                "check": check,
+            }
+        )
+        audit("provider_switch_rejected", provider_id=provider_id, detail=detail)
+        raise HTTPException(422, {"message": "供应商连通性测试失败；配置未改动。", "check": check})
+    diagnostic_warnings = [
+        f"{item['name']}：{item['detail']}"
+        for item in diagnostic["checks"]
+        if item["status"] == "warning"
+    ]
+    report(38, "诊断完成，正在保存当前状态")
     # Keep the most recently observed config-level model with the provider
     # being left. Provider selection is stored separately from Codex's stable
     # per-session model-provider identity.
@@ -1528,7 +1544,10 @@ def switch_provider(
         audit("provider_switch_failed", provider_id=provider_id, detail=str(exc))
         raise HTTPException(502, "供应商配置未能完成应用；已恢复旧配置并尝试重新启动 Codex App Server。") from exc
     report(96, "正在确认新配置")
-    runtime = {"restarted": True, "detail": "Codex App Server 已重启，新的连接会读取当前供应商配置。"}
+    runtime_detail = "Codex App Server 已重启，新的连接会读取当前供应商配置。"
+    if diagnostic_warnings:
+        runtime_detail += " 诊断警告：" + "；".join(diagnostic_warnings)
+    runtime = {"restarted": True, "detail": runtime_detail}
     audit(
         "provider_switched",
         provider_id=provider_id,
@@ -1537,6 +1556,7 @@ def switch_provider(
         previous_provider_id=previous_provider_id,
         backfilled_provider_id=backfilled_provider_id,
         migration=migration,
+        diagnostic_warnings=diagnostic_warnings,
         app_server_restarted=True,
     )
     return {
@@ -1547,6 +1567,7 @@ def switch_provider(
         "backfilled_provider_id": backfilled_provider_id,
         "mode": mode,
         "migration": migration,
+        "diagnostic_warnings": diagnostic_warnings,
         "runtime": runtime,
     }
 
@@ -1649,7 +1670,19 @@ def activate_provider(provider_id: str, verify: bool = True) -> dict:
 
 def activation_error_message(detail: object) -> str:
     if isinstance(detail, dict):
-        return str(detail.get("message") or detail.get("detail") or "供应商切换失败")
+        message = str(detail.get("message") or detail.get("detail") or "供应商切换失败")
+        check = detail.get("check")
+        diagnostic = check.get("diagnostic") if isinstance(check, dict) else None
+        checks = diagnostic.get("checks") if isinstance(diagnostic, dict) else None
+        if isinstance(checks, list):
+            failed = [
+                f"{item.get('name', '检查')}：{item.get('detail', '失败')}"
+                for item in checks
+                if isinstance(item, dict) and item.get("status") == "fail"
+            ]
+            if failed:
+                return f"{message}\n" + "\n".join(failed)
+        return message
     return str(detail or "供应商切换失败")
 
 
@@ -2057,7 +2090,7 @@ document.head.insertAdjacentHTML('beforeend','<style>.detail-top .provider-back{
 const detailBack=document.querySelector('.detail-top .back');if(detailBack){detailBack.className='provider-back';detailBack.type='button';detailBack.title='返回供应商列表';detailBack.setAttribute('aria-label','返回供应商列表');detailBack.innerHTML='<span class="return-icon" aria-hidden="true">↩</span>'}
 document.body.insertAdjacentHTML('beforeend','<div id="doctor-mask" class="doctor-mask"><div class="doctor-card"><div class="row-between"><div class="doctor-title">Provider Doctor</div><button class="back" onclick="closeDoctor()">×</button></div><div id="doctor-summary" class="doctor-summary"></div><div class="doctor-progress"><i id="doctor-progress"></i></div><div id="doctor-checks"></div><div id="doctor-advice" class="doctor-advice"></div><p style="margin:16px 0 0"><button id="doctor-close" class="btn light" onclick="closeDoctor()">关闭</button></p></div></div>');
 document.body.insertAdjacentHTML('beforeend','<div id="panel-dialog-mask" role="dialog" aria-modal="true" aria-labelledby="panel-dialog-title"><div class="panel-dialog"><h3 id="panel-dialog-title"></h3><p id="panel-dialog-message"></p><div class="panel-dialog-actions"><button id="panel-dialog-cancel" class="btn light" type="button">取消</button><button id="panel-dialog-confirm" class="btn" type="button">确认</button></div></div></div>');
-document.head.insertAdjacentHTML('beforeend','<style>.switch-progress-mask{display:none;position:fixed;inset:0;z-index:1300;align-items:center;justify-content:center;padding:20px;background:#11182773}.switch-progress-mask.show{display:flex}.switch-progress-card{width:min(460px,100%);background:#fff;border:1px solid #dfe3e7;border-radius:10px;padding:22px;box-shadow:0 22px 60px #0003}.switch-progress-card h3{margin:0;font-size:18px}.switch-progress-stage{margin:12px 0 9px;color:#4d5560}.switch-progress-track{height:9px;overflow:hidden;border-radius:999px;background:#e8ebee}.switch-progress-fill{height:100%;width:0;border-radius:inherit;background:#1683ff;transition:width .22s}.switch-progress-meta{display:flex;justify-content:space-between;margin-top:8px;color:#707780;font-size:12px}.switch-progress-error{display:none;margin-top:14px;color:#b42318;line-height:1.5}.switch-progress-close{display:none;margin-top:18px;margin-left:auto}</style>');
+document.head.insertAdjacentHTML('beforeend','<style>.switch-progress-mask{display:none;position:fixed;inset:0;z-index:1300;align-items:center;justify-content:center;padding:20px;background:#11182773}.switch-progress-mask.show{display:flex}.switch-progress-card{width:min(460px,100%);background:#fff;border:1px solid #dfe3e7;border-radius:10px;padding:22px;box-shadow:0 22px 60px #0003}.switch-progress-card h3{margin:0;font-size:18px}.switch-progress-stage{margin:12px 0 9px;color:#4d5560}.switch-progress-track{height:9px;overflow:hidden;border-radius:999px;background:#e8ebee}.switch-progress-fill{height:100%;width:0;border-radius:inherit;background:#1683ff;transition:width .22s}.switch-progress-meta{display:flex;justify-content:space-between;margin-top:8px;color:#707780;font-size:12px}.switch-progress-error{display:none;margin-top:14px;color:#b42318;line-height:1.5;white-space:pre-line}.switch-progress-close{display:none;margin-top:18px;margin-left:auto}</style>');
 document.body.insertAdjacentHTML('beforeend','<div id="switch-progress-mask" class="switch-progress-mask" role="dialog" aria-modal="true" aria-labelledby="switch-progress-title"><section class="switch-progress-card"><h3 id="switch-progress-title">正在切换供应商</h3><div id="switch-progress-stage" class="switch-progress-stage">正在准备切换任务</div><div class="switch-progress-track"><div id="switch-progress-fill" class="switch-progress-fill"></div></div><div class="switch-progress-meta"><span id="switch-progress-percent">0%</span><span>请勿关闭此页面</span></div><div id="switch-progress-error" class="switch-progress-error"></div><button id="switch-progress-close" class="btn light switch-progress-close" type="button" onclick="closeSwitchProgress()">关闭</button></section></div>');
 const modelList=$('#model-list');const modelHead=modelList?.previousElementSibling,modelHelp=modelHead?.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;if(modelHead){modelHead.remove()}if(modelTitle){modelTitle.querySelector('button')?.remove()}if(modelList){modelList.classList.add('model-list-box');modelList.setAttribute('aria-readonly','true')}if(modelHelp)modelHelp.textContent='模型名称仅能通过“从上游获取”填入。';
 function setModelListVisibility(official){const list=$('#model-list');if(!list)return;const modelHelp=list.previousElementSibling,modelTitle=modelHelp?.previousElementSibling;[list,modelHelp,modelTitle].forEach(node=>{if(node)node.style.display=official?'none':''})}

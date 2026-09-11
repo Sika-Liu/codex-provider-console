@@ -14,11 +14,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from provider_domain import normalize_profile
-from relay_domain import chat_sse_to_responses_events, chat_to_response, responses_to_chat_request
+from relay_domain import chat_sse_to_responses_events, chat_to_response, resolve_active_profile, responses_to_chat_request
 
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 CONFIG_PATH = CODEX_HOME / "config.toml"
 PROFILE_PATH = CODEX_HOME / "control-panel-profiles.json"
+SETTINGS_PATH = CODEX_HOME / "control-panel-settings.json"
 app = FastAPI(title="Codex Provider Relay", docs_url=None, redoc_url=None)
 
 
@@ -34,7 +35,11 @@ def active_profile() -> dict[str, Any]:
         profiles = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(503, "The active provider configuration is unavailable") from exc
-    profile = profiles.get(config.get("model_provider")) if isinstance(profiles, dict) else None
+    try:
+        settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8")) if SETTINGS_PATH.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        settings = {}
+    profile = resolve_active_profile(profiles, config, settings)
     if not isinstance(profile, dict):
         raise HTTPException(503, "The active provider profile is unavailable")
     profile = normalize_profile(profile)
