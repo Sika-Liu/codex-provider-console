@@ -63,6 +63,10 @@ def normalize_profile(raw: Mapping[str, Any]) -> dict[str, Any]:
     profile.pop("model_windows", None)
     profile.pop("model_auto_compact", None)
     profile.pop("model_metadata", None)
+    # A previous UI revision kept a hidden `test_model` value which could
+    # silently override the model selected in the visible configuration field.
+    # The selected configuration model is now the sole diagnostic target.
+    profile.pop("test_model", None)
     profile.setdefault("provider_config_overrides", "")
 
     if mode == "official":

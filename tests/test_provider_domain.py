@@ -39,6 +39,11 @@ class ProviderDomainTests(unittest.TestCase):
         self.assertNotIn("model_auto_compact", profile)
         self.assertNotIn("model_metadata", profile)
 
+    def test_normalization_discards_legacy_hidden_test_model(self):
+        profile = normalize_profile({"id": "example", "name": "Example", "model": "gpt-5.5", "test_model": "codex-auto-review"})
+        self.assertEqual(profile["model"], "gpt-5.5")
+        self.assertNotIn("test_model", profile)
+
     def test_pure_api_requires_url_and_key_unless_no_auth(self):
         usable, reason = is_profile_usable({"id": "x", "name": "X", "mode": "pure_api"})
         self.assertFalse(usable)
