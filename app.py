@@ -63,6 +63,7 @@ SESSION_INDEX_PATH = CODEX_HOME / "session_index.jsonl"
 SESSION_PROVIDER_ID = "custom"
 ARCHIVED_SESSIONS_PATH = CODEX_HOME / "archived_sessions"
 APP_SERVER_LOCK = threading.Lock()
+PROVIDER_SWITCH_LOCK = threading.Lock()
 ACTIVATION_JOBS: dict[str, dict] = {}
 ACTIVATION_JOBS_LOCK = threading.Lock()
 MODEL_DIAGNOSTIC_JOBS: dict[str, dict] = {}
@@ -121,6 +122,14 @@ print(f"stopped={stopped}")
 HOST_APP_SERVER_START_SCRIPT = r'''
 import subprocess
 
+remote_control = subprocess.run(
+    ["codex", "app-server", "daemon", "enable-remote-control"],
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+)
+if remote_control.returncode != 0:
+    raise SystemExit(remote_control.stdout.strip() or "Failed to enable Codex App Server remote control")
 result = subprocess.run(["codex", "app-server", "daemon", "start"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 if result.returncode != 0:
     raise SystemExit(result.stdout.strip() or "Failed to start Codex App Server")
@@ -1486,7 +1495,7 @@ def deployment_key_status() -> tuple[bool, str]:
     return False, "部署密钥尚未写入 authorized_keys；可在此页重新部署。"
 
 
-def switch_provider(
+def _switch_provider(
     provider_id: str,
     verify: bool = True,
     model_override: str | None = None,
@@ -1672,6 +1681,32 @@ def switch_provider(
         "diagnostic_warnings": diagnostic_warnings,
         "runtime": runtime,
     }
+
+
+def switch_provider(
+    provider_id: str,
+    verify: bool = True,
+    model_override: str | None = None,
+    progress: Callable[[int, str], None] | None = None,
+) -> dict:
+    """Switch providers serially so auth/config snapshots cannot interleave.
+
+    A switch replaces the shared Codex config and auth files.  Serializing the
+    whole operation is required for multiple official-login profiles: two
+    concurrent switches could otherwise validate different snapshots and then
+    write the wrong account last.
+    """
+    if not PROVIDER_SWITCH_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "Another provider switch is already in progress")
+    try:
+        return _switch_provider(
+            provider_id,
+            verify=verify,
+            model_override=model_override,
+            progress=progress,
+        )
+    finally:
+        PROVIDER_SWITCH_LOCK.release()
 
 
 @app.get("/api/status")
