@@ -1107,6 +1107,45 @@ def docker_host_gateway() -> str:
     raise RuntimeError("无法确定 Docker 宿主机地址")
 
 
+def ssh_client_environment() -> dict[str, str]:
+    """Provide an NSS entry when this rootless container has only a numeric UID."""
+    environment = os.environ.copy()
+    uid, gid = os.getuid(), os.getgid()
+    try:
+        has_user = any(
+            line.split(":", 3)[2] == str(uid)
+            for line in Path("/etc/passwd").read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.count(":") >= 2
+        )
+    except OSError:
+        return environment
+    if has_user:
+        return environment
+    nss_wrapper = next(Path("/usr/lib").rglob("libnss_wrapper.so"), None)
+    if not nss_wrapper:
+        return environment
+    runtime_dir = Path(f"/tmp/codex-panel-nss-{uid}")
+    runtime_dir.mkdir(mode=0o700, exist_ok=True)
+    passwd_file, group_file = runtime_dir / "passwd", runtime_dir / "group"
+    passwd_file.write_text(
+        Path("/etc/passwd").read_text(encoding="utf-8", errors="replace")
+        + f"codex-panel:x:{uid}:{gid}:Codex Panel:{USER_HOME}:/usr/sbin/nologin\n",
+        encoding="utf-8",
+    )
+    group_file.write_text(
+        Path("/etc/group").read_text(encoding="utf-8", errors="replace")
+        + f"codex-panel:x:{gid}:\n",
+        encoding="utf-8",
+    )
+    os.chmod(passwd_file, 0o600)
+    os.chmod(group_file, 0o600)
+    preload = environment.get("LD_PRELOAD", "")
+    environment["LD_PRELOAD"] = f"{nss_wrapper}:{preload}" if preload else str(nss_wrapper)
+    environment["NSS_WRAPPER_PASSWD"] = str(passwd_file)
+    environment["NSS_WRAPPER_GROUP"] = str(group_file)
+    return environment
+
+
 def run_host_app_server_control(action: Literal["start", "stop"]) -> str:
     """Use the panel deployment key for one fixed host-side App Server action."""
     if not DEPLOYMENT_KEY_PATH.is_file():
@@ -1140,6 +1179,7 @@ def run_host_app_server_control(action: Literal["start", "stop"]) -> str:
             input=script,
             timeout=45,
             check=False,
+            env=ssh_client_environment(),
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("宿主机 Codex App Server 操作超时") from exc
@@ -1237,6 +1277,7 @@ def run_host_session_delete(thread_id: str) -> str:
             input=script,
             timeout=45,
             check=False,
+            env=ssh_client_environment(),
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("宿主机 Codex 删除会话超时") from exc
