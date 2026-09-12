@@ -50,6 +50,10 @@ PROFILE_PATH = CODEX_HOME / "control-panel-profiles.json"
 SETTINGS_PATH = CODEX_HOME / "control-panel-settings.json"
 AUTH_PATH = CODEX_HOME / "auth.json"
 RELAY_BASE_URL = os.environ.get("RELAY_BASE_URL", "http://codex-provider-relay:57321/v1")
+# The panel reaches the relay over Docker DNS, but the host-side Codex App
+# Server cannot resolve that container name. Generated Codex config must use
+# the host-published loopback endpoint instead.
+HOST_RELAY_BASE_URL = os.environ.get("HOST_RELAY_BASE_URL", "http://127.0.0.1:57321/v1")
 BACKUP_ROOT = CODEX_HOME / "backups" / "control-panel"
 AUDIT_PATH = CODEX_HOME / "control-panel-audit.jsonl"
 PROFILE_ID = re.compile(r"^[a-zA-Z0-9_-]{1,48}$")
@@ -1571,7 +1575,7 @@ def _switch_provider(
         # Codex always speaks Responses to the Docker-internal relay. The relay
         # owns the real upstream URL, key and Responses/Chat conversion.
         generated_provider.append('wire_api = "responses"')
-        generated_provider.append(f'base_url = {toml_quote(RELAY_BASE_URL)}')
+        generated_provider.append(f'base_url = {toml_quote(HOST_RELAY_BASE_URL)}')
         generated_provider.append('experimental_bearer_token = "codex-provider-console-relay"')
     provider_config = profile.get("config_contents", "").strip()
     # Older profile forms saved a full config.toml preview here. Reapplying

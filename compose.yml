@@ -12,6 +12,7 @@ services:
       - "${CODEX_USER_HOME_HOST:-./codex-user-home}:${CODEX_USER_HOME_CONTAINER_PATH:-/user-home}"
     environment:
       CODEX_HOME: /codex
+      HOST_RELAY_BASE_URL: "${HOST_RELAY_BASE_URL:-http://127.0.0.1:57321/v1}"
       PANEL_AUTH_ENABLED: "${PANEL_AUTH_ENABLED:-true}"
       PANEL_USERNAME: "${PANEL_USERNAME:-}"
       PANEL_PASSWORD: "${PANEL_PASSWORD:-}"
@@ -35,6 +36,8 @@ services:
       target: relay
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "127.0.0.1:${RELAY_PORT:-57321}:57321"
     volumes:
       - "${CODEX_HOME_HOST:-./codex-data}:/codex"
     environment:
