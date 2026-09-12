@@ -1157,14 +1157,10 @@ def host_codex_home_path() -> str:
         raise RuntimeError(f"{exc}，无法同步删除云端会话") from exc
 
 
-def run_host_session_delete(thread_id: str) -> str:
-    """Delete via the host App Server, not the container-local CLI cache."""
-    if not DEPLOYMENT_KEY_PATH.is_file():
-        raise RuntimeError("缺少面板部署密钥；请先在健康检查中部署密钥")
-    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", DEPLOY_USER):
-        raise RuntimeError("部署用户名无效，无法删除云端会话")
-    codex_home = host_codex_home_path()
-    script = f'''import os
+def host_session_delete_script(thread_id: str, codex_home: str) -> str:
+    """Build the small host-side script used for session deletion."""
+    return f'''import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -1203,9 +1199,18 @@ if result.returncode != 0 and not removed_index:
     raise SystemExit(result.stdout.strip() or "Codex delete failed")
 message = result.stdout.strip()
 if removed_index:
-    message = (message + "\n" if message else "") + "Removed stale session-index entry."
+    message = (message + "\\n" if message else "") + "Removed stale session-index entry."
 print(message)
 '''
+
+
+def run_host_session_delete(thread_id: str) -> str:
+    """Delete via the host App Server, not the container-local CLI cache."""
+    if not DEPLOYMENT_KEY_PATH.is_file():
+        raise RuntimeError("缺少面板部署密钥；请先在健康检查中部署密钥")
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", DEPLOY_USER):
+        raise RuntimeError("部署用户名无效，无法删除云端会话")
+    script = host_session_delete_script(thread_id, host_codex_home_path())
     gateway = docker_host_gateway()
     try:
         result = subprocess.run(
