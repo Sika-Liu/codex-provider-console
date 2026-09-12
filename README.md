@@ -107,6 +107,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-cons
 
 成功切换供应商后，页面右上角“应用配置”按钮才会变为可用。控制台不会终止 SSH 终端中手动运行的 Codex 对话或任务；点击该按钮会重置控制台自身的登录会话，并确认后续由控制台发起的 Codex 会话读取新配置。已在 SSH 终端中运行的 Codex 请在任务完成后自行退出并重新启动。
 
+会话管理删除远程会话时必须通过宿主机托管 App Server 执行 `codex delete --remote unix:// --force <会话 ID>`。这是同步删除的兼容边界：远程文件和索引被删除，同时连接中的 Codex Desktop 会收到 `thread/deleted`，只移除相同 ID 的远程缓存条目；不得退回为不带 `--remote` 的本地 CLI 删除或直接删除 JSONL 文件，否则桌面列表会残留。
+
 自定义 Codex 目录或端口：
 
 ```bash

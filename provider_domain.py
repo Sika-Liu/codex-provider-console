@@ -121,3 +121,14 @@ def resolve_host_codex_home(configured_path: object, user_home: object) -> str:
     if home.startswith("/"):
         return f"{home.rstrip('/')}/.codex"
     raise ValueError("未配置宿主机 Codex 数据目录")
+
+
+def remote_session_delete_args(thread_id: str) -> list[str]:
+    """Build the deletion arguments that must go through the managed daemon.
+
+    Using the daemon transport is intentional: it applies the deletion to the
+    remote thread owned by that App Server and broadcasts ``thread/deleted``
+    to connected Codex desktop clients. A plain local ``codex delete`` updates
+    storage but can leave the desktop's remote-thread cache visible.
+    """
+    return ["delete", "--remote", "unix://", "--force", thread_id]

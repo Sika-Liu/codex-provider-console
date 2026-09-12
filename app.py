@@ -21,7 +21,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from provider_domain import backfill_profile_model, is_profile_usable, normalize_profile, resolve_host_codex_home
+from provider_domain import (
+    backfill_profile_model,
+    is_profile_usable,
+    normalize_profile,
+    remote_session_delete_args,
+    resolve_host_codex_home,
+)
 
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
@@ -1199,6 +1205,7 @@ def host_codex_home_path() -> str:
 
 def host_session_delete_script(thread_id: str, codex_home: str) -> str:
     """Build the small host-side script used for session deletion."""
+    delete_args = remote_session_delete_args(thread_id)
     return f'''import json
 import os
 import subprocess
@@ -1216,7 +1223,10 @@ candidates = [
 binary = next((str(path) for path in candidates if path.is_file() and os.access(path, os.X_OK)), "codex")
 env = os.environ.copy()
 env["CODEX_HOME"] = codex_home
-result = subprocess.run([binary, "delete", "--force", session_id], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+# Route deletion through the running managed App Server. Besides removing the
+# remote rollout and index, this emits thread/deleted to connected desktop
+# clients so only the matching remote cache entry disappears.
+result = subprocess.run([binary, *{delete_args!r}], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 index_path = Path(codex_home) / "session_index.jsonl"
 removed_index = False
 if index_path.is_file():
@@ -2295,27 +2305,23 @@ def delete_server_session(thread_id: str) -> dict:
         raise HTTPException(422, "无效的会话标识")
     try:
         backup_id, _ = backup_state(include_sessions=True)
-        run_host_session_delete(normalized_id)
-        # The host App Server keeps the desktop session list in memory.  The
-        # CLI delete command updates the files/index, but does not notify an
-        # already-running App Server, leaving deleted sessions visible until
-        # it is restarted.  Reload it after the storage mutation so the
-        # desktop sidebar observes the same state as this panel.
-        run_host_app_server_control("stop")
+        # Ensure the daemon exists before asking the CLI to delete through its
+        # control socket. This protocol path is required for desktop sync.
         run_host_app_server_control("start")
+        run_host_session_delete(normalized_id)
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
 
     audit(
         "server_session_deleted",
         thread_id=normalized_id,
-        command="host codex delete --force",
+        command="host codex delete --remote unix:// --force",
         backup_id=backup_id,
     )
     return {
         "deleted": normalized_id,
         "backup_id": backup_id,
-        "detail": "会话已删除，并已重载宿主机 Codex App Server；桌面会话列表将同步更新。",
+        "detail": "远程会话已通过宿主机 Codex App Server 删除；桌面端对应的远程缓存将同步移除。",
     }
 
 
