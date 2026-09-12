@@ -1585,6 +1585,9 @@ def _switch_provider(
         # Codex always speaks Responses to the Docker-internal relay. The relay
         # owns the real upstream URL, key and Responses/Chat conversion.
         generated_provider.append('wire_api = "responses"')
+        # The relay exposes the HTTP Responses endpoint, not the separate
+        # Responses WebSocket protocol used by recent Codex versions.
+        generated_provider.append('supports_websockets = false')
         generated_provider.append(f'base_url = {toml_quote(HOST_RELAY_BASE_URL)}')
         generated_provider.append('experimental_bearer_token = "codex-provider-console-relay"')
     provider_config = profile.get("config_contents", "").strip()
