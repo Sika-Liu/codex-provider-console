@@ -2296,6 +2296,13 @@ def delete_server_session(thread_id: str) -> dict:
     try:
         backup_id, _ = backup_state(include_sessions=True)
         run_host_session_delete(normalized_id)
+        # The host App Server keeps the desktop session list in memory.  The
+        # CLI delete command updates the files/index, but does not notify an
+        # already-running App Server, leaving deleted sessions visible until
+        # it is restarted.  Reload it after the storage mutation so the
+        # desktop sidebar observes the same state as this panel.
+        run_host_app_server_control("stop")
+        run_host_app_server_control("start")
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
 
@@ -2308,7 +2315,7 @@ def delete_server_session(thread_id: str) -> dict:
     return {
         "deleted": normalized_id,
         "backup_id": backup_id,
-        "detail": "会话已由宿主机 Codex App Server 删除；远程列表会同步更新。",
+        "detail": "会话已删除，并已重载宿主机 Codex App Server；桌面会话列表将同步更新。",
     }
 
 
