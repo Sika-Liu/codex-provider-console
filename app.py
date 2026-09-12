@@ -61,6 +61,8 @@ ACTIVATION_JOBS: dict[str, dict] = {}
 ACTIVATION_JOBS_LOCK = threading.Lock()
 MODEL_DIAGNOSTIC_JOBS: dict[str, dict] = {}
 MODEL_DIAGNOSTIC_JOBS_LOCK = threading.Lock()
+PROVIDER_DIAGNOSTIC_JOBS: dict[str, dict] = {}
+PROVIDER_DIAGNOSTIC_JOBS_LOCK = threading.Lock()
 HOST_APP_SERVER_STOP_SCRIPT = r'''
 import os
 import shlex
@@ -865,7 +867,13 @@ def is_timeout_error(error: object) -> bool:
     return isinstance(error, TimeoutError) or "timed out" in str(error).lower()
 
 
-def test_model_request(profile: dict, test_model: str) -> dict:
+def test_model_request(
+    profile: dict,
+    test_model: str,
+    *,
+    timeout_seconds: int = MODEL_DIAGNOSTIC_TIMEOUT_SECONDS,
+    max_attempts: int = MODEL_DIAGNOSTIC_TIMEOUT_ATTEMPTS,
+) -> dict:
     base = profile["base_url"].rstrip("/")
     wire_api = profile.get("wire_api", "responses")
     suffix = "/chat/completions" if wire_api == "chat" else "/responses"
@@ -885,9 +893,9 @@ def test_model_request(profile: dict, test_model: str) -> dict:
         headers=headers,
         method="POST",
     )
-    for attempt in range(1, MODEL_DIAGNOSTIC_TIMEOUT_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
-            with urllib.request.urlopen(request, timeout=MODEL_DIAGNOSTIC_TIMEOUT_SECONDS) as response:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 body_text = response.read().decode("utf-8", errors="replace")
                 return {
                     "ok": 200 <= response.status < 300 and bool(body_text.strip()),
@@ -904,12 +912,12 @@ def test_model_request(profile: dict, test_model: str) -> dict:
             reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
             if not is_timeout_error(reason):
                 return {"ok": False, "endpoint": endpoint, "detail": str(reason), "attempts": attempt}
-            if attempt < MODEL_DIAGNOSTIC_TIMEOUT_ATTEMPTS:
+            if attempt < max_attempts:
                 continue
             return {
                 "ok": False,
                 "endpoint": endpoint,
-                "detail": f"上游在 {MODEL_DIAGNOSTIC_TIMEOUT_SECONDS} 秒内未返回响应（已尝试 {attempt} 次）；请确认该地址支持所选协议和测试模型。",
+                "detail": f"上游在 {timeout_seconds} 秒内未返回响应（已尝试 {attempt} 次）；请确认该地址支持所选协议和测试模型。",
                 "attempts": attempt,
             }
 
@@ -954,15 +962,20 @@ def fetch_upstream_models(request: UpstreamModelFetch) -> dict:
     raise HTTPException(422, "Unable to fetch upstream models. Check the Base URL, API Key, and model-list endpoint.")
 
 
-def diagnose_profile(profile: dict) -> dict:
+def diagnose_profile(profile: dict, progress: Callable[[int, str], None] | None = None) -> dict:
     profile = normalize_profile(profile)
     checks: list[dict[str, str]] = []
+
+    def report(percent: int, stage: str) -> None:
+        if progress:
+            progress(percent, stage)
 
     def add(name: str, status: str, detail: str) -> None:
         checks.append({"name": name, "status": status, "detail": detail})
 
     mode = profile["mode"]
     model = str(profile.get("model", "")).strip()
+    report(12, "正在检查配置完整性")
     if mode == "official":
         snapshot = profile.get("auth_contents", "")
         try:
@@ -980,6 +993,7 @@ def diagnose_profile(profile: dict) -> dict:
         add("上游协议", "pass" if protocol in {"responses", "chat"} else "fail", "Responses API" if protocol == "responses" else "Chat Completions" if protocol == "chat" else "协议无效")
         if base_url and (api_key or no_auth):
             try:
+                report(35, "正在获取上游模型列表")
                 upstream = fetch_upstream_models(UpstreamModelFetch(base_url=base_url, bearer_token=api_key))
                 names = upstream["models"]
                 add("模型目录", "pass" if names else "fail", f"{upstream['endpoint']} 返回 {len(names)} 个模型" if names else "上游没有返回可用模型")
@@ -987,7 +1001,8 @@ def diagnose_profile(profile: dict) -> dict:
                     add("配置模型可见性", "pass" if model in names else "warning", "模型在上游目录中可见" if model in names else "配置模型未出现在上游模型目录；仍可能可用")
                 if names:
                     test_model = model or names[0]
-                    real_request = test_model_request(profile, test_model)
+                    report(65, f"正在请求 {test_model}")
+                    real_request = test_model_request(profile, test_model, timeout_seconds=20, max_attempts=1)
                     retry_note = f'（第 {real_request.get("attempts", 1)} 次请求成功）' if real_request["ok"] and real_request.get("attempts", 1) > 1 else ""
                     detail = f'{real_request.get("endpoint", "请求")} 返回 HTTP {real_request.get("status", "")}：{real_request.get("body", "")}{retry_note}' if real_request["ok"] else f'测试「{test_model}」失败：{real_request.get("endpoint", "请求")} {real_request.get("detail", "请求失败")}'
                     # A successful model catalog proves that the endpoint and
@@ -1008,6 +1023,7 @@ def diagnose_profile(profile: dict) -> dict:
     real_request = next((item for item in checks if item["name"] == "真实请求"), None)
     passed = not failed and not warnings and bool(real_request and real_request["status"] == "pass")
     summary = "供应商基础诊断通过。" if passed else f"发现 {len(failed)} 项失败，Codex 可能无法使用该供应商。" if failed else f"基础连接可用，但有 {len(warnings)} 项需要确认。"
+    report(100, "供应商诊断完成")
     return {"ok": not failed, "passed": passed, "checks": checks, "summary": summary}
 
 
@@ -2034,6 +2050,63 @@ def diagnose_unsaved_provider(request: ProviderDiagnosticRequest) -> dict:
     return result
 
 
+def provider_diagnostic_snapshot(job_id: str) -> dict:
+    with PROVIDER_DIAGNOSTIC_JOBS_LOCK:
+        job = PROVIDER_DIAGNOSTIC_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "供应商诊断任务不存在或已过期")
+        snapshot = dict(job)
+    snapshot["elapsed_ms"] = round((time.monotonic() - snapshot["started_at"]) * 1000)
+    snapshot.pop("started_at", None)
+    return snapshot
+
+
+@app.post("/api/providers/diagnose-progress")
+def start_provider_diagnostic(request: ProviderDiagnosticRequest) -> dict:
+    job_id = uuid.uuid4().hex
+    with PROVIDER_DIAGNOSTIC_JOBS_LOCK:
+        PROVIDER_DIAGNOSTIC_JOBS[job_id] = {
+            "id": job_id,
+            "status": "running",
+            "progress": 2,
+            "stage": "正在准备供应商诊断",
+            "result": None,
+            "detail": "",
+            "started_at": time.monotonic(),
+        }
+
+    def report(percent: int, stage: str) -> None:
+        with PROVIDER_DIAGNOSTIC_JOBS_LOCK:
+            job = PROVIDER_DIAGNOSTIC_JOBS.get(job_id)
+            if job:
+                job.update(progress=percent, stage=stage)
+
+    def run() -> None:
+        try:
+            result = diagnose_profile(request.model_dump(), progress=report)
+        except Exception as exc:  # pragma: no cover - defensive background boundary
+            with PROVIDER_DIAGNOSTIC_JOBS_LOCK:
+                job = PROVIDER_DIAGNOSTIC_JOBS.get(job_id)
+                if job:
+                    job.update(status="failed", stage="供应商诊断失败", detail=str(exc))
+            return
+        with PROVIDER_DIAGNOSTIC_JOBS_LOCK:
+            job = PROVIDER_DIAGNOSTIC_JOBS.get(job_id)
+            if job:
+                job.update(status="completed", progress=100, stage="供应商诊断完成", result=result)
+        audit("provider_diagnosed", passed=result["ok"])
+
+    threading.Thread(target=run, name=f"provider-diagnostic-{job_id[:8]}", daemon=True).start()
+    return provider_diagnostic_snapshot(job_id)
+
+
+@app.get("/api/provider-diagnostics/{job_id}")
+def get_provider_diagnostic(job_id: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise HTTPException(422, "无效的供应商诊断任务标识")
+    return provider_diagnostic_snapshot(job_id)
+
+
 def model_diagnostic_snapshot(job_id: str) -> dict:
     with MODEL_DIAGNOSTIC_JOBS_LOCK:
         job = MODEL_DIAGNOSTIC_JOBS.get(job_id)
@@ -2264,6 +2337,9 @@ function renderModelDiagnostics(job){const panel=$('#model-diagnostic-panel'),bu
 function setFullModelDiagnosticsVisibility(official){const button=$('#diagnose-all-models-btn'),panel=$('#model-diagnostic-panel');if(button)button.style.display=official?'none':'';if(panel&&official)panel.classList.remove('show')}
 async function diagnoseAllModels(){if(modelDiagnosticPoll)return;try{const profile=gather(),models=profile.models||[];if(profile.auth_mode!=='apikey')throw Error('全面模型诊断仅适用于纯 API 供应商。');if(!models.length)throw Error('请先从上游获取模型列表。');const confirmed=await panelDialog({title:'全面诊断全部模型',message:`将对 ${models.length} 个模型逐个发送最小真实请求。该操作可能产生 API 费用并受上游速率限制影响，不会保存档案或切换供应商。`,confirmLabel:'开始诊断'});if(!confirmed)return;const started=await api('/api/providers/diagnose-models-progress',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(profile)});renderModelDiagnostics(started);const poll=async()=>{try{const job=await api(`/api/model-diagnostics/${encodeURIComponent(started.id)}`);renderModelDiagnostics(job);if(job.status==='running'){modelDiagnosticPoll=setTimeout(poll,450);return}modelDiagnosticPoll=null}catch(error){modelDiagnosticPoll=null;renderModelDiagnostics({status:'completed',stage:'模型诊断失败',total:0,completed:0,passed:0,failed:0,results:[{model:'诊断任务',status:'fail',detail:error.message}]})}};modelDiagnosticPoll=setTimeout(poll,120)}catch(error){modelDiagnosticPoll=null;note(error.message)}}
 const baseModelDiagnosticAuthModeChanged=authModeChanged;authModeChanged=function(){baseModelDiagnosticAuthModeChanged();setFullModelDiagnosticsVisibility($('#p-auth').value==='chatgpt')};setFullModelDiagnosticsVisibility($('#p-auth').value==='chatgpt');
+let providerDiagnosticPoll=null;
+function renderProviderDiagnosticJob(job){const elapsed=typeof job.elapsed_ms==='number'?`已耗时 ${(job.elapsed_ms/1000).toFixed(1)} 秒`:'';$('#doctor-mask').classList.add('show');$('#doctor-summary').textContent=`${job.stage||'正在诊断供应商'}${elapsed?'，'+elapsed:''}`;$('#doctor-progress').style.width=`${Math.max(2,Math.min(100,Number(job.progress)||2))}%`;const stages=['正在检查配置完整性','正在获取上游模型列表'];const current=job.stage||'';if(current.startsWith('正在请求 '))stages.push(current);else stages.push('正在发送真实请求');$('#doctor-checks').innerHTML=stages.map(stage=>`<div class="doctor-check ${stage===current?'running':''}"><b>${esc(stage.replace(/^正在/,'').replace(/上游模型列表/,'模型列表').replace(/发送真实请求/,'真实请求'))}</b><small>${esc(stage===current?(elapsed||'正在进行'):'等待该步骤')}</small></div>`).join('');$('#doctor-advice').textContent='';$('#doctor-close').style.display='none'}
+async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProviderDiagnosticJob({progress:2,stage:'正在准备供应商诊断',elapsed_ms:0});const started=await api('/api/providers/diagnose-progress',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(gather())});const poll=async()=>{try{const job=await api(`/api/provider-diagnostics/${encodeURIComponent(started.id)}`);if(job.status==='running'){renderProviderDiagnosticJob(job);providerDiagnosticPoll=setTimeout(poll,400);return}providerDiagnosticPoll=null;if(job.status==='completed')showDoctor(job.result);else{renderProviderDiagnosticJob({progress:100,stage:'供应商诊断失败',elapsed_ms:job.elapsed_ms||0});$('#doctor-checks').innerHTML=`<div class="doctor-check fail"><b>诊断错误</b><small>${esc(job.detail||'诊断任务失败')}</small></div>`;$('#doctor-close').style.display=''}}catch(error){providerDiagnosticPoll=null;renderProviderDiagnosticJob({progress:100,stage:'供应商诊断失败',elapsed_ms:0});$('#doctor-checks').innerHTML=`<div class="doctor-check fail"><b>诊断错误</b><small>${esc(error.message)}</small></div>`;$('#doctor-close').style.display=''}};providerDiagnosticPoll=setTimeout(poll,100)}catch(error){providerDiagnosticPoll=null;$('#doctor-summary').textContent='诊断请求未能启动。';$('#doctor-checks').innerHTML=`<div class="doctor-check fail"><b>诊断错误</b><small>${esc(error.message)}</small></div>`;$('#doctor-close').style.display='';$('#doctor-mask').classList.add('show')}}
 </script>'''
     navigation_script = r'''<script>
  document.head.insertAdjacentHTML('beforeend', `<style>
