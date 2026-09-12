@@ -82,6 +82,16 @@ import subprocess
 import time
 from pathlib import Path
 
+managed = subprocess.run(
+    ["codex", "app-server", "daemon", "stop"],
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+)
+if managed.returncode == 0:
+    print(managed.stdout.strip())
+    raise SystemExit(0)
+
 own_pid = os.getpid()
 stopped = 0
 for line in subprocess.check_output(["ps", "-eo", "pid,args"], text=True, errors="replace").splitlines()[1:]:
