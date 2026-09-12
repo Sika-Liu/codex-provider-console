@@ -1554,22 +1554,6 @@ def switch_provider(
         generated_provider.append('wire_api = "responses"')
         generated_provider.append(f'base_url = {toml_quote(RELAY_BASE_URL)}')
         generated_provider.append('experimental_bearer_token = "codex-provider-console-relay"')
-    # Keep a legacy alias for sessions created before provider switching used
-    # the stable ``custom`` identity.  Those sessions can still ask Codex to
-    # resolve their original provider name while their metadata is migrated.
-    legacy_provider = []
-    if SESSION_PROVIDER_ID != provider_id:
-        legacy_provider = [
-            f'[model_providers.{provider_id}]',
-            f'name = {toml_quote(provider_id)}',
-            f'requires_openai_auth = {str(auth_mode == "chatgpt").lower()}',
-        ]
-        if mode == "pure_api":
-            legacy_provider.extend([
-                'wire_api = "responses"',
-                f'base_url = {toml_quote(RELAY_BASE_URL)}',
-                'experimental_bearer_token = "codex-provider-console-relay"',
-            ])
     provider_config = profile.get("config_contents", "").strip()
     # Older profile forms saved a full config.toml preview here. Reapplying
     # that snapshot would overwrite fields the user later changed in the
@@ -1597,7 +1581,6 @@ def switch_provider(
                 "\n".join(generated_root),
                 merged_sections,
                 "\n".join(generated_provider),
-                "\n".join(legacy_provider),
             )
             if part
         )
