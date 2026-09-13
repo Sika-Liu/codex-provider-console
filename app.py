@@ -88,28 +88,25 @@ managed = subprocess.run(
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
 )
-if managed.returncode == 0:
-    print(managed.stdout.strip())
-    raise SystemExit(0)
-
 own_pid = os.getpid()
 stopped = 0
-for line in subprocess.check_output(["ps", "-eo", "pid,args"], text=True, errors="replace").splitlines()[1:]:
-    parts = line.strip().split(None, 1)
-    if len(parts) != 2:
-        continue
-    pid, command = int(parts[0]), parts[1]
-    try:
-        argv = shlex.split(command)
-    except ValueError:
-        continue
-    is_app_server = len(argv) >= 2 and Path(argv[0]).name == "codex" and "app-server" in argv and "proxy" not in argv
-    if pid != own_pid and is_app_server:
+if managed.returncode != 0:
+    for line in subprocess.check_output(["ps", "-eo", "pid,args"], text=True, errors="replace").splitlines()[1:]:
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid, command = int(parts[0]), parts[1]
         try:
-            os.kill(pid, signal.SIGTERM)
-            stopped += 1
-        except ProcessLookupError:
-            pass
+            argv = shlex.split(command)
+        except ValueError:
+            continue
+        is_app_server = len(argv) >= 2 and Path(argv[0]).name == "codex" and "app-server" in argv and "proxy" not in argv
+        if pid != own_pid and is_app_server:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                stopped += 1
+            except ProcessLookupError:
+                pass
 
 deadline = time.monotonic() + 10
 while time.monotonic() < deadline:
@@ -125,16 +122,25 @@ while time.monotonic() < deadline:
         break
     time.sleep(0.1)
 else:
-    raise SystemExit("Timed out waiting for Codex App Server to stop")
+    detail = managed.stdout.strip()
+    suffix = f": {detail}" if detail else ""
+    raise SystemExit(f"Timed out waiting for Codex App Server to stop{suffix}")
 
 try:
     (Path.home() / ".codex" / "app-server-control" / "app-server-control.sock").unlink()
 except FileNotFoundError:
     pass
-print(f"stopped={stopped}")
+detail = managed.stdout.strip()
+if detail:
+    print(detail)
+print(f"Codex App Server stopped and verified; fallback_terminated={stopped}")
 '''
 HOST_APP_SERVER_START_SCRIPT = r'''
+import json
+import stat
 import subprocess
+import time
+from pathlib import Path
 
 remote_control = subprocess.run(
     ["codex", "app-server", "daemon", "enable-remote-control"],
@@ -147,7 +153,40 @@ if remote_control.returncode != 0:
 result = subprocess.run(["codex", "app-server", "daemon", "start"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 if result.returncode != 0:
     raise SystemExit(result.stdout.strip() or "Failed to start Codex App Server")
-print(result.stdout.strip())
+
+deadline = time.monotonic() + 15
+last_probe = ""
+while time.monotonic() < deadline:
+    try:
+        probe = subprocess.run(
+            ["codex", "app-server", "daemon", "version"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=3,
+        )
+        last_probe = probe.stdout.strip()
+        if probe.returncode == 0:
+            payload = json.loads(last_probe)
+            socket_path = payload.get("socketPath")
+            socket_ready = False
+            if socket_path:
+                try:
+                    socket_ready = stat.S_ISSOCK(Path(socket_path).stat().st_mode)
+                except FileNotFoundError:
+                    pass
+            if payload.get("status") == "running" and socket_ready:
+                detail = result.stdout.strip()
+                if detail:
+                    print(detail)
+                print(f"Codex App Server ready: {socket_path}")
+                break
+    except (json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
+        last_probe = str(exc)
+    time.sleep(0.1)
+else:
+    suffix = f": {last_probe}" if last_probe else ""
+    raise SystemExit(f"Timed out waiting for Codex App Server readiness{suffix}")
 '''
 
 app = FastAPI(title="Codex Provider Console", docs_url=None, redoc_url=None)
