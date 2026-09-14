@@ -111,6 +111,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-cons
 
 会话管理提供两级删除：默认“移入回收站”会先保存目标会话文件和对应索引记录，再通过上述协议删除活动会话；回收站默认保留 7 天，可通过 `SESSION_TRASH_RETENTION_DAYS` 调整，服务启动时及之后每小时自动清理过期条目，也可在页面逐项删除或清空。恢复操作不会覆盖已存在的同 ID 会话。“永久删除”不会创建隐藏备份，也无法恢复；审计日志只记录会话 ID、时间、动作和结果，不保存会话正文或认证令牌。
 
+会话管理还会单独显示 `archived_sessions/` 中的归档会话。归档和取消归档分别通过宿主机托管 App Server 执行 `codex archive --remote unix:// <会话 ID>` 与 `codex unarchive --remote unix:// <会话 ID>`，确保 Codex Desktop 同步更新。归档会话也可以移入回收站或永久删除；禁止直接在服务器上搬移归档 JSONL 文件。
+
 自定义 Codex 目录或端口：
 
 ```bash

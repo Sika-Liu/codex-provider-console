@@ -27,7 +27,9 @@ from provider_domain import (
     backfill_profile_model,
     is_profile_usable,
     normalize_profile,
+    remote_session_archive_args,
     remote_session_delete_args,
+    remote_session_unarchive_args,
     resolve_host_codex_home,
 )
 from session_trash import create_entry, list_entries, remove_entry, restore_entry
@@ -685,6 +687,11 @@ def list_server_sessions() -> list[dict]:
         for thread_id, record in indexes.items()
     }
     rollout_ids: set[str] = set()
+    archived_ids = {
+        thread_id
+        for path in ARCHIVED_SESSIONS_PATH.rglob("*.jsonl") if ARCHIVED_SESSIONS_PATH.is_dir()
+        if (thread_id := session_id_from_path(path))
+    }
     for path in SESSIONS_PATH.rglob("*.jsonl") if SESSIONS_PATH.is_dir() else ():
         thread_id = session_id_from_path(path)
         if thread_id:
@@ -693,7 +700,7 @@ def list_server_sessions() -> list[dict]:
             session["kind"] = "rollout"
             sessions.append(session)
     for thread_id, record in indexes.items():
-        if thread_id in rollout_ids:
+        if thread_id in rollout_ids or thread_id in archived_ids:
             continue
         sessions.append(
             {
@@ -710,10 +717,25 @@ def list_server_sessions() -> list[dict]:
     return sorted(sessions, key=lambda item: item["modified_at"], reverse=True)
 
 
+def list_archived_server_sessions() -> list[dict]:
+    titles = session_index_titles()
+    sessions: list[dict] = []
+    for path in ARCHIVED_SESSIONS_PATH.rglob("*.jsonl") if ARCHIVED_SESSIONS_PATH.is_dir() else ():
+        thread_id = session_id_from_path(path)
+        if not thread_id:
+            continue
+        session = read_session_summary(path, titles.get(thread_id, ""))
+        session["kind"] = "archived"
+        sessions.append(session)
+    return sorted(sessions, key=lambda item: item["modified_at"], reverse=True)
+
+
 def session_rollout_paths(thread_id: str) -> list[Path]:
-    if not SESSIONS_PATH.is_dir():
-        return []
-    return [path for path in SESSIONS_PATH.rglob("*.jsonl") if session_id_from_path(path) == thread_id]
+    paths: list[Path] = []
+    for root in (SESSIONS_PATH, ARCHIVED_SESSIONS_PATH):
+        if root.is_dir():
+            paths.extend(path for path in root.rglob("*.jsonl") if session_id_from_path(path) == thread_id)
+    return paths
 
 
 def recycle_server_session(thread_id: str) -> dict:
@@ -1422,6 +1444,76 @@ def run_host_session_delete(thread_id: str) -> str:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "宿主机未提供失败原因").strip()
         raise RuntimeError(f"宿主机 Codex 无法删除会话：{detail[-400:]}")
+    return (result.stdout or result.stderr).strip()
+
+
+def host_session_archive_script(thread_id: str, codex_home: str, archived: bool) -> str:
+    """Build a host-side archive or unarchive command using the managed daemon."""
+    command_args = remote_session_archive_args(thread_id) if archived else remote_session_unarchive_args(thread_id)
+    return f'''import os
+import subprocess
+from pathlib import Path
+
+codex_home = {codex_home!r}
+home = Path.home()
+candidates = [
+    home / ".local" / "bin" / "codex",
+    home / ".codex" / "bin" / "codex",
+    home / ".codex" / "packages" / "standalone" / "current" / "bin" / "codex",
+    Path("/usr/local/bin/codex"),
+]
+binary = next((str(path) for path in candidates if path.is_file() and os.access(path, os.X_OK)), "codex")
+env = os.environ.copy()
+env["CODEX_HOME"] = codex_home
+result = subprocess.run([binary, *{command_args!r}], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+if result.returncode != 0:
+    raise SystemExit(result.stdout.strip() or "Codex archive operation failed")
+print(result.stdout.strip())
+'''
+
+
+def run_host_session_archive(thread_id: str, archived: bool) -> str:
+    """Archive or unarchive through the host App Server for desktop synchronization."""
+    if not DEPLOYMENT_KEY_PATH.is_file():
+        raise RuntimeError("缺少面板部署密钥；请先在健康检查中部署密钥")
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", DEPLOY_USER):
+        raise RuntimeError("部署用户名无效，无法修改云端会话归档状态")
+    script = host_session_archive_script(thread_id, host_codex_home_path(), archived)
+    gateway = docker_host_gateway()
+    try:
+        result = subprocess.run(
+            [
+                "ssh",
+                "-i",
+                str(DEPLOYMENT_KEY_PATH),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                f"UserKnownHostsFile={USER_HOME / '.ssh' / 'known_hosts'}",
+                "-o",
+                "LogLevel=ERROR",
+                f"{DEPLOY_USER}@{gateway}",
+                "python3",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            input=script,
+            timeout=45,
+            check=False,
+            env=ssh_client_environment(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        action = "归档" if archived else "取消归档"
+        raise RuntimeError(f"宿主机 Codex {action}会话超时") from exc
+    if result.returncode != 0:
+        action = "归档" if archived else "取消归档"
+        detail = (result.stderr or result.stdout or "宿主机未提供失败原因").strip()
+        raise RuntimeError(f"宿主机 Codex 无法{action}会话：{detail[-400:]}")
     return (result.stdout or result.stderr).strip()
 
 
@@ -2424,6 +2516,46 @@ def get_server_sessions() -> dict:
     return {"sessions": sessions, "count": len(sessions)}
 
 
+@app.get("/api/archived-sessions")
+def get_archived_server_sessions() -> dict:
+    sessions = list_archived_server_sessions()
+    return {"sessions": sessions, "count": len(sessions)}
+
+
+@app.post("/api/sessions/{thread_id}/archive")
+def archive_server_session(thread_id: str) -> dict:
+    normalized_id = thread_id.lower()
+    if not THREAD_ID.fullmatch(normalized_id):
+        raise HTTPException(422, "无效的会话标识")
+    try:
+        with SESSION_MUTATION_LOCK:
+            if not any(item["id"] == normalized_id for item in list_server_sessions()):
+                raise HTTPException(404, "活动会话不存在或已经归档")
+            run_host_app_server_control("start")
+            run_host_session_archive(normalized_id, True)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    audit("server_session_archived", thread_id=normalized_id, command="host codex archive --remote unix://")
+    return {"archived": normalized_id, "detail": "会话已归档，桌面端将同步更新。"}
+
+
+@app.post("/api/archived-sessions/{thread_id}/unarchive")
+def unarchive_server_session(thread_id: str) -> dict:
+    normalized_id = thread_id.lower()
+    if not THREAD_ID.fullmatch(normalized_id):
+        raise HTTPException(422, "无效的会话标识")
+    try:
+        with SESSION_MUTATION_LOCK:
+            if not any(item["id"] == normalized_id for item in list_archived_server_sessions()):
+                raise HTTPException(404, "归档会话不存在或已经取消归档")
+            run_host_app_server_control("start")
+            run_host_session_archive(normalized_id, False)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    audit("server_session_unarchived", thread_id=normalized_id, command="host codex unarchive --remote unix://")
+    return {"unarchived": normalized_id, "detail": "会话已取消归档，桌面端将同步更新。"}
+
+
 @app.post("/api/sessions/migrate")
 def migrate_server_sessions(request: SessionMigrationRequest) -> dict:
     if request.target_provider not in read_profiles():
@@ -2661,8 +2793,8 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
    const nav=document.querySelector('.console-nav');
    if(!nav)return;
    nav.insertAdjacentHTML('beforeend','<button data-section="sessions" onclick="openConsoleSection(&quot;sessions&quot;)">会话管理</button>');
-   document.body.insertAdjacentHTML('beforeend',`<section id="console-sessions" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>云端会话管理</h2><p class="panel-note">默认移入回收站并保留 7 天；永久删除不会创建备份且无法恢复。</p></div><button class="btn" type="button" id="session-refresh">刷新列表</button></div><div id="session-summary" class="console-health-summary">尚未读取服务器会话。</div><div id="session-list" class="session-list"></div><div class="row-between session-trash-heading"><div><h3>回收站</h3><p class="panel-note" id="session-trash-summary">正在读取回收站…</p></div><button class="btn small session-purge" type="button" id="session-trash-empty">清空回收站</button></div><div id="session-trash-list" class="session-list"></div></div></section>`);
-   document.head.insertAdjacentHTML('beforeend','<style>.session-list{margin-top:12px}.session-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;border:1px solid #dfe3e7;border-radius:7px;padding:12px;margin-top:8px}.session-title{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-meta{margin-top:5px;color:#6b7280;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.session-delete,.session-purge{background:#fff;color:#be3030;border:1px solid #e3b3b3}.session-trash-heading{margin-top:28px;padding-top:20px;border-top:1px solid #dfe3e7}.session-trash-heading h3{margin:0 0 4px}.session-empty{padding:24px 0;color:#6b7280;text-align:center}.session-modal-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:rgba(20,24,28,.48)}.session-modal{width:min(440px,100%);border:1px solid #dfe3e7;border-radius:8px;background:#fff;box-shadow:0 18px 48px rgba(0,0,0,.24);padding:22px}.session-modal-kicker{color:#be3030;font-size:12px;font-weight:700}.session-modal h3{margin:7px 0 9px;font-size:18px}.session-modal p{margin:0;color:#535a63;line-height:1.6}.session-modal-session{margin:14px 0;padding:10px 11px;border:1px solid #e0e3e7;border-radius:6px;background:#f7f8fa;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-modal-confirm{display:flex;align-items:flex-start;gap:9px;margin-top:16px;color:#30353b;line-height:1.45;cursor:pointer}.session-modal-confirm input{margin:3px 0 0;width:15px;height:15px}.session-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}.session-modal-danger{background:#bd3030}.session-modal-danger:disabled{background:#e3b3b3;cursor:not-allowed}@media(max-width:650px){.session-row{grid-template-columns:1fr}.session-actions{justify-content:flex-start}.session-modal{padding:18px}}</style>');
+   document.body.insertAdjacentHTML('beforeend',`<section id="console-sessions" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>云端会话管理</h2><p class="panel-note">活动会话可以归档或移入回收站；永久删除不会创建备份且无法恢复。</p></div><button class="btn" type="button" id="session-refresh">刷新列表</button></div><div id="session-summary" class="console-health-summary">尚未读取服务器会话。</div><div id="session-list" class="session-list"></div><div class="row-between session-section-heading"><div><h3>已归档会话</h3><p class="panel-note" id="archived-session-summary">正在读取归档会话…</p></div></div><div id="archived-session-list" class="session-list"></div><div class="row-between session-section-heading"><div><h3>回收站</h3><p class="panel-note" id="session-trash-summary">正在读取回收站…</p></div><button class="btn small session-purge" type="button" id="session-trash-empty">清空回收站</button></div><div id="session-trash-list" class="session-list"></div></div></section>`);
+   document.head.insertAdjacentHTML('beforeend','<style>.session-list{margin-top:12px}.session-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;border:1px solid #dfe3e7;border-radius:7px;padding:12px;margin-top:8px}.session-title{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-meta{margin-top:5px;color:#6b7280;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.session-delete,.session-purge{background:#fff;color:#be3030;border:1px solid #e3b3b3}.session-section-heading{margin-top:28px;padding-top:20px;border-top:1px solid #dfe3e7}.session-section-heading h3{margin:0 0 4px}.session-empty{padding:24px 0;color:#6b7280;text-align:center}.session-modal-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:rgba(20,24,28,.48)}.session-modal{width:min(440px,100%);border:1px solid #dfe3e7;border-radius:8px;background:#fff;box-shadow:0 18px 48px rgba(0,0,0,.24);padding:22px}.session-modal-kicker{color:#be3030;font-size:12px;font-weight:700}.session-modal h3{margin:7px 0 9px;font-size:18px}.session-modal p{margin:0;color:#535a63;line-height:1.6}.session-modal-session{margin:14px 0;padding:10px 11px;border:1px solid #e0e3e7;border-radius:6px;background:#f7f8fa;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-modal-confirm{display:flex;align-items:flex-start;gap:9px;margin-top:16px;color:#30353b;line-height:1.45;cursor:pointer}.session-modal-confirm input{margin:3px 0 0;width:15px;height:15px}.session-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}.session-modal-danger{background:#bd3030}.session-modal-danger:disabled{background:#e3b3b3;cursor:not-allowed}@media(max-width:650px){.session-row{grid-template-columns:1fr}.session-actions{justify-content:flex-start}.session-modal{padding:18px}}</style>');
    const baseOpen=window.openConsoleSection;
    window.openConsoleSection=function(section){baseOpen(section);if(section==='sessions')refreshSessionManagement()};
    document.querySelector('#session-refresh')?.addEventListener('click',refreshSessionManagement);
@@ -2671,12 +2803,15 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
  function sessionEscape(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
  function sessionTime(value){const time=new Date(value);return Number.isNaN(time.getTime())?value:time.toLocaleString('zh-CN',{hour12:false})}
  function sessionSize(size){if(size<1024)return size+' B';if(size<1024*1024)return (size/1024).toFixed(1)+' KB';return (size/1024/1024).toFixed(1)+' MB'}
- async function refreshSessionManagement(){await Promise.all([loadServerSessions(),loadSessionTrash()])}
- async function loadServerSessions(){const summary=document.querySelector('#session-summary'),list=document.querySelector('#session-list');if(!summary||!list)return;summary.textContent='正在读取当前服务器的 Codex 会话…';list.innerHTML='';try{const result=await api('/api/sessions');const sessions=result.sessions||[],orphans=sessions.filter(s=>s.kind==='orphaned_index').length;summary.textContent=sessions.length?`发现 ${sessions.length} 项服务器记录${orphans?`，其中 ${orphans} 项为无会话文件的孤立索引。`:''}`:'当前服务器没有可管理的 Codex 会话或索引。';list.innerHTML=sessions.length?sessions.map(session=>`<article class="session-row"><div><div class="session-title" title="${sessionEscape(session.title)}">${sessionEscape(session.title)}</div><div class="session-meta">${sessionEscape(session.id)} · ${session.kind==='orphaned_index'?'孤立索引':sessionTime(session.modified_at)+' · '+sessionSize(session.size)}</div>${session.provider_id?`<div class="session-meta">供应商：${sessionEscape(session.provider_id)}</div>`:''}${session.cwd?`<div class="session-meta" title="${sessionEscape(session.cwd)}">${sessionEscape(session.cwd)}</div>`:''}</div><div class="session-actions"><button class="btn small session-trash" type="button" data-thread-id="${sessionEscape(session.id)}">移入回收站</button><button class="btn small session-delete" type="button" data-thread-id="${sessionEscape(session.id)}">永久删除</button></div></article>`).join(''):'<div class="session-empty">没有找到会话文件或孤立索引。</div>';list.querySelectorAll('.session-trash').forEach(button=>button.addEventListener('click',()=>trashServerSession(button.dataset.threadId,button)));list.querySelectorAll('.session-delete').forEach(button=>button.addEventListener('click',()=>deleteServerSession(button.dataset.threadId,button)))}catch(error){summary.textContent='读取会话失败：'+error.message}}
+ async function refreshSessionManagement(){await Promise.all([loadServerSessions(),loadArchivedSessions(),loadSessionTrash()])}
+ async function loadServerSessions(){const summary=document.querySelector('#session-summary'),list=document.querySelector('#session-list');if(!summary||!list)return;summary.textContent='正在读取当前服务器的 Codex 会话…';list.innerHTML='';try{const result=await api('/api/sessions');const sessions=result.sessions||[],orphans=sessions.filter(s=>s.kind==='orphaned_index').length;summary.textContent=sessions.length?`发现 ${sessions.length} 项服务器记录${orphans?`，其中 ${orphans} 项为无会话文件的孤立索引。`:''}`:'当前服务器没有可管理的 Codex 会话或索引。';list.innerHTML=sessions.length?sessions.map(session=>`<article class="session-row"><div><div class="session-title" title="${sessionEscape(session.title)}">${sessionEscape(session.title)}</div><div class="session-meta">${sessionEscape(session.id)} · ${session.kind==='orphaned_index'?'孤立索引':sessionTime(session.modified_at)+' · '+sessionSize(session.size)}</div>${session.provider_id?`<div class="session-meta">供应商：${sessionEscape(session.provider_id)}</div>`:''}${session.cwd?`<div class="session-meta" title="${sessionEscape(session.cwd)}">${sessionEscape(session.cwd)}</div>`:''}</div><div class="session-actions">${session.kind==='orphaned_index'?'':`<button class="btn small session-archive" type="button" data-thread-id="${sessionEscape(session.id)}">归档</button>`}<button class="btn small session-trash" type="button" data-thread-id="${sessionEscape(session.id)}">移入回收站</button><button class="btn small session-delete" type="button" data-thread-id="${sessionEscape(session.id)}">永久删除</button></div></article>`).join(''):'<div class="session-empty">没有找到活动会话或孤立索引。</div>';list.querySelectorAll('.session-archive').forEach(button=>button.addEventListener('click',()=>archiveServerSession(button.dataset.threadId,button)));list.querySelectorAll('.session-trash').forEach(button=>button.addEventListener('click',()=>trashServerSession(button.dataset.threadId,button)));list.querySelectorAll('.session-delete').forEach(button=>button.addEventListener('click',()=>deleteServerSession(button.dataset.threadId,button)))}catch(error){summary.textContent='读取会话失败：'+error.message}}
+ async function loadArchivedSessions(){const summary=document.querySelector('#archived-session-summary'),list=document.querySelector('#archived-session-list');if(!summary||!list)return;try{const result=await api('/api/archived-sessions'),sessions=result.sessions||[];summary.textContent=sessions.length?`${sessions.length} 个归档会话。`:'暂无归档会话。';list.innerHTML=sessions.length?sessions.map(session=>`<article class="session-row"><div><div class="session-title" title="${sessionEscape(session.title)}">${sessionEscape(session.title)}</div><div class="session-meta">${sessionEscape(session.id)} · ${sessionTime(session.modified_at)} · ${sessionSize(session.size)}</div>${session.cwd?`<div class="session-meta" title="${sessionEscape(session.cwd)}">${sessionEscape(session.cwd)}</div>`:''}</div><div class="session-actions"><button class="btn small session-unarchive" type="button" data-thread-id="${sessionEscape(session.id)}">取消归档</button><button class="btn small session-trash" type="button" data-thread-id="${sessionEscape(session.id)}">移入回收站</button><button class="btn small session-delete" type="button" data-thread-id="${sessionEscape(session.id)}">永久删除</button></div></article>`).join(''):'<div class="session-empty">暂无归档会话。</div>';list.querySelectorAll('.session-unarchive').forEach(button=>button.addEventListener('click',()=>unarchiveServerSession(button.dataset.threadId,button)));list.querySelectorAll('.session-trash').forEach(button=>button.addEventListener('click',()=>trashServerSession(button.dataset.threadId,button)));list.querySelectorAll('.session-delete').forEach(button=>button.addEventListener('click',()=>deleteServerSession(button.dataset.threadId,button)))}catch(error){summary.textContent='读取归档会话失败：'+error.message}}
  async function loadSessionTrash(){const summary=document.querySelector('#session-trash-summary'),list=document.querySelector('#session-trash-list');if(!summary||!list)return;try{const result=await api('/api/session-trash'),entries=result.entries||[];summary.textContent=entries.length?`${entries.length} 个会话可恢复；条目将在 ${result.retention_days} 天后自动清理。`:'回收站为空。';list.innerHTML=entries.length?entries.map(entry=>`<article class="session-row"><div><div class="session-title">${sessionEscape(entry.index_record?.thread_name||entry.thread_id)}</div><div class="session-meta">${sessionEscape(entry.thread_id)} · 到期：${sessionTime(entry.expires_at)}</div></div><div class="session-actions"><button class="btn small session-restore" data-trash-id="${sessionEscape(entry.id)}">恢复</button><button class="btn small session-purge" data-trash-id="${sessionEscape(entry.id)}">永久删除</button></div></article>`).join(''):'<div class="session-empty">暂无可恢复会话。</div>';list.querySelectorAll('.session-restore').forEach(button=>button.addEventListener('click',()=>restoreSession(button.dataset.trashId,button)));list.querySelectorAll('.session-purge').forEach(button=>button.addEventListener('click',()=>purgeSession(button.dataset.trashId,button)))}catch(error){summary.textContent='读取回收站失败：'+error.message}}
  function confirmPermanentDeletion(threadId,title){return new Promise(resolve=>{const backdrop=document.createElement('div');backdrop.className='session-modal-backdrop';backdrop.innerHTML='<section class="session-modal" role="dialog" aria-modal="true" aria-labelledby="session-delete-title"><div class="session-modal-kicker">不可恢复的操作</div><h3 id="session-delete-title">永久删除云端会话</h3><p>会话记录及服务器索引会被彻底删除，不会创建备份。</p><div class="session-modal-session" title="'+sessionEscape(threadId)+'">'+sessionEscape(title||'未命名会话')+'<br>'+sessionEscape(threadId)+'</div><label class="session-modal-confirm"><input type="checkbox"><span>我理解此操作无法撤销，并确认永久删除。</span></label><div class="session-modal-actions"><button class="btn light" type="button" data-action="cancel">取消</button><button class="btn session-modal-danger" type="button" data-action="delete" disabled>永久删除</button></div></section>';const checkbox=backdrop.querySelector('input'),confirmButton=backdrop.querySelector('[data-action="delete"]'),onKey=event=>{if(event.key==='Escape')close(false)},close=value=>{document.removeEventListener('keydown',onKey);backdrop.remove();resolve(value)};checkbox.addEventListener('change',()=>confirmButton.disabled=!checkbox.checked);backdrop.querySelector('[data-action="cancel"]').addEventListener('click',()=>close(false));confirmButton.addEventListener('click',()=>close(true));backdrop.addEventListener('click',event=>{if(event.target===backdrop)close(false)});document.addEventListener('keydown',onKey);document.body.append(backdrop);backdrop.querySelector('[data-action="cancel"]').focus()})}
- async function trashServerSession(threadId,button){if(!threadId||!confirm('将此会话移入回收站？7 天内可以恢复。'))return;button.disabled=true;button.textContent='正在移动…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId)+'/trash',{method:'POST'});document.querySelector('#session-summary').textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='移入回收站';document.querySelector('#session-summary').textContent='操作失败：'+error.message}}
- async function deleteServerSession(threadId,button){if(!threadId)return;const title=button.closest('.session-row')?.querySelector('.session-title')?.textContent||'';if(!await confirmPermanentDeletion(threadId,title))return;button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId),{method:'DELETE'});document.querySelector('#session-summary').textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='永久删除';document.querySelector('#session-summary').textContent='删除失败：'+error.message}}
+ async function archiveServerSession(threadId,button){if(!threadId||!confirm('归档此会话？之后可在“已归档会话”中取消归档。'))return;button.disabled=true;button.textContent='正在归档…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId)+'/archive',{method:'POST'});document.querySelector('#session-summary').textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='归档';document.querySelector('#session-summary').textContent='归档失败：'+error.message}}
+ async function unarchiveServerSession(threadId,button){if(!threadId)return;button.disabled=true;button.textContent='正在取消…';try{const result=await api('/api/archived-sessions/'+encodeURIComponent(threadId)+'/unarchive',{method:'POST'});document.querySelector('#archived-session-summary').textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='取消归档';document.querySelector('#archived-session-summary').textContent='取消归档失败：'+error.message}}
+ async function trashServerSession(threadId,button){if(!threadId||!confirm('将此会话移入回收站？7 天内可以恢复。'))return;const summary=document.querySelector(button.closest('#archived-session-list')?'#archived-session-summary':'#session-summary');button.disabled=true;button.textContent='正在移动…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId)+'/trash',{method:'POST'});summary.textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='移入回收站';summary.textContent='操作失败：'+error.message}}
+ async function deleteServerSession(threadId,button){if(!threadId)return;const title=button.closest('.session-row')?.querySelector('.session-title')?.textContent||'',summary=document.querySelector(button.closest('#archived-session-list')?'#archived-session-summary':'#session-summary');if(!await confirmPermanentDeletion(threadId,title))return;button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId),{method:'DELETE'});summary.textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='永久删除';summary.textContent='删除失败：'+error.message}}
  async function restoreSession(trashId,button){button.disabled=true;button.textContent='正在恢复…';try{const result=await api('/api/session-trash/'+encodeURIComponent(trashId)+'/restore',{method:'POST'});document.querySelector('#session-trash-summary').textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='恢复';document.querySelector('#session-trash-summary').textContent='恢复失败：'+error.message}}
  async function purgeSession(trashId,button){if(!await confirmPermanentDeletion(trashId,'回收站会话副本'))return;button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/session-trash/'+encodeURIComponent(trashId),{method:'DELETE'});document.querySelector('#session-trash-summary').textContent=result.detail;await loadSessionTrash()}catch(error){button.disabled=false;button.textContent='永久删除';document.querySelector('#session-trash-summary').textContent='删除失败：'+error.message}}
  async function emptySessionTrash(){if(!await confirmPermanentDeletion('全部回收站条目','清空回收站'))return;const button=document.querySelector('#session-trash-empty');button.disabled=true;try{const result=await api('/api/session-trash',{method:'DELETE'});document.querySelector('#session-trash-summary').textContent=result.detail;await loadSessionTrash()}catch(error){document.querySelector('#session-trash-summary').textContent='清空失败：'+error.message}finally{button.disabled=false}}

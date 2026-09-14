@@ -132,3 +132,13 @@ def remote_session_delete_args(thread_id: str) -> list[str]:
     storage but can leave the desktop's remote-thread cache visible.
     """
     return ["delete", "--remote", "unix://", "--force", thread_id]
+
+
+def remote_session_archive_args(thread_id: str) -> list[str]:
+    """Build archive arguments that notify connected remote clients."""
+    return ["archive", "--remote", "unix://", thread_id]
+
+
+def remote_session_unarchive_args(thread_id: str) -> list[str]:
+    """Build unarchive arguments that notify connected remote clients."""
+    return ["unarchive", "--remote", "unix://", thread_id]

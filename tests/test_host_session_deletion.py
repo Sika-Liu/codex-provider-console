@@ -1,7 +1,12 @@
 import unittest
 from pathlib import Path
 
-from provider_domain import remote_session_delete_args, resolve_host_codex_home
+from provider_domain import (
+    remote_session_archive_args,
+    remote_session_delete_args,
+    remote_session_unarchive_args,
+    resolve_host_codex_home,
+)
 
 
 class HostSessionDeletionTests(unittest.TestCase):
@@ -22,6 +27,11 @@ class HostSessionDeletionTests(unittest.TestCase):
             ["delete", "--remote", "unix://", "--force", thread_id],
         )
 
+    def test_session_archiving_must_use_managed_app_server(self):
+        thread_id = "01a09344-939e-7382-9f00-7347bf6ccf37"
+        self.assertEqual(remote_session_archive_args(thread_id), ["archive", "--remote", "unix://", thread_id])
+        self.assertEqual(remote_session_unarchive_args(thread_id), ["unarchive", "--remote", "unix://", thread_id])
+
     def test_permanent_delete_does_not_create_a_hidden_backup(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
         endpoint = source.split('@app.delete("/api/sessions/{thread_id}")', 1)[1].split(
@@ -39,3 +49,7 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertIn('@app.delete("/api/session-trash")', source)
         self.assertIn("清空回收站", source)
         self.assertIn("reap_expired_session_trash", source)
+        self.assertIn("已归档会话", source)
+        self.assertIn('@app.get("/api/archived-sessions")', source)
+        self.assertIn('@app.post("/api/sessions/{thread_id}/archive")', source)
+        self.assertIn('@app.post("/api/archived-sessions/{thread_id}/unarchive")', source)
