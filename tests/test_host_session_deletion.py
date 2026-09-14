@@ -35,21 +35,19 @@ class HostSessionDeletionTests(unittest.TestCase):
     def test_permanent_delete_does_not_create_a_hidden_backup(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
         endpoint = source.split('@app.delete("/api/sessions/{thread_id}")', 1)[1].split(
-            '@app.post("/api/sessions/{thread_id}/trash")', 1
+            '@app.get("/api/backups")', 1
         )[0]
         self.assertNotIn("backup_state", endpoint)
         self.assertIn('"recoverable": False', endpoint)
 
-    def test_session_page_exposes_both_delete_modes_and_restore(self):
+    def test_session_page_exposes_archive_and_permanent_delete_only(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
-        self.assertIn("移入回收站", source)
         self.assertIn("永久删除不会创建备份", source)
-        self.assertIn("session-restore", source)
-        self.assertIn('@app.post("/api/session-trash/{trash_id}/restore")', source)
-        self.assertIn('@app.delete("/api/session-trash")', source)
-        self.assertIn("清空回收站", source)
-        self.assertIn("reap_expired_session_trash", source)
         self.assertIn("已归档会话", source)
         self.assertIn('@app.get("/api/archived-sessions")', source)
         self.assertIn('@app.post("/api/sessions/{thread_id}/archive")', source)
         self.assertIn('@app.post("/api/archived-sessions/{thread_id}/unarchive")', source)
+        self.assertIn('@app.delete("/api/sessions/{thread_id}")', source)
+        self.assertNotIn("回收站", source)
+        self.assertNotIn("/api/session-trash", source)
+        self.assertNotIn('/trash"', source)
