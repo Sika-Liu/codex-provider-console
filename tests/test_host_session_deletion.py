@@ -51,3 +51,9 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertNotIn("回收站", source)
         self.assertNotIn("/api/session-trash", source)
         self.assertNotIn('/trash"', source)
+
+    def test_session_lists_require_app_server_registration(self):
+        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        self.assertIn("SELECT id, archived FROM threads", source)
+        self.assertIn("thread_states.get(thread_id) is False", source)
+        self.assertIn("thread_states.get(thread_id) is not True", source)

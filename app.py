@@ -604,6 +604,33 @@ def session_index_records() -> dict[str, dict]:
     return records
 
 
+def app_server_thread_states() -> dict[str, bool] | None:
+    """Return App Server thread registration state, or None when unavailable."""
+    candidates: list[tuple[int, Path]] = []
+    for path in CODEX_HOME.glob("state_*.sqlite"):
+        match = re.fullmatch(r"state_(\d+)\.sqlite", path.name)
+        if match:
+            candidates.append((int(match.group(1)), path))
+    for _, path in sorted(candidates, reverse=True):
+        try:
+            uri = f"file:{path.resolve().as_posix()}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as connection:
+                columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(threads)")
+                }
+                if not {"id", "archived"}.issubset(columns):
+                    continue
+                return {
+                    str(thread_id).lower(): bool(archived)
+                    for thread_id, archived in connection.execute("SELECT id, archived FROM threads")
+                    if THREAD_ID.fullmatch(str(thread_id).lower())
+                }
+        except (OSError, sqlite3.Error):
+            continue
+    return None
+
+
 def read_session_summary(path: Path, indexed_title: str = "") -> dict:
     """Read only the opening JSONL records; session files can be very large."""
     title = ""
@@ -646,6 +673,7 @@ def read_session_summary(path: Path, indexed_title: str = "") -> dict:
 
 def list_server_sessions() -> list[dict]:
     sessions: list[dict] = []
+    thread_states = app_server_thread_states()
     indexes = session_index_records()
     titles = {
         thread_id: str(record.get("thread_name") or "").strip().replace("\n", " ")[:180]
@@ -659,12 +687,14 @@ def list_server_sessions() -> list[dict]:
     }
     for path in SESSIONS_PATH.rglob("*.jsonl") if SESSIONS_PATH.is_dir() else ():
         thread_id = session_id_from_path(path)
-        if thread_id:
+        if thread_id and (thread_states is None or thread_states.get(thread_id) is False):
             rollout_ids.add(thread_id)
             session = read_session_summary(path, titles.get(thread_id, ""))
             session["kind"] = "rollout"
             sessions.append(session)
     for thread_id, record in indexes.items():
+        if thread_states is not None and thread_states.get(thread_id) is not False:
+            continue
         if thread_id in rollout_ids or thread_id in archived_ids:
             continue
         sessions.append(
@@ -684,10 +714,11 @@ def list_server_sessions() -> list[dict]:
 
 def list_archived_server_sessions() -> list[dict]:
     titles = session_index_titles()
+    thread_states = app_server_thread_states()
     sessions: list[dict] = []
     for path in ARCHIVED_SESSIONS_PATH.rglob("*.jsonl") if ARCHIVED_SESSIONS_PATH.is_dir() else ():
         thread_id = session_id_from_path(path)
-        if not thread_id:
+        if not thread_id or (thread_states is not None and thread_states.get(thread_id) is not True):
             continue
         session = read_session_summary(path, titles.get(thread_id, ""))
         session["kind"] = "archived"

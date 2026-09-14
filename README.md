@@ -109,7 +109,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-cons
 
 会话管理删除远程会话时必须通过宿主机托管 App Server 执行 `codex delete --remote unix:// --force <会话 ID>`。这是同步删除的兼容边界：远程文件和索引被删除，同时连接中的 Codex Desktop 会收到 `thread/deleted`，只移除相同 ID 的远程缓存条目；不得退回为不带 `--remote` 的本地 CLI 删除或直接删除 JSONL 文件，否则桌面列表会残留。
 
-会话管理会单独显示 `archived_sessions/` 中的归档会话。归档和取消归档分别通过宿主机托管 App Server 执行 `codex archive --remote unix:// <会话 ID>` 与 `codex unarchive --remote unix:// <会话 ID>`，确保 Codex Desktop 同步更新。活动会话和归档会话均可永久删除；永久删除不会创建隐藏备份且无法恢复。禁止直接在服务器上搬移或删除会话 JSONL 文件。
+会话管理会将 App Server 的 `threads` 目录作为会话是否有效及是否归档的权威状态，只显示已正式注册的会话；服务器上未注册的残留 JSONL 或索引不会显示。归档和取消归档分别通过宿主机托管 App Server 执行 `codex archive --remote unix:// <会话 ID>` 与 `codex unarchive --remote unix:// <会话 ID>`，确保 Codex Desktop 同步更新。活动会话和归档会话均可永久删除；永久删除不会创建隐藏备份且无法恢复。禁止直接在服务器上搬移或删除会话 JSONL 文件。
 
 自定义 Codex 目录或端口：
 
