@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -13,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal
@@ -194,7 +196,35 @@ else:
     raise SystemExit(f"Timed out waiting for Codex App Server readiness{suffix}")
 '''
 
-app = FastAPI(title="Codex Provider Console", docs_url=None, redoc_url=None)
+async def reap_expired_session_trash() -> None:
+    while True:
+        await asyncio.sleep(60 * 60)
+        try:
+            with SESSION_MUTATION_LOCK:
+                list_entries(SESSION_TRASH_ROOT)
+        except OSError:
+            # A transient mount error must not stop the control panel. The next
+            # hourly pass, or a recycle-bin read, will retry expiration cleanup.
+            pass
+
+
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    try:
+        with SESSION_MUTATION_LOCK:
+            list_entries(SESSION_TRASH_ROOT)
+    except OSError:
+        pass
+    reaper = asyncio.create_task(reap_expired_session_trash())
+    try:
+        yield
+    finally:
+        reaper.cancel()
+        with suppress(asyncio.CancelledError):
+            await reaper
+
+
+app = FastAPI(title="Codex Provider Console", docs_url=None, redoc_url=None, lifespan=app_lifespan)
 
 AUTH_ENABLED = os.environ.get("PANEL_AUTH_ENABLED", "true").lower() not in {"0", "false", "no"}
 PANEL_USERNAME = os.environ.get("PANEL_USERNAME", "")
@@ -2488,6 +2518,16 @@ def get_session_trash() -> dict:
     return {"entries": entries, "count": len(entries), "retention_days": SESSION_TRASH_RETENTION_DAYS}
 
 
+@app.delete("/api/session-trash")
+def empty_session_trash() -> dict:
+    with SESSION_MUTATION_LOCK:
+        entries = list_entries(SESSION_TRASH_ROOT, purge_expired=False)
+        for entry in entries:
+            remove_entry(SESSION_TRASH_ROOT, entry["id"])
+    audit("session_trash_emptied", deleted_count=str(len(entries)), recoverable=False)
+    return {"deleted_count": len(entries), "recoverable": False, "detail": "回收站已清空。"}
+
+
 @app.post("/api/session-trash/{trash_id}/restore")
 def restore_trashed_session(trash_id: str) -> dict:
     try:
@@ -2621,11 +2661,12 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
    const nav=document.querySelector('.console-nav');
    if(!nav)return;
    nav.insertAdjacentHTML('beforeend','<button data-section="sessions" onclick="openConsoleSection(&quot;sessions&quot;)">会话管理</button>');
-   document.body.insertAdjacentHTML('beforeend',`<section id="console-sessions" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>云端会话管理</h2><p class="panel-note">默认移入回收站并保留 7 天；永久删除不会创建备份且无法恢复。</p></div><button class="btn" type="button" id="session-refresh">刷新列表</button></div><div id="session-summary" class="console-health-summary">尚未读取服务器会话。</div><div id="session-list" class="session-list"></div><div class="row-between session-trash-heading"><div><h3>回收站</h3><p class="panel-note" id="session-trash-summary">正在读取回收站…</p></div></div><div id="session-trash-list" class="session-list"></div></div></section>`);
+   document.body.insertAdjacentHTML('beforeend',`<section id="console-sessions" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>云端会话管理</h2><p class="panel-note">默认移入回收站并保留 7 天；永久删除不会创建备份且无法恢复。</p></div><button class="btn" type="button" id="session-refresh">刷新列表</button></div><div id="session-summary" class="console-health-summary">尚未读取服务器会话。</div><div id="session-list" class="session-list"></div><div class="row-between session-trash-heading"><div><h3>回收站</h3><p class="panel-note" id="session-trash-summary">正在读取回收站…</p></div><button class="btn small session-purge" type="button" id="session-trash-empty">清空回收站</button></div><div id="session-trash-list" class="session-list"></div></div></section>`);
    document.head.insertAdjacentHTML('beforeend','<style>.session-list{margin-top:12px}.session-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;border:1px solid #dfe3e7;border-radius:7px;padding:12px;margin-top:8px}.session-title{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-meta{margin-top:5px;color:#6b7280;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.session-delete,.session-purge{background:#fff;color:#be3030;border:1px solid #e3b3b3}.session-trash-heading{margin-top:28px;padding-top:20px;border-top:1px solid #dfe3e7}.session-trash-heading h3{margin:0 0 4px}.session-empty{padding:24px 0;color:#6b7280;text-align:center}.session-modal-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:rgba(20,24,28,.48)}.session-modal{width:min(440px,100%);border:1px solid #dfe3e7;border-radius:8px;background:#fff;box-shadow:0 18px 48px rgba(0,0,0,.24);padding:22px}.session-modal-kicker{color:#be3030;font-size:12px;font-weight:700}.session-modal h3{margin:7px 0 9px;font-size:18px}.session-modal p{margin:0;color:#535a63;line-height:1.6}.session-modal-session{margin:14px 0;padding:10px 11px;border:1px solid #e0e3e7;border-radius:6px;background:#f7f8fa;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-modal-confirm{display:flex;align-items:flex-start;gap:9px;margin-top:16px;color:#30353b;line-height:1.45;cursor:pointer}.session-modal-confirm input{margin:3px 0 0;width:15px;height:15px}.session-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}.session-modal-danger{background:#bd3030}.session-modal-danger:disabled{background:#e3b3b3;cursor:not-allowed}@media(max-width:650px){.session-row{grid-template-columns:1fr}.session-actions{justify-content:flex-start}.session-modal{padding:18px}}</style>');
    const baseOpen=window.openConsoleSection;
    window.openConsoleSection=function(section){baseOpen(section);if(section==='sessions')refreshSessionManagement()};
    document.querySelector('#session-refresh')?.addEventListener('click',refreshSessionManagement);
+   document.querySelector('#session-trash-empty')?.addEventListener('click',emptySessionTrash);
  })();
  function sessionEscape(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
  function sessionTime(value){const time=new Date(value);return Number.isNaN(time.getTime())?value:time.toLocaleString('zh-CN',{hour12:false})}
@@ -2638,6 +2679,7 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
  async function deleteServerSession(threadId,button){if(!threadId)return;const title=button.closest('.session-row')?.querySelector('.session-title')?.textContent||'';if(!await confirmPermanentDeletion(threadId,title))return;button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId),{method:'DELETE'});document.querySelector('#session-summary').textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='永久删除';document.querySelector('#session-summary').textContent='删除失败：'+error.message}}
  async function restoreSession(trashId,button){button.disabled=true;button.textContent='正在恢复…';try{const result=await api('/api/session-trash/'+encodeURIComponent(trashId)+'/restore',{method:'POST'});document.querySelector('#session-trash-summary').textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='恢复';document.querySelector('#session-trash-summary').textContent='恢复失败：'+error.message}}
  async function purgeSession(trashId,button){if(!await confirmPermanentDeletion(trashId,'回收站会话副本'))return;button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/session-trash/'+encodeURIComponent(trashId),{method:'DELETE'});document.querySelector('#session-trash-summary').textContent=result.detail;await loadSessionTrash()}catch(error){button.disabled=false;button.textContent='永久删除';document.querySelector('#session-trash-summary').textContent='删除失败：'+error.message}}
+ async function emptySessionTrash(){if(!await confirmPermanentDeletion('全部回收站条目','清空回收站'))return;const button=document.querySelector('#session-trash-empty');button.disabled=true;try{const result=await api('/api/session-trash',{method:'DELETE'});document.querySelector('#session-trash-summary').textContent=result.detail;await loadSessionTrash()}catch(error){document.querySelector('#session-trash-summary').textContent='清空失败：'+error.message}finally{button.disabled=false}}
  </script>'''
     return (
         NEW_HTML.replace(old_panel, official_panel)

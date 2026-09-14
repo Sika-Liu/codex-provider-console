@@ -36,3 +36,6 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertIn("永久删除不会创建备份", source)
         self.assertIn("session-restore", source)
         self.assertIn('@app.post("/api/session-trash/{trash_id}/restore")', source)
+        self.assertIn('@app.delete("/api/session-trash")', source)
+        self.assertIn("清空回收站", source)
+        self.assertIn("reap_expired_session_trash", source)
