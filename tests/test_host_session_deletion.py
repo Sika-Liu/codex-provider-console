@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from provider_domain import remote_session_delete_args, resolve_host_codex_home
 
@@ -20,3 +21,18 @@ class HostSessionDeletionTests(unittest.TestCase):
             remote_session_delete_args(thread_id),
             ["delete", "--remote", "unix://", "--force", thread_id],
         )
+
+    def test_permanent_delete_does_not_create_a_hidden_backup(self):
+        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        endpoint = source.split('@app.delete("/api/sessions/{thread_id}")', 1)[1].split(
+            '@app.post("/api/sessions/{thread_id}/trash")', 1
+        )[0]
+        self.assertNotIn("backup_state", endpoint)
+        self.assertIn('"recoverable": False', endpoint)
+
+    def test_session_page_exposes_both_delete_modes_and_restore(self):
+        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        self.assertIn("移入回收站", source)
+        self.assertIn("永久删除不会创建备份", source)
+        self.assertIn("session-restore", source)
+        self.assertIn('@app.post("/api/session-trash/{trash_id}/restore")', source)
