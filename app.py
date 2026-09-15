@@ -1578,13 +1578,6 @@ def migrate_session_provider(
     return {"threads": database_changes, "rollout_files": rollout_files, "rollout_records": rollout_records}
 
 
-def restart_codex_app_server() -> dict[str, str]:
-    with APP_SERVER_LOCK:
-        run_host_app_server_control("stop")
-        run_host_app_server_control("start")
-    return {"detail": "Codex App Server 已重启，新的连接会读取当前供应商配置。"}
-
-
 def health_check() -> dict:
     checks: list[dict[str, str]] = []
 
@@ -2314,23 +2307,6 @@ def cancel_official_login() -> dict:
         return DEVICE_LOGIN.public_status()
 
 
-@app.post("/api/runtime/restart")
-def restart_managed_codex_runtime() -> dict:
-    """Restart the managed Codex App Server through its fixed daemon control."""
-    global DEVICE_LOGIN
-    with DEVICE_LOGIN_LOCK:
-        if DEVICE_LOGIN:
-            DEVICE_LOGIN.cancel()
-            DEVICE_LOGIN = None
-    try:
-        runtime = restart_codex_app_server()
-    except RuntimeError as exc:
-        audit("managed_codex_runtime_restart_failed", detail=str(exc))
-        raise HTTPException(502, str(exc)) from exc
-    audit("managed_codex_runtime_restarted")
-    return {"restarted": True, **runtime}
-
-
 @app.post("/api/providers/{provider_id}/test")
 def test_saved_provider(provider_id: str) -> dict:
     profile = read_profiles().get(provider_id)
@@ -2655,8 +2631,6 @@ function closeSwitchProgress(){if(activationPoll)return;$('#switch-progress-mask
 async function activateWithProgress(id,where='list-notice'){if(activationPoll)return;const mask=$('#switch-progress-mask');mask.classList.add('show');renderSwitchProgress({progress:2,stage:'正在准备切换任务',status:'running'});try{const started=await api(`/api/providers/${encodeURIComponent(id)}/activate-progress`,{method:'POST'});const poll=async()=>{try{const job=await api(`/api/provider-activations/${encodeURIComponent(started.id)}`);renderSwitchProgress(job);if(job.status==='running'){activationPoll=setTimeout(poll,450);return}activationPoll=null;if(job.status==='completed'){state.active=id;note(`已使用 ${id}，备份编号：${job.result?.backup_id||'未知'}。${job.detail||''}`,where);await refreshAll();setTimeout(()=>$('#switch-progress-mask').classList.remove('show'),500)}else note(job.detail||'供应商切换失败。',where)}catch(e){activationPoll=null;renderSwitchProgress({status:'failed',stage:'切换未完成',detail:e.message})}};activationPoll=setTimeout(poll,120)}catch(e){activationPoll=null;renderSwitchProgress({status:'failed',stage:'切换未开始',detail:e.message})}}
 async function activateFromList(id){await activateWithProgress(id,'list-notice')}
 function newProvider(){state.current={id:'',name:'',base_url:'',model:'',mode:'official',protocol:'responses',wire_api:'responses',auth_mode:'chatgpt',models:[],goals_enabled:false,goals_configured:false};openDetail()}
-function setManagedRestartAvailable(available){const button=$('#managed-restart-btn');if(!button)return;button.disabled=!available;button.title=available?'重启面板托管的 Codex 服务并读取当前配置':'请先成功切换供应商'}
-async function restartManagedCodex(){const button=$('#managed-restart-btn');if(!button||button.disabled)return;try{button.disabled=true;button.textContent='正在重启…';const result=await api('/api/runtime/restart',{method:'POST'});note(result.detail,'list-notice');}catch(e){note(e.message,'list-notice');button.disabled=false;}finally{button.textContent='重启 Codex';button.title='请先成功切换供应商'}}
 const migrationTarget=$('#migration-target');if(migrationTarget){const migrationPanel=migrationTarget.parentElement;const migrationSection=migrationPanel?.parentElement;migrationPanel?.remove();if(migrationSection)migrationSection.style.gridTemplateColumns='1fr'}
 const commonConfig=$('#common-config');if(commonConfig){const commonPanel=commonConfig.parentElement;const commonSection=commonPanel?.parentElement;commonPanel?.remove();if(commonSection)commonSection.style.gridTemplateColumns='1fr'}
 const routeModel=$('#route-model');if(routeModel){const routeRow=routeModel.parentElement;const routeHelp=routeRow?.previousElementSibling;const routeTitle=routeHelp?.previousElementSibling;routeRow?.remove();routeHelp?.remove();routeTitle?.remove()}
@@ -2744,7 +2718,7 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
     return (
         NEW_HTML.replace(old_panel, official_panel)
         .replace('<button class="btn outline" onclick="loadCommon()">通用配置</button>', "")
-        .replace('<button class="btn" onclick="restartHint()">重启 Codex</button>', '<button id="managed-restart-btn" class="btn" onclick="restartManagedCodex()" title="重启服务器上的 Codex App Server">重启 Codex</button>')
+        .replace('<button class="btn" onclick="restartHint()">重启 Codex</button>', '')
         .replace('<button class="btn light" onclick="loadCommon()">提取通用配置</button>', "")
         .replace('<button class="btn light" onclick="newProvider(\'apikey\')">＋ 添加供应商</button><button class="btn light" onclick="newProvider(\'chatgpt\')">＋ 添加官方登录供应商</button>', '<button class="btn light" onclick="newProvider()">＋ 添加供应商</button>')
         .replace('每行一个模型；上下文窗口和图片处理方式将一并保存到供应商档案。', '每行一个模型名称；可手动输入，或从上游获取后自动填入。')
@@ -2795,8 +2769,6 @@ function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLower
 function updatePreview(){if(!state.current)return;const p=gather();const lines=[`model = "${p.model||'gpt-5.6-terra'}"`,'model_provider = "custom"','model_reasoning_effort = "medium"'];if(p.auth_mode==='apikey'){lines.push('','[model_providers.custom]','name = "custom"',`base_url = "${p.base_url||'https://api.example.com'}"`,`wire_api = "${p.wire_api}"`,`experimental_bearer_token = "***"`)}else lines.push('','# 官方登录模式：使用已捕获的 auth.json 快照');$('#config-preview').value=lines.join('\n');$('#auth-preview').value=p.auth_mode==='chatgpt'?'{\n  "auth_mode": "chatgpt",\n  "tokens": "已隐藏"\n}':'{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "***"\n}'}
 async function saveProvider(returnToList=false){try{const p=gather();if(!p.id||!p.name||(p.auth_mode==='apikey'&&!p.base_url)){throw Error('请填写供应商名称；纯 API 还需要 Base URL。供应商标识会由名称自动生成。')}await api('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});state.current=p;await refreshAll();if(returnToList)closeDetail();else note('供应商配置已保存。')}catch(e){note(e.message)}}
 async function activateCurrent(){try{await saveProvider(false);const p=gather();if(!p.id)return;const activateButton=$('#activate-btn');activateButton.disabled=true;await activateWithProgress(p.id);activateButton.disabled=false}catch(e){note(e.message)}}
-function setManagedRestartAvailable(){const button=$('#managed-restart-btn');if(button){button.disabled=false;button.title='重启服务器上的 Codex App Server'}}
-async function restartManagedCodex(){const button=$('#managed-restart-btn');if(!button||button.disabled)return;if(!await panelDialog({title:'重启 Codex App Server',message:'这会短暂中断当前远程 Codex 连接和正在进行的请求。新的连接将读取当前供应商配置。',confirmLabel:'重启'}))return;try{button.disabled=true;button.textContent='正在重启…';const result=await api('/api/runtime/restart',{method:'POST'});note(result.detail,'list-notice')}catch(e){note(e.message,'list-notice')}finally{button.disabled=false;button.textContent='重启 Codex';button.title='重启服务器上的 Codex App Server'}}
 async function testCurrent(){try{const p=gather();const d=await api('/api/providers/diagnose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const failed=(d.checks||[]).filter(item=>item.status==='fail').map(item=>`${item.name}：${item.detail}`);const warnings=(d.checks||[]).filter(item=>item.status==='warning').map(item=>`${item.name}：${item.detail}`);note(d.ok?`诊断通过。${warnings.length?' '+warnings.join('；'):''}`:`诊断发现问题：${failed.join('；')}`)}catch(e){note(e.message)}}
 async function loadCommon(){try{const d=await api('/api/common-config');$('#common-config').value=d.contents}catch{}}
 async function extractCommon(){try{const d=await api('/api/common-config/extract',{method:'POST'});$('#common-config').value=d.contents;note('已提取当前通用配置。')}catch(e){note(e.message)}}
