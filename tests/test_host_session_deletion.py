@@ -52,6 +52,13 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertNotIn("/api/session-trash", source)
         self.assertNotIn('/trash"', source)
 
+    def test_session_archive_confirmation_uses_the_panel_modal(self):
+        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        self.assertIn("function confirmSessionArchive(threadId,title)", source)
+        self.assertIn("归档云端会话", source)
+        self.assertIn("归档会话", source)
+        self.assertNotIn("confirm('归档此会话？", source)
+
     def test_archive_endpoints_verify_server_state_and_do_not_overpromise_desktop_sync(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
         self.assertIn("wait_for_session_archive_state(normalized_id, True)", source)
