@@ -55,6 +55,8 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn("id='proxy-loading'", APP)
         self.assertIn("$('#proxy-form-view').hidden=true", APP)
         self.assertIn("function cancelProxyEdit", APP)
+        self.assertIn("function abandonProxyEdit", APP)
+        self.assertIn("if(section!=='proxy')abandonProxyEdit()", APP)
         self.assertIn("if(result.configured&&!proxyEditing)showProxySuccess(result)", APP)
 
     def test_deleting_proxy_removes_server_files_and_returns_to_configuration(self):
