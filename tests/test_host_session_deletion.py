@@ -58,7 +58,8 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertIn("wait_for_session_archive_state(normalized_id, False)", source)
         self.assertIn('"desktop_sync": "client_refresh_required"', source)
         self.assertNotIn("桌面端将同步更新", source)
-        self.assertIn("请在 Codex 中搜索此会话 ID 并打开一次", source)
+        self.assertIn("请重启 Codex Desktop 以重新加载会话列表", source)
+        self.assertNotIn("搜索此会话 ID 并打开一次", source)
 
     def test_session_lists_require_app_server_registration(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
