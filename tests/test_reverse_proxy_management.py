@@ -27,10 +27,10 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn('settings["reverse_proxy"] = {"domain": domain, "upstream": upstream}', APP)
         self.assertIn('audit("reverse_proxy_applied", domain=domain, upstream=upstream)', APP)
 
-    def test_reverse_proxy_has_status_apply_and_disable_operations(self):
+    def test_reverse_proxy_has_status_apply_and_delete_operations(self):
         self.assertIn('@app.get("/api/reverse-proxy/status")', APP)
         self.assertIn('@app.post("/api/reverse-proxy/apply")', APP)
-        self.assertIn('@app.post("/api/reverse-proxy/disable")', APP)
+        self.assertIn('@app.post("/api/reverse-proxy/delete")', APP)
         self.assertIn('"docker", "run", "--rm"', APP)
         self.assertIn('"nginx", "-t"', APP)
         self.assertIn('"docker", "compose", "--profile", "reverse-proxy", "up", "-d", "--force-recreate", "reverse-proxy"', APP)
@@ -54,3 +54,12 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn("function showProxyForm", APP)
         self.assertIn("function cancelProxyEdit", APP)
         self.assertIn("if(result.configured&&!proxyEditing)showProxySuccess(result)", APP)
+
+    def test_deleting_proxy_removes_server_files_and_returns_to_configuration(self):
+        self.assertIn("def reverse_proxy_delete_script", APP)
+        self.assertIn('"docker", "compose", "--profile", "reverse-proxy", "rm", "-sf", "reverse-proxy"', APP)
+        self.assertIn("shutil.rmtree(root)", APP)
+        self.assertIn('settings["reverse_proxy"] = {}', APP)
+        self.assertIn("function deleteReverseProxy", APP)
+        self.assertIn("/api/reverse-proxy/delete", APP)
+        self.assertIn("删除代理", APP)

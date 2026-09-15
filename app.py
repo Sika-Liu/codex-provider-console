@@ -1484,15 +1484,20 @@ print(json.dumps({{"configured": (root / "nginx" / "default.conf").is_file(), "r
 '''
 
 
-def reverse_proxy_disable_script() -> str:
+def reverse_proxy_delete_script() -> str:
     project = json.dumps(host_panel_project_path())
-    return f'''import subprocess
+    return f'''import shutil, subprocess
 from pathlib import Path
 project = Path({project})
-result = subprocess.run(["docker", "compose", "--profile", "reverse-proxy", "stop", "reverse-proxy"], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+root = project / "reverse-proxy"
+result = subprocess.run(["docker", "compose", "--profile", "reverse-proxy", "rm", "-sf", "reverse-proxy"], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 if result.returncode != 0:
     raise SystemExit(result.stdout[-1200:])
-print("stopped")
+if root.exists():
+    if root.is_symlink():
+        raise SystemExit("拒绝删除意外的符号链接")
+    shutil.rmtree(root)
+print("deleted")
 '''
 
 
@@ -2163,15 +2168,18 @@ def apply_reverse_proxy(request: ReverseProxyApplyRequest) -> dict:
     }
 
 
-@app.post("/api/reverse-proxy/disable")
-def disable_reverse_proxy() -> dict:
+@app.post("/api/reverse-proxy/delete")
+def delete_reverse_proxy() -> dict:
     with REVERSE_PROXY_LOCK:
         try:
-            run_host_reverse_proxy_script(reverse_proxy_disable_script(), "停用", timeout=45)
+            run_host_reverse_proxy_script(reverse_proxy_delete_script(), "删除", timeout=45)
         except RuntimeError as exc:
             raise HTTPException(502, str(exc)) from exc
-    audit("reverse_proxy_disabled")
-    return {"running": False, "detail": "反向代理已停用；现有配置和证书仍保留，可在更新证书后再次部署。"}
+    settings = panel_settings()
+    settings["reverse_proxy"] = {}
+    write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+    audit("reverse_proxy_deleted")
+    return {"configured": False, "running": False, "detail": "反向代理、服务器配置及 TLS 证书文件已删除。"}
 
 
 @app.post("/api/providers")
@@ -2916,13 +2924,13 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
  let proxyEditing=false,proxyConfigured=false;
  function showProxyForm(){proxyEditing=true;$('#proxy-success-view').hidden=true;$('#proxy-form-view').hidden=false;$('#proxy-cancel-edit').hidden=!proxyConfigured;$('#proxy-certificate').value='';$('#proxy-private-key').value='';updateProxyConfig()}
  function cancelProxyEdit(){if(!proxyConfigured)return;proxyEditing=false;$('#proxy-certificate').value='';$('#proxy-private-key').value='';refreshReverseProxyStatus()}
- function showProxySuccess(result){const running=Boolean(result.running),domain=result.domain||'';proxyEditing=false;$('#proxy-form-view').hidden=true;$('#proxy-success-view').hidden=false;$('#proxy-success-title').textContent=running?'HTTPS 反向代理已运行':'HTTPS 反向代理已停用';$('#proxy-success-copy').textContent=running?'所有请求正在通过 HTTPS 安全转发到控制台。':'配置与证书仍保留；点击“修改配置”并重新部署即可恢复。';const link=$('#proxy-public-url');link.textContent=domain?`https://${domain}`:'—';link.href=domain?`https://${domain}`:'#';link.style.pointerEvents=domain?'':'none';$('#proxy-success-upstream').textContent=result.upstream||'—';$('#proxy-disable').style.display=running?'':'none'}
+ function showProxySuccess(result){const domain=result.domain||'';proxyEditing=false;$('#proxy-form-view').hidden=true;$('#proxy-success-view').hidden=false;$('#proxy-success-title').textContent='HTTPS 反向代理已运行';$('#proxy-success-copy').textContent='所有请求正在通过 HTTPS 安全转发到控制台。';const link=$('#proxy-public-url');link.textContent=domain?`https://${domain}`:'—';link.href=domain?`https://${domain}`:'#';link.style.pointerEvents=domain?'':'none';$('#proxy-success-upstream').textContent=result.upstream||'—';$('#proxy-disable').textContent='删除代理';$('#proxy-disable').style.display=''}
  async function refreshReverseProxyStatus(){const status=$('#proxy-status');if(!status)return;status.textContent='正在读取状态…';status.classList.remove('running');try{const result=await api('/api/reverse-proxy/status');proxyConfigured=Boolean(result.configured);if(result.domain)$('#proxy-domain').value=result.domain;if(result.upstream)$('#proxy-upstream').value=result.upstream;updateProxyConfig();status.textContent=result.running?`运行中 · ${result.domain||'已部署'}`:result.configured?'已配置，当前已停用':'尚未部署';status.classList.toggle('running',result.running);if(result.configured&&!proxyEditing)showProxySuccess(result);else if(!result.configured)showProxyForm()}catch(error){status.textContent='状态读取失败';showProxyForm()}}
  async function loadConsoleSettings(){try{const s=await api('/api/settings'),proxy=s.reverse_proxy||{};for(const [id,key] of [['proxy-domain','domain'],['proxy-upstream','upstream']])if(proxy[key]!=null)$('#'+id).value=proxy[key];updateProxyConfig()}catch{}}
  async function applyReverseProxy(){const domain=$('#proxy-domain').value.trim(),upstream=$('#proxy-upstream').value.trim()||'codex-provider-console:8787',certificate_pem=$('#proxy-certificate').value,private_key_pem=$('#proxy-private-key').value;if(!await panelDialog({title:'部署反向代理',message:'将校验证书与 Nginx 配置，并在服务器启动或更新 HTTPS 代理。证书和私钥不会写入面板设置。',confirmLabel:'校验并部署'}))return;const button=$('#proxy-apply');button.disabled=true;button.textContent='正在校验并部署…';try{const result=await api('/api/reverse-proxy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain,upstream,certificate_pem,private_key_pem})});$('#proxy-certificate').value='';$('#proxy-private-key').value='';proxyEditing=false;note(result.detail,'proxy-notice');await refreshReverseProxyStatus()}catch(error){note(error.message,'proxy-notice')}finally{button.disabled=false;button.textContent='校验并部署'}}
- async function disableReverseProxy(){if(!await panelDialog({title:'停用反向代理',message:'将停止 HTTPS 代理容器。已部署的配置和证书会保留，之后可重新提交证书并部署。',confirmLabel:'停用代理'}))return;const button=$('#proxy-disable');button.disabled=true;button.textContent='正在停用…';try{const result=await api('/api/reverse-proxy/disable',{method:'POST'});note(result.detail,'proxy-notice');await refreshReverseProxyStatus()}catch(error){note(error.message,'proxy-notice')}finally{button.disabled=false;button.textContent='停用代理'}}
+ async function deleteReverseProxy(){if(!await panelDialog({title:'删除反向代理',message:'将停止并删除代理容器、服务器上的 Nginx 配置、证书和私钥。此操作无法撤销。',confirmLabel:'删除代理'}))return;const button=$('#proxy-disable');button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/reverse-proxy/delete',{method:'POST'});proxyConfigured=false;proxyEditing=false;note(result.detail,'proxy-notice');await refreshReverseProxyStatus()}catch(error){note(error.message,'proxy-notice')}finally{button.disabled=false;button.textContent='删除代理'}}
  ['proxy-domain','proxy-upstream'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateProxyConfig));
- document.getElementById('proxy-apply')?.addEventListener('click',applyReverseProxy);document.getElementById('proxy-edit')?.addEventListener('click',showProxyForm);document.getElementById('proxy-cancel-edit')?.addEventListener('click',cancelProxyEdit);document.getElementById('proxy-disable')?.addEventListener('click',disableReverseProxy);
+ document.getElementById('proxy-apply')?.addEventListener('click',applyReverseProxy);document.getElementById('proxy-edit')?.addEventListener('click',showProxyForm);document.getElementById('proxy-cancel-edit')?.addEventListener('click',cancelProxyEdit);document.getElementById('proxy-disable')?.addEventListener('click',deleteReverseProxy);
  const baseOpenConsoleSection=window.openConsoleSection;window.openConsoleSection=function(section){baseOpenConsoleSection(section);if(section==='proxy')refreshReverseProxyStatus()};
  loadConsoleSettings();openConsoleSection(localStorage.getItem('console-section')||'providers');
  </script>'''
