@@ -44,3 +44,11 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn('校验并部署', APP)
         self.assertNotIn('id="proxy-cert"', APP)
         self.assertNotIn('id="proxy-key"', APP)
+
+    def test_deployed_proxy_uses_a_summary_view_until_user_edits_it(self):
+        self.assertIn('id="proxy-success-view"', APP)
+        self.assertIn('id="proxy-form-view"', APP)
+        self.assertIn('id="proxy-edit"', APP)
+        self.assertIn("function showProxySuccess", APP)
+        self.assertIn("function showProxyForm", APP)
+        self.assertIn("if(result.configured&&!proxyEditing)showProxySuccess(result)", APP)
