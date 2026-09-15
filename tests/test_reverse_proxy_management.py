@@ -52,6 +52,8 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn('id="proxy-cancel-edit"', APP)
         self.assertIn("function showProxySuccess", APP)
         self.assertIn("function showProxyForm", APP)
+        self.assertIn("id='proxy-loading'", APP)
+        self.assertIn("$('#proxy-form-view').hidden=true", APP)
         self.assertIn("function cancelProxyEdit", APP)
         self.assertIn("if(result.configured&&!proxyEditing)showProxySuccess(result)", APP)
 
