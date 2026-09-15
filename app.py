@@ -1435,7 +1435,7 @@ server {{
         proxy_read_timeout 300s;
     }}
 }}
-""".format(domain=data["domain"], upstream=data["upstream"])
+"""
     (nginx_dir / "default.conf").write_text(config, encoding="utf-8")
     os.chmod(nginx_dir / "default.conf", 0o600)
     validation = subprocess.run([
