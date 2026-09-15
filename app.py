@@ -1105,8 +1105,11 @@ def diagnose_profile(profile: dict, progress: Callable[[int, str], None] | None 
         if progress:
             progress(percent, stage)
 
-    def add(name: str, status: str, detail: str) -> None:
-        checks.append({"name": name, "status": status, "detail": detail})
+    def add(name: str, status: str, detail: str, diagnostic_detail: str | None = None) -> None:
+        item = {"name": name, "status": status, "detail": detail}
+        if diagnostic_detail:
+            item["diagnostic_detail"] = diagnostic_detail
+        checks.append(item)
 
     mode = profile["mode"]
     model = str(profile.get("model", "")).strip()
@@ -1139,13 +1142,21 @@ def diagnose_profile(profile: dict, progress: Callable[[int, str], None] | None 
                     report(65, f"正在请求 {test_model}")
                     real_request = test_model_request(profile, test_model, timeout_seconds=20, max_attempts=1)
                     retry_note = f'（第 {real_request.get("attempts", 1)} 次请求成功）' if real_request["ok"] and real_request.get("attempts", 1) > 1 else ""
-                    detail = f'{real_request.get("endpoint", "请求")} 返回 HTTP {real_request.get("status", "")}：{real_request.get("body", "")}{retry_note}' if real_request["ok"] else f'测试「{test_model}」失败：{real_request.get("endpoint", "请求")} {real_request.get("detail", "请求失败")}'
+                    if real_request["ok"]:
+                        endpoint = real_request.get("endpoint", "请求")
+                        status = real_request.get("status", "")
+                        detail = f"{endpoint} 返回 HTTP {status}{retry_note}"
+                        body = str(real_request.get("body", "")).strip()
+                        diagnostic_detail = f"{detail}\n\n响应摘录：\n{body[:2000]}" if body else detail
+                    else:
+                        detail = f'测试「{test_model}」失败：{real_request.get("endpoint", "请求")} {real_request.get("detail", "请求失败")}'
+                        diagnostic_detail = detail
                     # A successful model catalog proves that the endpoint and
                     # credential are usable. Some reasoning models need longer
                     # than a small diagnostic request to produce their first
                     # response, so a failed live probe is a warning rather than
                     # a reason to reject a supplier switch (Codex++ behavior).
-                    add("真实请求", "pass" if real_request["ok"] else "warning", detail)
+                    add("真实请求", "pass" if real_request["ok"] else "warning", detail, diagnostic_detail)
                 else:
                     add("真实请求", "warning", "上游未返回可测试模型，该步骤未执行")
             except HTTPException as exc:
@@ -1577,8 +1588,11 @@ def restart_codex_app_server() -> dict[str, str]:
 def health_check() -> dict:
     checks: list[dict[str, str]] = []
 
-    def add(name: str, status: str, detail: str) -> None:
-        checks.append({"name": name, "status": status, "detail": detail})
+    def add(name: str, status: str, detail: str, diagnostic_detail: str | None = None) -> None:
+        item = {"name": name, "status": status, "detail": detail}
+        if diagnostic_detail:
+            item["diagnostic_detail"] = diagnostic_detail
+        checks.append(item)
 
     add("Codex 数据目录", "pass" if CODEX_HOME.exists() else "fail", str(CODEX_HOME) if CODEX_HOME.exists() else f"目录不存在：{CODEX_HOME}")
     # The panel mounts the deployment user's home. This is the only filesystem
@@ -1652,7 +1666,7 @@ def health_check() -> dict:
         add("当前供应商", "pass", f"{active.get('name', active_id)} ({active_id})")
         diagnostic = diagnose_profile(active)
         for item in diagnostic.get("checks", []):
-            add(f"供应商 · {item['name']}", item["status"], item["detail"])
+            add(f"供应商 · {item['name']}", item["status"], item["detail"], item.get("diagnostic_detail"))
 
     try:
         usage = shutil.disk_usage(CODEX_HOME)
@@ -2679,7 +2693,7 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
 </script>'''
     navigation_script = r'''<script>
  document.head.insertAdjacentHTML('beforeend', `<style>
- .console-sidebar{position:fixed;inset:0 auto 0 0;width:228px;background:#202124;color:#f7f8fa;padding:22px 14px;z-index:20;display:flex;flex-direction:column;gap:22px}.console-brand{font-size:17px;font-weight:750;padding:0 12px}.console-brand small{display:block;color:#aeb4bb;font-size:11px;font-weight:400;margin-top:5px}.console-nav{display:grid;gap:5px}.console-nav button{border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-nav button:hover,.console-nav button.active{background:#34373b;color:#fff}.console-logout{margin-top:auto;border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-logout:hover{background:#34373b;color:#fff}.console-content{margin-left:228px}.console-panel{max-width:1320px;margin:22px auto;padding:0 26px}.console-panel .list-shell{background:#fff;border:1px solid #dde1e6;border-radius:11px;padding:18px}.console-panel h2{margin:0 0 7px;font-size:18px}.console-panel .panel-note{color:#686e76;font-size:13px;margin:0 0 18px}.console-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.console-form label{display:block;color:#555c64;font-size:12px;margin-bottom:5px}.console-form input,.console-form select,.console-form textarea{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d2d6da;border-radius:7px;font:inherit;background:#fff}.console-form textarea{min-height:104px;resize:vertical}.console-form .wide{grid-column:1/-1}.console-form-actions{display:flex;gap:8px;margin-top:17px}.console-code{font:12px Consolas,monospace;background:#f4f5f6;color:#30343a;padding:12px;border-radius:7px;white-space:pre-wrap;overflow:auto}.console-muted{color:#727982;font-size:12px}.console-health-summary{margin:8px 0 14px;padding:11px 13px;background:#f4f5f6;border-radius:7px;color:#4b525a}.health-check{border:1px solid #dfe3e7;border-left:4px solid #2f9e63;border-radius:7px;padding:10px 12px;margin-top:8px}.health-check.warning{border-left-color:#d18b16;background:#fffaf0}.health-check.fail{border-left-color:#d64545;background:#fff5f5}.health-check b,.health-check small{display:block}.health-check small{margin-top:4px;color:#686e76;line-height:1.45}
+ .console-sidebar{position:fixed;inset:0 auto 0 0;width:228px;background:#202124;color:#f7f8fa;padding:22px 14px;z-index:20;display:flex;flex-direction:column;gap:22px}.console-brand{font-size:17px;font-weight:750;padding:0 12px}.console-brand small{display:block;color:#aeb4bb;font-size:11px;font-weight:400;margin-top:5px}.console-nav{display:grid;gap:5px}.console-nav button{border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-nav button:hover,.console-nav button.active{background:#34373b;color:#fff}.console-logout{margin-top:auto;border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-logout:hover{background:#34373b;color:#fff}.console-content{margin-left:228px}.console-panel{max-width:1320px;margin:22px auto;padding:0 26px}.console-panel .list-shell{background:#fff;border:1px solid #dde1e6;border-radius:11px;padding:18px}.console-panel h2{margin:0 0 7px;font-size:18px}.console-panel .panel-note{color:#686e76;font-size:13px;margin:0 0 18px}.console-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.console-form label{display:block;color:#555c64;font-size:12px;margin-bottom:5px}.console-form input,.console-form select,.console-form textarea{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d2d6da;border-radius:7px;font:inherit;background:#fff}.console-form textarea{min-height:104px;resize:vertical}.console-form .wide{grid-column:1/-1}.console-form-actions{display:flex;gap:8px;margin-top:17px}.console-code{font:12px Consolas,monospace;background:#f4f5f6;color:#30343a;padding:12px;border-radius:7px;white-space:pre-wrap;overflow:auto}.console-muted{color:#727982;font-size:12px}.console-health-summary{margin:8px 0 14px;padding:11px 13px;background:#f4f5f6;border-radius:7px;color:#4b525a}.health-groups{display:grid;gap:16px}.health-group{border-top:1px solid #e4e7eb;padding-top:13px}.health-group h3{margin:0 0 7px;font-size:14px}.health-check{border:1px solid #dfe3e7;border-left:4px solid #2f9e63;border-radius:7px;padding:9px 12px;margin-top:7px}.health-check.warning{border-left-color:#d18b16;background:#fffaf0}.health-check.fail{border-left-color:#d64545;background:#fff5f5}.health-check-top{display:flex;align-items:center;gap:10px;min-width:0}.health-check b{display:block;white-space:nowrap}.health-check small{display:block;margin-top:4px;color:#686e76;line-height:1.45;word-break:break-word}.health-check.compact{padding:8px 12px}.health-check.compact small{margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.health-check details{margin-top:8px}.health-check details summary{cursor:pointer;color:#3a5f8f;font-size:12px}.health-check pre{max-height:220px;overflow:auto;margin:8px 0 0;padding:9px;background:#f4f5f6;border-radius:5px;white-space:pre-wrap;word-break:break-word;font:11px/1.45 Consolas,monospace}.health-copy{margin-top:7px}
  @media(max-width:800px){.console-sidebar{width:190px}.console-content{margin-left:190px}.console-form{grid-template-columns:1fr}}
  </style>`);
  document.body.insertAdjacentHTML('afterbegin', `<aside class="console-sidebar"><div class="console-brand">Codex 控制台<small>通用服务器管理</small></div><nav class="console-nav"><button data-section="providers" onclick="openConsoleSection('providers')">供应商配置</button><button data-section="health" onclick="openConsoleSection('health')">健康检查</button><button data-section="proxy" onclick="openConsoleSection('proxy')">反向代理</button></nav><button class="console-logout" onclick="logoutConsole()">退出登录</button></aside>`);
@@ -2688,7 +2702,11 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
  requestAnimationFrame(()=>document.body.classList.add('console-ready'));
  async function logoutConsole(){await fetch('/logout',{method:'POST'});location.href='/login'}
  function openConsoleSection(section){document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';document.querySelector('#console-'+section).style.display='block';if(section==='health')runHealth()}localStorage.setItem('console-section',section)}
- async function runHealth(){const summary=$('#health-summary'),list=$('#health-checks');summary.textContent='正在检查服务器环境和供应商连通性…';list.innerHTML='';try{const d=await api('/api/health');summary.textContent=d.summary;list.innerHTML=(d.checks||[]).map(item=>{const cliAction=item.name==='Codex CLI'&&item.status==='fail'?'<p><button class="btn small" onclick="installCodexCli(this)">安装 Codex CLI</button></p>':'';const keyAction=item.name==='Codex Desktop 部署密钥'?`<p><button class="btn small" onclick="${item.status==='pass'?'downloadDeploymentKey()':'deployDeploymentKey(this)'}">${item.status==='pass'?'下载部署密钥':'创建并部署密钥'}</button></p>`:'';const configAction=item.name==='config.toml 语法'&&item.status==='fail'?'<p><button class="btn small" onclick="repairConfig(this)">修复配置</button></p>':'';return `<div class="health-check ${item.status}"><b>${item.status==='pass'?'通过':item.status==='warning'?'提醒':'失败'} · ${esc(item.name)}</b><small>${esc(item.detail)}</small>${cliAction}${keyAction}${configAction}</div>`}).join('')}catch(e){summary.textContent='健康检查失败：'+e.message}}
+ function healthCategory(name){if(name.startsWith('供应商 ·')||name==='当前供应商')return '供应商连接';if(['config.toml','config.toml 语法','Codex 关键配置','auth.json','控制台认证'].includes(name))return 'Codex 配置';return '运行环境'}
+ function healthActions(item){const cli=item.name==='Codex CLI'&&item.status==='fail'?'<p><button class="btn small" onclick="installCodexCli(this)">安装 Codex CLI</button></p>':'';const key=item.name==='Codex Desktop 部署密钥'?`<p><button class="btn small" onclick="${item.status==='pass'?'downloadDeploymentKey()':'deployDeploymentKey(this)'}">${item.status==='pass'?'下载部署密钥':'创建并部署密钥'}</button></p>`:'';const config=item.name==='config.toml 语法'&&item.status==='fail'?'<p><button class="btn small" onclick="repairConfig(this)">修复配置</button></p>':'';return cli+key+config}
+ function copyHealthDiagnostic(button){const detail=decodeURIComponent(button.dataset.detail||'');navigator.clipboard?.writeText(detail).then(()=>{button.textContent='已复制'}).catch(()=>{button.textContent='复制失败'})}
+ function healthRow(item){const problem=item.status!=='pass',label=item.status==='pass'?'通过':item.status==='warning'?'提醒':'失败',diagnostic=item.diagnostic_detail&&item.diagnostic_detail!==item.detail?`<details><summary>查看诊断详情</summary><pre>${esc(item.diagnostic_detail)}</pre><button class="btn small health-copy" data-detail="${encodeURIComponent(item.diagnostic_detail)}" onclick="copyHealthDiagnostic(this)">复制诊断详情</button></details>`:'';return `<div class="health-check ${item.status} ${problem?'':'compact'}"><div class="health-check-top"><b>${label} · ${esc(item.name)}</b><small title="${esc(item.detail)}">${esc(item.detail)}</small></div>${diagnostic}${healthActions(item)}</div>`}
+ async function runHealth(){const summary=$('#health-summary'),list=$('#health-checks');summary.textContent='正在检查服务器环境和供应商连通性…';list.innerHTML='';try{const d=await api('/api/health'),checks=d.checks||[],passed=checks.filter(item=>item.status==='pass').length,warnings=checks.filter(item=>item.status==='warning').length,failed=checks.filter(item=>item.status==='fail').length;summary.textContent=`${d.summary} · ${passed} 项通过${warnings?`，${warnings} 项提醒`:''}${failed?`，${failed} 项失败`:''}`;const groups=['运行环境','Codex 配置','供应商连接'];list.className='health-groups';list.innerHTML=groups.map(group=>{const items=checks.filter(item=>healthCategory(item.name)===group);return items.length?`<section class="health-group"><h3>${group}</h3>${items.map(healthRow).join('')}</section>`:''}).join('')}catch(e){summary.textContent='健康检查失败：'+e.message}}
  async function installCodexCli(button){const confirmed=await panelDialog({title:'安装 Codex CLI',message:'将为部署用户安装官方 Codex CLI。安装完成后会自动重新检查环境。',confirmLabel:'开始安装'});if(!confirmed)return;button.disabled=true;button.textContent='正在安装…';try{const result=await api('/api/health/install-codex',{method:'POST'});await panelDialog({title:'Codex CLI 已安装',message:result.detail,confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'安装失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='安装 Codex CLI'}}
  async function repairConfig(button){const confirmed=await panelDialog({title:'修复 config.toml',message:'将合并重复的 [features] 配置段，并自动创建备份。不会修改 auth.json。',confirmLabel:'开始修复'});if(!confirmed)return;button.disabled=true;button.textContent='正在修复…';try{const result=await api('/api/health/repair-config',{method:'POST'});await panelDialog({title:'配置已修复',message:result.detail+' 请重新连接 Codex App 后再修改模型。',confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'修复失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='修复配置'}}
  async function deployDeploymentKey(button){const confirmed=await panelDialog({title:'创建部署密钥',message:'将为当前部署用户生成新的 SSH 私钥，并将对应公钥加入 authorized_keys。私钥不会在页面显示，但可由已登录的面板重复下载；请勿分享给他人。',confirmLabel:'创建并部署'});if(!confirmed)return;button.disabled=true;button.textContent='正在部署…';try{const result=await api('/api/health/deployment-key',{method:'POST'});const download=await panelDialog({title:'部署密钥已创建',message:`${result.detail}。私钥可在已登录面板中重复下载，请安全保存且不要分享。`,confirmLabel:'立即下载',cancelLabel:'稍后下载'});if(download)window.location.href=result.download_url;await runHealth()}catch(e){await panelDialog({title:'部署失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='创建并部署密钥'}}
