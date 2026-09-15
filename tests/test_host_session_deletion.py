@@ -52,6 +52,14 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertNotIn("/api/session-trash", source)
         self.assertNotIn('/trash"', source)
 
+    def test_archive_endpoints_verify_server_state_and_do_not_overpromise_desktop_sync(self):
+        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        self.assertIn("wait_for_session_archive_state(normalized_id, True)", source)
+        self.assertIn("wait_for_session_archive_state(normalized_id, False)", source)
+        self.assertIn('"desktop_sync": "client_refresh_required"', source)
+        self.assertNotIn("桌面端将同步更新", source)
+        self.assertIn("请在 Codex 中搜索此会话 ID 并打开一次", source)
+
     def test_session_lists_require_app_server_registration(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
         self.assertIn("SELECT id, archived FROM threads", source)
