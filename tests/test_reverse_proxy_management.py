@@ -14,6 +14,7 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn("nginx:1.27-alpine", COMPOSE)
         self.assertIn("no-new-privileges:true", COMPOSE)
         self.assertIn("cap_drop:", COMPOSE)
+        self.assertIn("DAC_OVERRIDE", COMPOSE)
         self.assertIn("NET_BIND_SERVICE", COMPOSE)
         self.assertIn("SETGID", COMPOSE)
         self.assertIn("SETUID", COMPOSE)
