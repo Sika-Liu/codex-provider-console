@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -2168,18 +2168,31 @@ def apply_reverse_proxy(request: ReverseProxyApplyRequest) -> dict:
     }
 
 
-@app.post("/api/reverse-proxy/delete")
-def delete_reverse_proxy() -> dict:
+def delete_reverse_proxy_after_response() -> None:
+    """Remove the proxy only after its own HTTP response has been delivered."""
     with REVERSE_PROXY_LOCK:
         try:
             run_host_reverse_proxy_script(reverse_proxy_delete_script(), "删除", timeout=45)
         except RuntimeError as exc:
-            raise HTTPException(502, str(exc)) from exc
+            audit("reverse_proxy_delete_failed", detail=str(exc)[:500])
+            return
     settings = panel_settings()
     settings["reverse_proxy"] = {}
     write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
     audit("reverse_proxy_deleted")
-    return {"configured": False, "running": False, "detail": "反向代理、服务器配置及 TLS 证书文件已删除。"}
+
+
+@app.post("/api/reverse-proxy/delete")
+def delete_reverse_proxy(background_tasks: BackgroundTasks) -> dict:
+    # The browser may be connected through this proxy.  Deleting it before
+    # writing the response would make the client misreport a successful
+    # deletion as a failed request.
+    background_tasks.add_task(delete_reverse_proxy_after_response)
+    return {
+        "configured": False,
+        "running": False,
+        "detail": "删除已确认；响应发送完成后将移除代理容器、配置和 TLS 文件。",
+    }
 
 
 @app.post("/api/providers")
@@ -2930,7 +2943,7 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
  async function refreshReverseProxyStatus(){const status=$('#proxy-status');if(!status)return;status.textContent='正在读取状态…';status.classList.remove('running');try{const result=await api('/api/reverse-proxy/status');proxyConfigured=Boolean(result.configured);if(result.domain)$('#proxy-domain').value=result.domain;if(result.upstream)$('#proxy-upstream').value=result.upstream;updateProxyConfig();status.textContent=result.running?`运行中 · ${result.domain||'已部署'}`:result.configured?'已配置，当前已停用':'尚未部署';status.classList.toggle('running',result.running);if(result.configured&&!proxyEditing)showProxySuccess(result);else if(!result.configured)showProxyForm()}catch(error){status.textContent='状态读取失败';showProxyForm()}}
  async function loadConsoleSettings(){try{const s=await api('/api/settings'),proxy=s.reverse_proxy||{};for(const [id,key] of [['proxy-domain','domain'],['proxy-upstream','upstream']])if(proxy[key]!=null)$('#'+id).value=proxy[key];updateProxyConfig()}catch{}}
  async function applyReverseProxy(){const domain=$('#proxy-domain').value.trim(),upstream=$('#proxy-upstream').value.trim()||'codex-provider-console:8787',certificate_pem=$('#proxy-certificate').value,private_key_pem=$('#proxy-private-key').value;if(!await panelDialog({title:'部署反向代理',message:'将校验证书与 Nginx 配置，并在服务器启动或更新 HTTPS 代理。证书和私钥不会写入面板设置。',confirmLabel:'校验并部署'}))return;const button=$('#proxy-apply');button.disabled=true;button.textContent='正在校验并部署…';try{const result=await api('/api/reverse-proxy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain,upstream,certificate_pem,private_key_pem})});$('#proxy-certificate').value='';$('#proxy-private-key').value='';proxyEditing=false;note(result.detail,'proxy-notice');await refreshReverseProxyStatus()}catch(error){note(error.message,'proxy-notice')}finally{button.disabled=false;button.textContent='校验并部署'}}
- async function deleteReverseProxy(){if(!await panelDialog({title:'删除反向代理',message:'将停止并删除代理容器、服务器上的 Nginx 配置、证书和私钥。此操作无法撤销。',confirmLabel:'删除代理'}))return;const button=$('#proxy-disable');button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/reverse-proxy/delete',{method:'POST'});proxyConfigured=false;proxyEditing=false;note(result.detail,'proxy-notice');await refreshReverseProxyStatus()}catch(error){note(error.message,'proxy-notice')}finally{button.disabled=false;button.textContent='删除代理'}}
+ async function deleteReverseProxy(){if(!await panelDialog({title:'删除反向代理',message:'将停止并删除代理容器、服务器上的 Nginx 配置、证书和私钥。此操作无法撤销。',confirmLabel:'删除代理'}))return;const button=$('#proxy-disable');button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/reverse-proxy/delete',{method:'POST'});proxyConfigured=false;proxyEditing=false;$('#proxy-domain').value='';$('#proxy-upstream').value='codex-provider-console:8787';$('#proxy-status').textContent='删除处理中…';$('#proxy-status').classList.remove('running');showProxyForm();note(result.detail,'proxy-notice')}catch(error){note(error.message,'proxy-notice')}finally{button.disabled=false;button.textContent='删除代理'}}
  ['proxy-domain','proxy-upstream'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateProxyConfig));
  document.getElementById('proxy-apply')?.addEventListener('click',applyReverseProxy);document.getElementById('proxy-edit')?.addEventListener('click',showProxyForm);document.getElementById('proxy-cancel-edit')?.addEventListener('click',cancelProxyEdit);document.getElementById('proxy-disable')?.addEventListener('click',deleteReverseProxy);
  const baseOpenConsoleSection=window.openConsoleSection;window.openConsoleSection=function(section){baseOpenConsoleSection(section);if(section==='proxy')refreshReverseProxyStatus()};

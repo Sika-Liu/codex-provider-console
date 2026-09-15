@@ -65,3 +65,6 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn("function deleteReverseProxy", APP)
         self.assertIn("/api/reverse-proxy/delete", APP)
         self.assertIn("删除代理", APP)
+        self.assertIn("def delete_reverse_proxy_after_response", APP)
+        self.assertIn("background_tasks.add_task(delete_reverse_proxy_after_response)", APP)
+        self.assertNotIn("await refreshReverseProxyStatus()}catch(error){note(error.message,'proxy-notice')}finally{button.disabled=false;button.textContent='删除代理'}", APP)
