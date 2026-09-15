@@ -14,6 +14,9 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn("nginx:1.27-alpine", COMPOSE)
         self.assertIn("no-new-privileges:true", COMPOSE)
         self.assertIn("cap_drop:", COMPOSE)
+        self.assertIn("NET_BIND_SERVICE", COMPOSE)
+        self.assertIn("SETGID", COMPOSE)
+        self.assertIn("SETUID", COMPOSE)
 
     def test_reverse_proxy_api_never_persists_certificate_or_private_key(self):
         self.assertIn('class ReverseProxyApplyRequest', APP)
