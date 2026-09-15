@@ -76,6 +76,7 @@ MODEL_DIAGNOSTIC_JOBS: dict[str, dict] = {}
 MODEL_DIAGNOSTIC_JOBS_LOCK = threading.Lock()
 PROVIDER_DIAGNOSTIC_JOBS: dict[str, dict] = {}
 PROVIDER_DIAGNOSTIC_JOBS_LOCK = threading.Lock()
+REVERSE_PROXY_LOCK = threading.Lock()
 HOST_APP_SERVER_STOP_SCRIPT = r'''
 import os
 import shlex
@@ -1335,6 +1336,161 @@ def run_host_app_server_control(action: Literal["start", "stop"]) -> str:
     return (result.stdout or result.stderr).strip()
 
 
+def host_panel_project_path() -> str:
+    if HOST_USER_HOME_PATH and Path(HOST_USER_HOME_PATH).is_absolute():
+        return str(Path(HOST_USER_HOME_PATH) / "codex-provider-console")
+    raise RuntimeError("未找到宿主机控制台目录，无法管理反向代理")
+
+
+def run_host_reverse_proxy_script(script: str, operation: str, timeout: int = 120) -> str:
+    if not DEPLOYMENT_KEY_PATH.is_file():
+        raise RuntimeError("缺少面板部署密钥；请先在健康检查中部署密钥")
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", DEPLOY_USER):
+        raise RuntimeError("部署用户名无效，无法管理反向代理")
+    gateway = docker_host_gateway()
+    try:
+        result = subprocess.run(
+            [
+                "ssh", "-i", str(DEPLOYMENT_KEY_PATH), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={USER_HOME / '.ssh' / 'known_hosts'}",
+                "-o", "LogLevel=ERROR", f"{DEPLOY_USER}@{gateway}", "python3", "-",
+            ],
+            capture_output=True,
+            text=True,
+            input=script,
+            timeout=timeout,
+            check=False,
+            env=ssh_client_environment(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"宿主机反向代理{operation}超时") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "宿主机未提供失败原因").strip()
+        raise RuntimeError(f"宿主机反向代理{operation}失败：{detail[-600:]}")
+    return (result.stdout or result.stderr).strip()
+
+
+def validate_reverse_proxy_input(domain: str, upstream: str, certificate_pem: str, private_key_pem: str) -> tuple[str, str, str, str]:
+    domain, upstream = domain.strip().lower(), upstream.strip()
+    certificate_pem, private_key_pem = certificate_pem.strip() + "\n", private_key_pem.strip() + "\n"
+    if not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", domain):
+        raise HTTPException(422, "请输入有效的域名，例如 console.example.com")
+    if not re.fullmatch(r"[A-Za-z0-9.-]+(?::[1-9][0-9]{0,4})?", upstream):
+        raise HTTPException(422, "上游地址只能是主机名或 IP，可选端口，例如 codex-provider-console:8787")
+    if "-----BEGIN CERTIFICATE-----" not in certificate_pem or "-----END CERTIFICATE-----" not in certificate_pem:
+        raise HTTPException(422, "证书必须是 PEM 格式，并包含 BEGIN/END CERTIFICATE")
+    if "-----BEGIN" not in private_key_pem or "PRIVATE KEY-----" not in private_key_pem:
+        raise HTTPException(422, "私钥必须是 PEM 格式，并包含 BEGIN/END PRIVATE KEY")
+    if len(certificate_pem) > 200_000 or len(private_key_pem) > 200_000:
+        raise HTTPException(422, "证书或私钥过大")
+    return domain, upstream, certificate_pem, private_key_pem
+
+
+def reverse_proxy_apply_script(domain: str, upstream: str, certificate_pem: str, private_key_pem: str) -> str:
+    payload = json.dumps({
+        "project": host_panel_project_path(), "domain": domain, "upstream": upstream,
+        "certificate": base64.b64encode(certificate_pem.encode()).decode(),
+        "private_key": base64.b64encode(private_key_pem.encode()).decode(),
+    })
+    return f'''import base64, json, os, shutil, subprocess, sys, uuid
+from pathlib import Path
+
+data = json.loads({payload!r})
+project = Path(data["project"])
+compose = project / "compose.yml"
+if not compose.is_file():
+    raise SystemExit("控制台部署目录或 compose.yml 不存在")
+root = project / "reverse-proxy"
+stage = project / (".reverse-proxy-stage-" + uuid.uuid4().hex)
+previous = project / ".reverse-proxy-previous"
+try:
+    nginx_dir, cert_dir = stage / "nginx", stage / "certs"
+    nginx_dir.mkdir(parents=True, mode=0o700)
+    cert_dir.mkdir(mode=0o700)
+    certificate = base64.b64decode(data["certificate"])
+    private_key = base64.b64decode(data["private_key"])
+    (cert_dir / "certificate.pem").write_bytes(certificate)
+    (cert_dir / "private-key.pem").write_bytes(private_key)
+    os.chmod(cert_dir / "certificate.pem", 0o600)
+    os.chmod(cert_dir / "private-key.pem", 0o600)
+    config = """server {{
+    listen 80;
+    server_name {domain};
+    return 301 https://$host$request_uri;
+}}
+
+server {{
+    listen 443 ssl;
+    server_name {domain};
+    ssl_certificate /etc/nginx/certs/certificate.pem;
+    ssl_certificate_key /etc/nginx/certs/private-key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    location / {{
+        proxy_pass http://{upstream};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+    }}
+}}
+""".format(domain=data["domain"], upstream=data["upstream"])
+    (nginx_dir / "default.conf").write_text(config, encoding="utf-8")
+    os.chmod(nginx_dir / "default.conf", 0o600)
+    validation = subprocess.run([
+        "docker", "run", "--rm", "-v", f"{{nginx_dir}}:/etc/nginx/conf.d:ro",
+        "-v", f"{{cert_dir}}:/etc/nginx/certs:ro", "nginx:1.27-alpine", "nginx", "-t",
+    ], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if validation.returncode != 0:
+        raise SystemExit("Nginx 配置或证书校验失败：" + validation.stdout[-1200:])
+    if previous.exists():
+        shutil.rmtree(previous)
+    if root.exists():
+        root.rename(previous)
+    stage.rename(root)
+    deployed = subprocess.run([
+        "docker", "compose", "--profile", "reverse-proxy", "up", "-d", "--force-recreate", "reverse-proxy",
+    ], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if deployed.returncode != 0:
+        if root.exists():
+            shutil.rmtree(root)
+        if previous.exists():
+            previous.rename(root)
+            subprocess.run(["docker", "compose", "--profile", "reverse-proxy", "up", "-d", "--force-recreate", "reverse-proxy"], cwd=project, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        raise SystemExit(deployed.stdout[-1200:])
+    if previous.exists():
+        shutil.rmtree(previous)
+    print(json.dumps({{"running": True, "domain": data["domain"]}}))
+finally:
+    if stage.exists():
+        shutil.rmtree(stage)
+'''
+
+
+def reverse_proxy_status_script() -> str:
+    project = json.dumps(host_panel_project_path())
+    return f'''import json, subprocess
+from pathlib import Path
+project = Path({project})
+root = project / "reverse-proxy"
+result = subprocess.run(["docker", "compose", "--profile", "reverse-proxy", "ps", "--status", "running", "--services"], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+print(json.dumps({{"configured": (root / "nginx" / "default.conf").is_file(), "running": "reverse-proxy" in result.stdout.splitlines()}}))
+'''
+
+
+def reverse_proxy_disable_script() -> str:
+    project = json.dumps(host_panel_project_path())
+    return f'''import subprocess
+from pathlib import Path
+project = Path({project})
+result = subprocess.run(["docker", "compose", "--profile", "reverse-proxy", "stop", "reverse-proxy"], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+if result.returncode != 0:
+    raise SystemExit(result.stdout[-1200:])
+print("stopped")
+'''
+
+
 def host_codex_home_path() -> str:
     """Return the host-side Codex home used by the Desktop App Server."""
     try:
@@ -1925,6 +2081,13 @@ class PanelSettings(BaseModel):
     active_provider_id: str | None = Field(default=None, pattern=r"^(|[a-zA-Z0-9_-]{1,48})$")
 
 
+class ReverseProxyApplyRequest(BaseModel):
+    domain: str = Field(min_length=1, max_length=253)
+    upstream: str = Field(min_length=1, max_length=255)
+    certificate_pem: str = Field(min_length=1, max_length=200_000)
+    private_key_pem: str = Field(min_length=1, max_length=200_000)
+
+
 class SessionMigrationRequest(BaseModel):
     target_provider: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,48}$")
     source_provider: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,48}$")
@@ -1946,6 +2109,64 @@ def save_settings(request: PanelSettings) -> dict:
     write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
     audit("provider_switching_setting_changed", enabled=request.provider_switching_enabled)
     return settings
+
+
+@app.get("/api/reverse-proxy/status")
+def reverse_proxy_status() -> dict:
+    """Return deployment state without ever exposing certificate material."""
+    try:
+        result = json.loads(run_host_reverse_proxy_script(reverse_proxy_status_script(), "读取状态", timeout=30))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(502, "反向代理状态返回格式无效") from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    saved = panel_settings().get("reverse_proxy", {})
+    return {
+        "configured": bool(result.get("configured")),
+        "running": bool(result.get("running")),
+        "domain": str(saved.get("domain", "")),
+        "upstream": str(saved.get("upstream", "")),
+    }
+
+
+@app.post("/api/reverse-proxy/apply")
+def apply_reverse_proxy(request: ReverseProxyApplyRequest) -> dict:
+    domain, upstream, certificate_pem, private_key_pem = validate_reverse_proxy_input(
+        request.domain, request.upstream, request.certificate_pem, request.private_key_pem
+    )
+    with REVERSE_PROXY_LOCK:
+        try:
+            result = json.loads(run_host_reverse_proxy_script(
+                reverse_proxy_apply_script(domain, upstream, certificate_pem, private_key_pem),
+                "部署",
+            ))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(502, "反向代理部署返回格式无效") from exc
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
+    # Keep only non-sensitive deployment metadata in the panel's settings file.
+    settings = panel_settings()
+    settings["reverse_proxy"] = {"domain": domain, "upstream": upstream}
+    write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+    audit("reverse_proxy_applied", domain=domain, upstream=upstream)
+    return {
+        "configured": True,
+        "running": bool(result.get("running")),
+        "domain": domain,
+        "upstream": upstream,
+        "detail": "已校验证书并部署反向代理。请在云防火墙中仅公开 80/443，并限制面板端口 8787 的直接访问。",
+    }
+
+
+@app.post("/api/reverse-proxy/disable")
+def disable_reverse_proxy() -> dict:
+    with REVERSE_PROXY_LOCK:
+        try:
+            run_host_reverse_proxy_script(reverse_proxy_disable_script(), "停用", timeout=45)
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
+    audit("reverse_proxy_disabled")
+    return {"running": False, "detail": "反向代理已停用；现有配置和证书仍保留，可在更新证书后再次部署。"}
 
 
 @app.post("/api/providers")
@@ -2672,7 +2893,8 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
  </style>`);
  document.body.insertAdjacentHTML('afterbegin', `<aside class="console-sidebar"><div class="console-brand">Codex 控制台<small>通用服务器管理</small></div><nav class="console-nav"><button data-section="providers" onclick="openConsoleSection('providers')">供应商配置</button><button data-section="health" onclick="openConsoleSection('health')">健康检查</button><button data-section="proxy" onclick="openConsoleSection('proxy')">反向代理</button></nav><button class="console-logout" onclick="logoutConsole()">退出登录</button></aside>`);
  document.querySelector('.top')?.classList.add('console-content');document.querySelectorAll('.page,.detail-top,.detail-main').forEach(e=>e.classList.add('console-content'));
- document.body.insertAdjacentHTML('beforeend', `<section id="console-health" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>健康检查</h2><p class="panel-note">检查 Codex 数据目录、配置文件、认证、当前供应商和磁盘空间，确认服务器是否满足使用条件。</p></div><button class="btn" onclick="runHealth()">立即检查</button></div><div id="health-summary" class="console-health-summary">尚未执行检查。</div><div id="health-checks"></div></div></section><section id="console-proxy" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><h2>反向代理</h2><p class="panel-note">为域名访问生成 Nginx 配置片段。建议启用 HTTPS 和访问认证后再公开服务。</p><div class="console-form"><div><label>域名</label><input id="proxy-domain" placeholder="console.example.com"></div><div><label>上游地址</label><input id="proxy-upstream" value="127.0.0.1:8787"></div><div><label>TLS 证书路径</label><input id="proxy-cert" placeholder="/etc/letsencrypt/live/example/fullchain.pem"></div><div><label>TLS 私钥路径</label><input id="proxy-key" placeholder="/etc/letsencrypt/live/example/privkey.pem"></div><div class="wide"><label>Nginx 配置预览</label><pre id="proxy-config" class="console-code">填写域名后生成</pre></div></div><div class="console-form-actions"><button class="btn" onclick="saveConsoleSettings()">保存反向代理配置</button></div><div id="proxy-notice" class="notice"></div></div></section>`);
+ document.body.insertAdjacentHTML('beforeend', `<section id="console-health" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>健康检查</h2><p class="panel-note">检查 Codex 数据目录、配置文件、认证、当前供应商和磁盘空间，确认服务器是否满足使用条件。</p></div><button class="btn" onclick="runHealth()">立即检查</button></div><div id="health-summary" class="console-health-summary">尚未执行检查。</div><div id="health-checks"></div></div></section><section id="console-proxy" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>反向代理</h2><p class="panel-note">部署独立 Nginx 容器，自动校验证书并重载。证书和私钥仅用于本次部署，不会保存到面板设置。</p></div><span id="proxy-status" class="proxy-status">正在读取状态…</span></div><div class="proxy-warning">部署后请在云防火墙中仅公开 80/443，并限制面板端口 8787 的直接访问。</div><div class="console-form"><div><label>域名</label><input id="proxy-domain" placeholder="console.example.com"></div><div><label>上游地址</label><input id="proxy-upstream" value="codex-provider-console:8787"></div><div class="wide"><label>TLS 证书（PEM）</label><textarea id="proxy-certificate" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea></div><div class="wide"><label>TLS 私钥（PEM）</label><textarea id="proxy-private-key" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----"></textarea></div><div class="wide"><label>Nginx 部署预览</label><pre id="proxy-config" class="console-code">填写域名后生成</pre></div></div><div class="console-form-actions"><button class="btn" type="button" id="proxy-apply">校验并部署</button><button class="btn light" type="button" id="proxy-disable">停用代理</button></div><div id="proxy-notice" class="notice"></div></div></section>`);
+ document.head.insertAdjacentHTML('beforeend','<style>.proxy-status{padding:5px 9px;border:1px solid #d8dde2;border-radius:999px;color:#59616c;background:#f7f8fa;font-size:12px;white-space:nowrap}.proxy-status.running{border-color:#9bd7b3;color:#167143;background:#effaf3}.proxy-warning{margin:12px 0;padding:10px 12px;border-left:3px solid #d69620;border-radius:4px;background:#fff8e8;color:#725114;font-size:12px;line-height:1.5}.proxy-pem{min-height:150px;font:12px/1.45 Consolas,monospace;resize:vertical}</style>');
  requestAnimationFrame(()=>document.body.classList.add('console-ready'));
  async function logoutConsole(){await fetch('/logout',{method:'POST'});location.href='/login'}
  function openConsoleSection(section){let target=section==='providers'?null:document.querySelector('#console-'+section);if(section!=='providers'&&!target){section='providers';target=null}document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';target.style.display='block';if(section==='health')runHealth()}localStorage.setItem('console-section',section)}
@@ -2685,10 +2907,14 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
  async function repairConfig(button){const confirmed=await panelDialog({title:'修复 config.toml',message:'将合并重复的 [features] 配置段，并自动创建备份。不会修改 auth.json。',confirmLabel:'开始修复'});if(!confirmed)return;button.disabled=true;button.textContent='正在修复…';try{const result=await api('/api/health/repair-config',{method:'POST'});await panelDialog({title:'配置已修复',message:result.detail+' 请重新连接 Codex App 后再修改模型。',confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'修复失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='修复配置'}}
  async function deployDeploymentKey(button){const confirmed=await panelDialog({title:'创建部署密钥',message:'将为当前部署用户生成新的 SSH 私钥，并将对应公钥加入 authorized_keys。私钥不会在页面显示，但可由已登录的面板重复下载；请勿分享给他人。',confirmLabel:'创建并部署'});if(!confirmed)return;button.disabled=true;button.textContent='正在部署…';try{const result=await api('/api/health/deployment-key',{method:'POST'});const download=await panelDialog({title:'部署密钥已创建',message:`${result.detail}。私钥可在已登录面板中重复下载，请安全保存且不要分享。`,confirmLabel:'立即下载',cancelLabel:'稍后下载'});if(download)window.location.href=result.download_url;await runHealth()}catch(e){await panelDialog({title:'部署失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='创建并部署密钥'}}
  function downloadDeploymentKey(){window.location.href='/api/health/deployment-key/download'}
- function updateProxyConfig(){const domain=$('#proxy-domain')?.value.trim(),upstream=$('#proxy-upstream')?.value.trim()||'127.0.0.1:8787',cert=$('#proxy-cert')?.value.trim(),key=$('#proxy-key')?.value.trim();$('#proxy-config').textContent=domain?`server {\n    listen 443 ssl;\n    server_name ${domain};\n    ssl_certificate ${cert||'/path/to/fullchain.pem'};\n    ssl_certificate_key ${key||'/path/to/privkey.pem'};\n    location / {\n        proxy_pass http://${upstream};\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    }\n}`:'填写域名后生成'}
- ['proxy-domain','proxy-upstream','proxy-cert','proxy-key'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateProxyConfig));
- async function loadConsoleSettings(){try{const s=await api('/api/settings'),proxy=s.reverse_proxy||{};for(const [id,key] of [['proxy-domain','domain'],['proxy-upstream','upstream'],['proxy-cert','cert'],['proxy-key','key']])if(proxy[key]!=null)$('#'+id).value=proxy[key];updateProxyConfig()}catch{}}
- async function saveConsoleSettings(){try{const s=await api('/api/settings'),payload={provider_switching_enabled:s.provider_switching_enabled,reverse_proxy:{domain:$('#proxy-domain').value.trim(),upstream:$('#proxy-upstream').value.trim()||'127.0.0.1:8787',cert:$('#proxy-cert').value.trim(),key:$('#proxy-key').value.trim()}};await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});note('反向代理配置已保存。','proxy-notice')}catch(e){note(e.message)}}
+ function updateProxyConfig(){const domain=$('#proxy-domain')?.value.trim(),upstream=$('#proxy-upstream')?.value.trim()||'codex-provider-console:8787';$('#proxy-config').textContent=domain?`server {\n    listen 443 ssl;\n    server_name ${domain};\n    ssl_certificate /etc/nginx/certs/certificate.pem;\n    ssl_certificate_key /etc/nginx/certs/private-key.pem;\n    location / {\n        proxy_pass http://${upstream};\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    }\n}`:'填写域名后生成'}
+ async function refreshReverseProxyStatus(){const status=$('#proxy-status');if(!status)return;status.textContent='正在读取状态…';status.classList.remove('running');try{const result=await api('/api/reverse-proxy/status');if(result.domain&&!$('#proxy-domain').value)$('#proxy-domain').value=result.domain;if(result.upstream&&!$('#proxy-upstream').value)$('#proxy-upstream').value=result.upstream;updateProxyConfig();status.textContent=result.running?`运行中 · ${result.domain||'已部署'}`:result.configured?'已配置，当前已停用':'尚未部署';status.classList.toggle('running',result.running)}catch(error){status.textContent='状态读取失败'}}
+ async function loadConsoleSettings(){try{const s=await api('/api/settings'),proxy=s.reverse_proxy||{};for(const [id,key] of [['proxy-domain','domain'],['proxy-upstream','upstream']])if(proxy[key]!=null)$('#'+id).value=proxy[key];updateProxyConfig()}catch{}}
+ async function applyReverseProxy(){const domain=$('#proxy-domain').value.trim(),upstream=$('#proxy-upstream').value.trim()||'codex-provider-console:8787',certificate_pem=$('#proxy-certificate').value,private_key_pem=$('#proxy-private-key').value;if(!await panelDialog({title:'部署反向代理',message:'将校验证书与 Nginx 配置，并在服务器启动或更新 HTTPS 代理。证书和私钥不会写入面板设置。',confirmLabel:'校验并部署'}))return;const button=$('#proxy-apply');button.disabled=true;button.textContent='正在校验并部署…';try{const result=await api('/api/reverse-proxy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain,upstream,certificate_pem,private_key_pem})});$('#proxy-certificate').value='';$('#proxy-private-key').value='';note(result.detail,'proxy-notice');await refreshReverseProxyStatus()}catch(error){note(error.message,'proxy-notice')}finally{button.disabled=false;button.textContent='校验并部署'}}
+ async function disableReverseProxy(){if(!await panelDialog({title:'停用反向代理',message:'将停止 HTTPS 代理容器。已部署的配置和证书会保留，之后可重新提交证书并部署。',confirmLabel:'停用代理'}))return;const button=$('#proxy-disable');button.disabled=true;button.textContent='正在停用…';try{const result=await api('/api/reverse-proxy/disable',{method:'POST'});note(result.detail,'proxy-notice');await refreshReverseProxyStatus()}catch(error){note(error.message,'proxy-notice')}finally{button.disabled=false;button.textContent='停用代理'}}
+ ['proxy-domain','proxy-upstream'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateProxyConfig));
+ document.getElementById('proxy-apply')?.addEventListener('click',applyReverseProxy);document.getElementById('proxy-disable')?.addEventListener('click',disableReverseProxy);
+ const baseOpenConsoleSection=window.openConsoleSection;window.openConsoleSection=function(section){baseOpenConsoleSection(section);if(section==='proxy')refreshReverseProxyStatus()};
  loadConsoleSettings();openConsoleSection(localStorage.getItem('console-section')||'providers');
  </script>'''
     session_management_script = r'''<script>
