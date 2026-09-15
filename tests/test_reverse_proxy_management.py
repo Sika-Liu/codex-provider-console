@@ -30,6 +30,8 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn('"nginx", "-t"', APP)
         self.assertIn('"docker", "compose", "--profile", "reverse-proxy", "up", "-d", "--force-recreate", "reverse-proxy"', APP)
         self.assertNotIn('""".format(domain=data["domain"], upstream=data["upstream"])', APP)
+        self.assertIn("resolver 127.0.0.11 ipv6=off valid=30s;", APP)
+        self.assertIn("proxy_pass $proxy_upstream;", APP)
 
     def test_reverse_proxy_ui_accepts_pem_but_does_not_load_it_back(self):
         self.assertIn('id="proxy-certificate"', APP)

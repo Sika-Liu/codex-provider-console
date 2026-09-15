@@ -1425,8 +1425,13 @@ server {{
     ssl_certificate /etc/nginx/certs/certificate.pem;
     ssl_certificate_key /etc/nginx/certs/private-key.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
+    # Resolve the Compose service name at request time.  This also lets the
+    # isolated `nginx -t` validation container check syntax without joining
+    # the application's Docker network.
+    resolver 127.0.0.11 ipv6=off valid=30s;
+    set $proxy_upstream http://{upstream};
     location / {{
-        proxy_pass http://{upstream};
+        proxy_pass $proxy_upstream;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
