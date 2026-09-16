@@ -76,6 +76,8 @@ MODEL_DIAGNOSTIC_JOBS: dict[str, dict] = {}
 MODEL_DIAGNOSTIC_JOBS_LOCK = threading.Lock()
 PROVIDER_DIAGNOSTIC_JOBS: dict[str, dict] = {}
 PROVIDER_DIAGNOSTIC_JOBS_LOCK = threading.Lock()
+HEALTH_CHECK_JOBS: dict[str, dict] = {}
+HEALTH_CHECK_JOBS_LOCK = threading.Lock()
 REVERSE_PROXY_LOCK = threading.Lock()
 HOST_APP_SERVER_STOP_SCRIPT = r'''
 import os
@@ -1098,7 +1100,11 @@ def fetch_upstream_models(request: UpstreamModelFetch) -> dict:
     raise HTTPException(422, "Unable to fetch upstream models. Check the Base URL, API Key, and model-list endpoint.")
 
 
-def diagnose_profile(profile: dict, progress: Callable[[int, str], None] | None = None) -> dict:
+def diagnose_profile(
+    profile: dict,
+    progress: Callable[[int, str], None] | None = None,
+    on_check: Callable[[dict[str, str]], None] | None = None,
+) -> dict:
     profile = normalize_profile(profile)
     checks: list[dict[str, str]] = []
 
@@ -1111,6 +1117,8 @@ def diagnose_profile(profile: dict, progress: Callable[[int, str], None] | None 
         if diagnostic_detail:
             item["diagnostic_detail"] = diagnostic_detail
         checks.append(item)
+        if on_check:
+            on_check(dict(item))
 
     mode = profile["mode"]
     model = str(profile.get("model", "")).strip()
@@ -1744,7 +1752,7 @@ def migrate_session_provider(
     return {"threads": database_changes, "rollout_files": rollout_files, "rollout_records": rollout_records}
 
 
-def health_check() -> dict:
+def health_check(on_check: Callable[[dict[str, str]], None] | None = None) -> dict:
     checks: list[dict[str, str]] = []
 
     def add(name: str, status: str, detail: str, diagnostic_detail: str | None = None) -> None:
@@ -1752,6 +1760,8 @@ def health_check() -> dict:
         if diagnostic_detail:
             item["diagnostic_detail"] = diagnostic_detail
         checks.append(item)
+        if on_check:
+            on_check(dict(item))
 
     add("Codex 数据目录", "pass" if CODEX_HOME.exists() else "fail", str(CODEX_HOME) if CODEX_HOME.exists() else f"目录不存在：{CODEX_HOME}")
     # The panel mounts the deployment user's home. This is the only filesystem
@@ -1823,9 +1833,11 @@ def health_check() -> dict:
         add("当前供应商", "warning", "尚未激活供应商；请先保存并激活一个供应商")
     else:
         add("当前供应商", "pass", f"{active.get('name', active_id)} ({active_id})")
-        diagnostic = diagnose_profile(active)
-        for item in diagnostic.get("checks", []):
-            add(f"供应商 · {item['name']}", item["status"], item["detail"], item.get("diagnostic_detail"))
+        def add_supplier_check(item: dict[str, str]) -> None:
+            name = "模型目录" if item["name"] == "上游模型目录" else item["name"]
+            add(f"供应商 · {name}", item["status"], item["detail"], item.get("diagnostic_detail"))
+
+        diagnose_profile(active, on_check=add_supplier_check)
 
     try:
         usage = shutil.disk_usage(CODEX_HOME)
@@ -1843,6 +1855,41 @@ def health_check() -> dict:
         "checks": checks,
         "summary": "环境满足使用条件。" if failed == 0 and warnings == 0 else f"发现 {failed} 项失败、{warnings} 项提醒。",
     }
+
+
+def health_check_plan() -> list[dict[str, str]]:
+    """Return the visible checklist without performing filesystem or network checks."""
+    names = [
+        "Codex 数据目录",
+        "Codex CLI",
+        "Codex Desktop 部署密钥",
+        "目录写入权限",
+        "config.toml",
+        "config.toml 语法",
+        "Codex 关键配置",
+        "auth.json",
+        "控制台认证",
+        "当前供应商",
+    ]
+    profiles = read_profiles()
+    active_id = active_provider()
+    active = profiles.get(active_id) if active_id else None
+    if active:
+        profile = normalize_profile(active)
+        if profile["mode"] == "official":
+            names.append("供应商 · 官方认证")
+        else:
+            names.extend([
+                "供应商 · Base URL",
+                "供应商 · API Key",
+                "供应商 · 上游协议",
+                "供应商 · 模型目录",
+            ])
+            if str(profile.get("model", "")).strip():
+                names.append("供应商 · 配置模型可见性")
+            names.append("供应商 · 真实请求")
+    names.append("磁盘空间")
+    return [{"name": name, "status": "pending", "detail": "等待检查"} for name in names]
 
 
 def deployment_key_status() -> tuple[bool, str]:
@@ -2363,6 +2410,64 @@ def get_preflight() -> dict:
 @app.get("/api/health")
 def get_health() -> dict:
     return health_check()
+
+
+@app.get("/api/health/plan")
+def get_health_check_plan() -> dict:
+    return {"checks": health_check_plan()}
+
+
+def health_check_snapshot(job_id: str) -> dict:
+    with HEALTH_CHECK_JOBS_LOCK:
+        job = HEALTH_CHECK_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "健康检查任务不存在或已过期")
+        snapshot = dict(job)
+        snapshot["checks"] = [dict(item) for item in job.get("checks", [])]
+    return snapshot
+
+
+@app.post("/api/health/progress")
+def start_health_check() -> dict:
+    job_id = uuid.uuid4().hex
+    with HEALTH_CHECK_JOBS_LOCK:
+        HEALTH_CHECK_JOBS[job_id] = {
+            "id": job_id,
+            "status": "running",
+            "checks": [],
+            "stage": "正在检查运行环境",
+        }
+
+    def report(item: dict[str, str]) -> None:
+        with HEALTH_CHECK_JOBS_LOCK:
+            job = HEALTH_CHECK_JOBS.get(job_id)
+            if job:
+                job["checks"].append(item)
+                job["stage"] = f"已完成：{item['name']}"
+
+    def run() -> None:
+        try:
+            result = health_check(on_check=report)
+        except Exception as exc:  # pragma: no cover - defensive background boundary
+            with HEALTH_CHECK_JOBS_LOCK:
+                job = HEALTH_CHECK_JOBS.get(job_id)
+                if job:
+                    job.update(status="failed", stage="健康检查失败", detail=str(exc))
+            return
+        with HEALTH_CHECK_JOBS_LOCK:
+            job = HEALTH_CHECK_JOBS.get(job_id)
+            if job:
+                job.update(status="completed", stage="健康检查完成", result=result)
+
+    threading.Thread(target=run, name=f"health-check-{job_id[:8]}", daemon=True).start()
+    return health_check_snapshot(job_id)
+
+
+@app.get("/api/health/progress/{job_id}")
+def get_health_check(job_id: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise HTTPException(422, "无效的健康检查任务标识")
+    return health_check_snapshot(job_id)
 
 
 @app.post("/api/health/repair-config")
@@ -2914,7 +3019,7 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
 </script>'''
     navigation_script = r'''<script>
  document.head.insertAdjacentHTML('beforeend', `<style>
- .console-sidebar{position:fixed;inset:0 auto 0 0;width:228px;background:#202124;color:#f7f8fa;padding:22px 14px;z-index:20;display:flex;flex-direction:column;gap:22px}.console-brand{font-size:17px;font-weight:750;padding:0 12px}.console-brand small{display:block;color:#aeb4bb;font-size:11px;font-weight:400;margin-top:5px}.console-nav{display:grid;gap:5px}.console-nav button{border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-nav button:hover,.console-nav button.active{background:#34373b;color:#fff}.console-logout{margin-top:auto;border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-logout:hover{background:#34373b;color:#fff}.console-content{margin-left:228px}.console-panel{max-width:1320px;margin:22px auto;padding:0 26px}.console-panel .list-shell{background:#fff;border:1px solid #dde1e6;border-radius:11px;padding:18px}.console-panel h2{margin:0 0 7px;font-size:18px}.console-panel .panel-note{color:#686e76;font-size:13px;margin:0 0 18px}.console-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.console-form label{display:block;color:#555c64;font-size:12px;margin-bottom:5px}.console-form input,.console-form select,.console-form textarea{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d2d6da;border-radius:7px;font:inherit;background:#fff}.console-form textarea{min-height:104px;resize:vertical}.console-form .wide{grid-column:1/-1}.console-form-actions{display:flex;gap:8px;margin-top:17px}.console-code{font:12px Consolas,monospace;background:#f4f5f6;color:#30343a;padding:12px;border-radius:7px;white-space:pre-wrap;overflow:auto}.console-muted{color:#727982;font-size:12px}.console-health-summary{margin:8px 0 14px;padding:11px 13px;background:#f4f5f6;border-radius:7px;color:#4b525a}.health-groups{display:grid;gap:16px}.health-group{border-top:1px solid #e4e7eb;padding-top:13px}.health-group h3{margin:0 0 7px;font-size:14px}.health-check{border:1px solid #dfe3e7;border-left:4px solid #2f9e63;border-radius:7px;padding:9px 12px;margin-top:7px}.health-check.warning{border-left-color:#d18b16;background:#fffaf0}.health-check.fail{border-left-color:#d64545;background:#fff5f5}.health-check-top{display:flex;align-items:center;gap:10px;min-width:0}.health-check b{display:block;white-space:nowrap}.health-check small{display:block;margin-top:4px;color:#686e76;line-height:1.45;word-break:break-word}.health-check.compact{padding:8px 12px}.health-check.compact small{margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.health-check details{margin-top:8px}.health-check details summary{cursor:pointer;color:#3a5f8f;font-size:12px}.health-check pre{max-height:220px;overflow:auto;margin:8px 0 0;padding:9px;background:#f4f5f6;border-radius:5px;white-space:pre-wrap;word-break:break-word;font:11px/1.45 Consolas,monospace}.health-copy{margin-top:7px}
+ .console-sidebar{position:fixed;inset:0 auto 0 0;width:228px;background:#202124;color:#f7f8fa;padding:22px 14px;z-index:20;display:flex;flex-direction:column;gap:22px}.console-brand{font-size:17px;font-weight:750;padding:0 12px}.console-brand small{display:block;color:#aeb4bb;font-size:11px;font-weight:400;margin-top:5px}.console-nav{display:grid;gap:5px}.console-nav button{border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-nav button:hover,.console-nav button.active{background:#34373b;color:#fff}.console-logout{margin-top:auto;border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-logout:hover{background:#34373b;color:#fff}.console-content{margin-left:228px}.console-panel{max-width:1320px;margin:22px auto;padding:0 26px}.console-panel .list-shell{background:#fff;border:1px solid #dde1e6;border-radius:11px;padding:18px}.console-panel h2{margin:0 0 7px;font-size:18px}.console-panel .panel-note{color:#686e76;font-size:13px;margin:0 0 18px}.console-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.console-form label{display:block;color:#555c64;font-size:12px;margin-bottom:5px}.console-form input,.console-form select,.console-form textarea{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d2d6da;border-radius:7px;font:inherit;background:#fff}.console-form textarea{min-height:104px;resize:vertical}.console-form .wide{grid-column:1/-1}.console-form-actions{display:flex;gap:8px;margin-top:17px}.console-code{font:12px Consolas,monospace;background:#f4f5f6;color:#30343a;padding:12px;border-radius:7px;white-space:pre-wrap;overflow:auto}.console-muted{color:#727982;font-size:12px}.console-health-summary{margin:8px 0 14px;padding:11px 13px;background:#f4f5f6;border-radius:7px;color:#4b525a}.health-groups{display:grid;gap:16px}.health-group{border-top:1px solid #e4e7eb;padding-top:13px}.health-group h3{margin:0 0 7px;font-size:14px}.health-check{border:1px solid #dfe3e7;border-left:4px solid #2f9e63;border-radius:7px;padding:9px 12px;margin-top:7px}.health-check.warning{border-left-color:#d18b16;background:#fffaf0}.health-check.fail{border-left-color:#d64545;background:#fff5f5}.health-check.pending{border-left-color:#aab2bb;background:#fafbfc}.health-check.running{border-left-color:#3978c4;background:#f4f8ff}.health-check-top{display:flex;align-items:center;gap:10px;min-width:0}.health-check b{display:block;white-space:nowrap}.health-check small{display:block;margin-top:4px;color:#686e76;line-height:1.45;word-break:break-word}.health-check.compact{padding:8px 12px}.health-check.compact small{margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.health-check details{margin-top:8px}.health-check details summary{cursor:pointer;color:#3a5f8f;font-size:12px}.health-check pre{max-height:220px;overflow:auto;margin:8px 0 0;padding:9px;background:#f4f5f6;border-radius:5px;white-space:pre-wrap;word-break:break-word;font:11px/1.45 Consolas,monospace}.health-copy{margin-top:7px}
  @media(max-width:800px){.console-sidebar{width:190px}.console-content{margin-left:190px}.console-form{grid-template-columns:1fr}}
  </style>`);
  document.body.insertAdjacentHTML('afterbegin', `<aside class="console-sidebar"><div class="console-brand">Codex 控制台<small>通用服务器管理</small></div><nav class="console-nav"><button data-section="providers" onclick="openConsoleSection('providers')">供应商配置</button><button data-section="health" onclick="openConsoleSection('health')">健康检查</button><button data-section="proxy" onclick="openConsoleSection('proxy')">反向代理</button></nav><button class="console-logout" onclick="logoutConsole()">退出登录</button></aside>`);
@@ -2922,13 +3027,19 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
  document.body.insertAdjacentHTML('beforeend', `<section id="console-health" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>健康检查</h2><p class="panel-note">检查 Codex 数据目录、配置文件、认证、当前供应商和磁盘空间，确认服务器是否满足使用条件。</p></div><button class="btn" onclick="runHealth()">立即检查</button></div><div id="health-summary" class="console-health-summary">尚未执行检查。</div><div id="health-checks"></div></div></section><section id="console-proxy" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>反向代理</h2><p class="panel-note">部署独立 Nginx 容器，自动校验证书并重载。证书和私钥仅用于本次部署，不会保存到面板设置。</p></div><span id="proxy-status" class="proxy-status">正在读取状态…</span></div><div id="proxy-success-view" class="proxy-success-view" hidden><div class="proxy-success-card"><div class="proxy-success-icon">✓</div><div><h3 id="proxy-success-title">HTTPS 反向代理已运行</h3><p id="proxy-success-copy">HTTPS 入口已就绪。</p></div></div><dl class="proxy-summary"><div><dt>访问地址</dt><dd><a id="proxy-public-url" target="_blank" rel="noopener"></a></dd></div><div><dt>上游服务</dt><dd id="proxy-success-upstream"></dd></div></dl><div class="console-form-actions"><button class="btn" type="button" id="proxy-edit">修改配置</button><button class="btn light" type="button" id="proxy-disable">停用代理</button></div></div><div id="proxy-form-view"><div class="proxy-warning">部署后请在云防火墙中仅公开 80/443，并限制面板端口 8787 的直接访问。</div><div class="console-form"><div><label>域名</label><input id="proxy-domain" placeholder="console.example.com"></div><div><label>上游地址</label><input id="proxy-upstream" value="codex-provider-console:8787"></div><div class="wide"><label>TLS 证书（PEM）</label><textarea id="proxy-certificate" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea></div><div class="wide"><label>TLS 私钥（PEM）</label><textarea id="proxy-private-key" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----"></textarea></div><div class="wide"><label>Nginx 部署预览</label><pre id="proxy-config" class="console-code">填写域名后生成</pre></div></div><div class="console-form-actions"><button class="btn" type="button" id="proxy-apply">校验并部署</button><button class="btn light" type="button" id="proxy-cancel-edit" hidden>取消修改</button></div></div><div id="proxy-notice" class="notice"></div></div></section>`);
  document.head.insertAdjacentHTML('beforeend','<style>.proxy-status{padding:5px 9px;border:1px solid #d8dde2;border-radius:999px;color:#59616c;background:#f7f8fa;font-size:12px;white-space:nowrap}.proxy-status.running{border-color:#9bd7b3;color:#167143;background:#effaf3}.proxy-warning{margin:12px 0;padding:10px 12px;border-left:3px solid #d69620;border-radius:4px;background:#fff8e8;color:#725114;font-size:12px;line-height:1.5}.proxy-pem{min-height:150px;font:12px/1.45 Consolas,monospace;resize:vertical}.proxy-success-view{margin-top:16px}.proxy-success-card{display:flex;align-items:center;gap:13px;padding:17px;border:1px solid #a9ddbc;border-radius:8px;background:#f1fbf4}.proxy-success-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#198754;color:#fff;font-weight:800}.proxy-success-card h3{margin:0;color:#176b40;font-size:16px}.proxy-success-card p{margin:4px 0 0;color:#3f6d51;font-size:13px}.proxy-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}.proxy-summary div{padding:12px;border:1px solid #e0e6e2;border-radius:7px;background:#fafcfb}.proxy-summary dt{font-size:12px;color:#68736c}.proxy-summary dd{margin:5px 0 0;font:13px Consolas,monospace;color:#202b24;overflow-wrap:anywhere}.proxy-summary a{color:#1769aa;text-decoration:none}@media(max-width:650px){.proxy-summary{grid-template-columns:1fr}}</style>');
  requestAnimationFrame(()=>document.body.classList.add('console-ready'));
+ const healthRunButton=document.querySelector('#console-health .row-between .btn');healthRunButton.id='health-run';document.querySelector('#console-health .panel-note').textContent='先查看完整检查清单；点击后会逐项检查运行环境、配置与供应商连接。';$('#health-summary').textContent='正在加载检查清单…';
  async function logoutConsole(){await fetch('/logout',{method:'POST'});location.href='/login'}
- function openConsoleSection(section){let target=section==='providers'?null:document.querySelector('#console-'+section);if(section!=='providers'&&!target){section='providers';target=null}document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';target.style.display='block';if(section==='health')runHealth()}localStorage.setItem('console-section',section)}
+ function openConsoleSection(section){let target=section==='providers'?null:document.querySelector('#console-'+section);if(section!=='providers'&&!target){section='providers';target=null}document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';target.style.display='block';if(section==='health')loadHealthPlan()}localStorage.setItem('console-section',section)}
  function healthCategory(name){if(name.startsWith('供应商 ·')||name==='当前供应商')return '供应商连接';if(['config.toml','config.toml 语法','Codex 关键配置','auth.json','控制台认证'].includes(name))return 'Codex 配置';return '运行环境'}
  function healthActions(item){const cli=item.name==='Codex CLI'&&item.status==='fail'?'<p><button class="btn small" onclick="installCodexCli(this)">安装 Codex CLI</button></p>':'';const key=item.name==='Codex Desktop 部署密钥'?`<p><button class="btn small" onclick="${item.status==='pass'?'downloadDeploymentKey()':'deployDeploymentKey(this)'}">${item.status==='pass'?'下载部署密钥':'创建并部署密钥'}</button></p>`:'';const config=item.name==='config.toml 语法'&&item.status==='fail'?'<p><button class="btn small" onclick="repairConfig(this)">修复配置</button></p>':'';return cli+key+config}
  function copyHealthDiagnostic(button){const detail=decodeURIComponent(button.dataset.detail||'');navigator.clipboard?.writeText(detail).then(()=>{button.textContent='已复制'}).catch(()=>{button.textContent='复制失败'})}
- function healthRow(item){const problem=item.status!=='pass',label=item.status==='pass'?'通过':item.status==='warning'?'提醒':'失败',diagnostic=item.diagnostic_detail&&item.diagnostic_detail!==item.detail?`<details><summary>查看诊断详情</summary><pre>${esc(item.diagnostic_detail)}</pre><button class="btn small health-copy" data-detail="${encodeURIComponent(item.diagnostic_detail)}" onclick="copyHealthDiagnostic(this)">复制诊断详情</button></details>`:'';return `<div class="health-check ${item.status} ${problem?'':'compact'}"><div class="health-check-top"><b>${label} · ${esc(item.name)}</b><small title="${esc(item.detail)}">${esc(item.detail)}</small></div>${diagnostic}${healthActions(item)}</div>`}
- async function runHealth(){const summary=$('#health-summary'),list=$('#health-checks');summary.textContent='正在检查服务器环境和供应商连通性…';list.innerHTML='';try{const d=await api('/api/health'),checks=d.checks||[],passed=checks.filter(item=>item.status==='pass').length,warnings=checks.filter(item=>item.status==='warning').length,failed=checks.filter(item=>item.status==='fail').length;summary.textContent=`${d.summary} · ${passed} 项通过${warnings?`，${warnings} 项提醒`:''}${failed?`，${failed} 项失败`:''}`;const groups=['运行环境','Codex 配置','供应商连接'];list.className='health-groups';list.innerHTML=groups.map(group=>{const items=checks.filter(item=>healthCategory(item.name)===group);return items.length?`<section class="health-group"><h3>${group}</h3>${items.map(healthRow).join('')}</section>`:''}).join('')}catch(e){summary.textContent='健康检查失败：'+e.message}}
+ function healthRow(item){const problem=['warning','fail'].includes(item.status),label=item.status==='pass'?'通过':item.status==='warning'?'提醒':item.status==='fail'?'失败':item.status==='running'?'检查中':'未检查',diagnostic=item.diagnostic_detail&&item.diagnostic_detail!==item.detail?`<details><summary>查看诊断详情</summary><pre>${esc(item.diagnostic_detail)}</pre><button class="btn small health-copy" data-detail="${encodeURIComponent(item.diagnostic_detail)}" onclick="copyHealthDiagnostic(this)">复制诊断详情</button></details>`:'';return `<div class="health-check ${item.status} ${problem?'':'compact'}"><div class="health-check-top"><b>${label} · ${esc(item.name)}</b><small title="${esc(item.detail)}">${esc(item.detail)}</small></div>${diagnostic}${healthActions(item)}</div>`}
+ let healthChecks=[],healthPoll=null,healthPlanLoaded=false;
+ function renderHealthChecks(){const list=$('#health-checks'),groups=['运行环境','Codex 配置','供应商连接'];list.className='health-groups';list.innerHTML=groups.map(group=>{const items=healthChecks.filter(item=>healthCategory(item.name)===group);return items.length?`<section class="health-group"><h3>${group}</h3>${items.map(healthRow).join('')}</section>`:''}).join('')}
+ async function loadHealthPlan(){if(healthPlanLoaded)return;const summary=$('#health-summary');try{const result=await api('/api/health/plan');healthChecks=result.checks||[];healthPlanLoaded=true;summary.textContent='共 '+healthChecks.length+' 项检查。点击“立即检查”开始。';renderHealthChecks()}catch(error){summary.textContent='无法加载检查清单：'+error.message}}
+ function mergeHealthChecks(completed){const byName=new Map(completed.map(item=>[item.name,item]));healthChecks=healthChecks.map(item=>byName.get(item.name)||item);for(const item of completed)if(!healthChecks.some(existing=>existing.name===item.name))healthChecks.push(item)}
+ function healthSummary(stage){const completed=healthChecks.filter(item=>['pass','warning','fail'].includes(item.status)),passed=healthChecks.filter(item=>item.status==='pass').length,warnings=healthChecks.filter(item=>item.status==='warning').length,failed=healthChecks.filter(item=>item.status==='fail').length;return `${stage} · 已完成 ${completed.length}/${healthChecks.length} 项${passed?`，${passed} 项通过`:''}${warnings?`，${warnings} 项提醒`:''}${failed?`，${failed} 项失败`:''}`}
+ async function runHealth(){if(healthPoll)return;await loadHealthPlan();const summary=$('#health-summary'),button=$('#health-run');healthChecks=healthChecks.map(item=>({...item,status:'pending',detail:'等待检查'}));renderHealthChecks();button.disabled=true;button.textContent='检查中…';try{const started=await api('/api/health/progress',{method:'POST'});const poll=async()=>{try{const job=await api(`/api/health/progress/${encodeURIComponent(started.id)}`);mergeHealthChecks(job.checks||[]);summary.textContent=healthSummary(job.stage||'正在检查');renderHealthChecks();if(job.status==='running'){healthPoll=setTimeout(poll,250);return}healthPoll=null;button.disabled=false;button.textContent='重新检查';if(job.status==='completed')summary.textContent=healthSummary(job.result?.summary||'健康检查完成');else summary.textContent='健康检查失败：'+(job.detail||'任务执行失败')}catch(error){healthPoll=null;button.disabled=false;button.textContent='重新检查';summary.textContent='健康检查失败：'+error.message}};healthPoll=setTimeout(poll,80)}catch(error){button.disabled=false;button.textContent='立即检查';summary.textContent='健康检查请求未能启动：'+error.message}}
  async function installCodexCli(button){const confirmed=await panelDialog({title:'安装 Codex CLI',message:'将为部署用户安装官方 Codex CLI。安装完成后会自动重新检查环境。',confirmLabel:'开始安装'});if(!confirmed)return;button.disabled=true;button.textContent='正在安装…';try{const result=await api('/api/health/install-codex',{method:'POST'});await panelDialog({title:'Codex CLI 已安装',message:result.detail,confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'安装失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='安装 Codex CLI'}}
  async function repairConfig(button){const confirmed=await panelDialog({title:'修复 config.toml',message:'将合并重复的 [features] 配置段，并自动创建备份。不会修改 auth.json。',confirmLabel:'开始修复'});if(!confirmed)return;button.disabled=true;button.textContent='正在修复…';try{const result=await api('/api/health/repair-config',{method:'POST'});await panelDialog({title:'配置已修复',message:result.detail+' 请重新连接 Codex App 后再修改模型。',confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'修复失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='修复配置'}}
  async function deployDeploymentKey(button){const confirmed=await panelDialog({title:'创建部署密钥',message:'将为当前部署用户生成新的 SSH 私钥，并将对应公钥加入 authorized_keys。私钥不会在页面显示，但可由已登录的面板重复下载；请勿分享给他人。',confirmLabel:'创建并部署'});if(!confirmed)return;button.disabled=true;button.textContent='正在部署…';try{const result=await api('/api/health/deployment-key',{method:'POST'});const download=await panelDialog({title:'部署密钥已创建',message:`${result.detail}。私钥可在已登录面板中重复下载，请安全保存且不要分享。`,confirmLabel:'立即下载',cancelLabel:'稍后下载'});if(download)window.location.href=result.download_url;await runHealth()}catch(e){await panelDialog({title:'部署失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='创建并部署密钥'}}

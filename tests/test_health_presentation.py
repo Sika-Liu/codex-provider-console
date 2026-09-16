@@ -17,3 +17,12 @@ class HealthPresentationTests(unittest.TestCase):
         self.assertIn("复制诊断详情", source)
         self.assertIn("health-check ${item.status} ${problem?'':'compact'}", source)
 
+    def test_health_page_loads_a_plan_then_polls_incremental_results(self):
+        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        self.assertIn('@app.get("/api/health/plan")', source)
+        self.assertIn('@app.post("/api/health/progress")', source)
+        self.assertIn('@app.get("/api/health/progress/{job_id}")', source)
+        self.assertIn("async function loadHealthPlan()", source)
+        self.assertIn("/api/health/progress", source)
+        self.assertIn("if(section==='health')loadHealthPlan()", source)
+        self.assertNotIn("if(section==='health')runHealth()", source)
