@@ -56,6 +56,11 @@ RELAY_BASE_URL = os.environ.get("RELAY_BASE_URL", "http://codex-provider-relay:5
 # the host-published loopback endpoint instead.
 HOST_RELAY_BASE_URL = os.environ.get("HOST_RELAY_BASE_URL", "http://127.0.0.1:57321/v1")
 BACKUP_ROOT = CODEX_HOME / "backups" / "control-panel"
+BACKUP_METADATA_NAME = "metadata.json"
+# Provider switches are routine operations. Keep a small rollback window for
+# them without touching snapshots created by explicit repair or migration
+# operations.
+PROVIDER_SWITCH_BACKUP_RETENTION = 5
 AUDIT_PATH = CODEX_HOME / "control-panel-audit.jsonl"
 PROFILE_ID = re.compile(r"^[a-zA-Z0-9_-]{1,48}$")
 THREAD_ID = re.compile(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -502,9 +507,18 @@ def write_private(path: Path, text: str) -> None:
     os.replace(temp, path)
 
 
-def backup_state(include_sessions: bool = False) -> tuple[str, Path]:
+def backup_state(include_sessions: bool = False, reason: str | None = None) -> tuple[str, Path]:
     destination = BACKUP_ROOT / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     destination.mkdir(parents=True, mode=0o700)
+    if reason:
+        write_private(
+            destination / BACKUP_METADATA_NAME,
+            json.dumps(
+                {"reason": reason, "created_at": datetime.now(timezone.utc).isoformat()},
+                ensure_ascii=False,
+            )
+            + "\n",
+        )
     for source in (CONFIG_PATH, PROFILE_PATH, SETTINGS_PATH, AUTH_PATH):
         if source.exists():
             target = destination / source.name
@@ -530,6 +544,41 @@ def backup_state(include_sessions: bool = False) -> tuple[str, Path]:
             shutil.copy2(SESSION_INDEX_PATH, target)
             os.chmod(target, 0o600)
     return destination.name, destination
+
+
+def prune_provider_switch_backups(retain: int = PROVIDER_SWITCH_BACKUP_RETENTION) -> list[str]:
+    """Keep only the newest managed provider-switch snapshots.
+
+    The backup root also contains snapshots from repair and session migration.
+    Only directories explicitly marked as provider-switch backups are eligible
+    for automatic cleanup.
+    """
+    if not BACKUP_ROOT.is_dir():
+        return []
+    managed: list[Path] = []
+    for candidate in BACKUP_ROOT.iterdir():
+        if not candidate.is_dir() or candidate.parent != BACKUP_ROOT:
+            continue
+        metadata_path = candidate / BACKUP_METADATA_NAME
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(metadata, dict) and metadata.get("reason") == "provider_switch":
+            managed.append(candidate)
+
+    removed: list[str] = []
+    for candidate in sorted(managed, key=lambda path: path.name, reverse=True)[max(retain, 0):]:
+        # candidate is a direct child discovered from BACKUP_ROOT above; do not
+        # recurse through any path supplied externally.
+        try:
+            shutil.rmtree(candidate)
+            removed.append(candidate.name)
+        except OSError:
+            # A stale snapshot must not make an otherwise successful provider
+            # switch report failure. It will be retried after the next switch.
+            continue
+    return removed
 
 
 def restore_session_state(backup_dir: Path) -> None:
@@ -1959,7 +2008,7 @@ def _switch_provider(
             backfilled_provider_id = previous_provider_id
 
     report(48, "正在创建配置备份")
-    backup_id, backup_dir = backup_state(include_sessions=True)
+    backup_id, backup_dir = backup_state(include_sessions=True, reason="provider_switch")
     base = remove_goals_feature(canonicalize_base_config(config_text()))
     if mode == "pure_api" and not profile.get("bearer_token") and not profile.get("no_auth", False):
         raise HTTPException(422, "An API key is required for a pure API provider")
@@ -2068,6 +2117,7 @@ def _switch_provider(
         audit("provider_switch_failed", provider_id=provider_id, detail=str(exc))
         raise HTTPException(502, "供应商配置未能完成应用；已恢复旧配置并尝试重新启动 Codex App Server。") from exc
     report(96, "正在确认新配置")
+    pruned_backup_ids = prune_provider_switch_backups()
     runtime_detail = "Codex App Server 已重启，新的连接会读取当前供应商配置。"
     if diagnostic_warnings:
         runtime_detail += " 诊断警告：" + "；".join(diagnostic_warnings)
@@ -2082,6 +2132,7 @@ def _switch_provider(
         migration=migration,
         diagnostic_warnings=diagnostic_warnings,
         app_server_restarted=True,
+        pruned_backup_ids=",".join(pruned_backup_ids) or None,
     )
     return {
         "active_provider": provider_id,
@@ -2092,6 +2143,7 @@ def _switch_provider(
         "mode": mode,
         "migration": migration,
         "diagnostic_warnings": diagnostic_warnings,
+        "pruned_backup_ids": pruned_backup_ids,
         "runtime": runtime,
     }
 
@@ -2956,6 +3008,10 @@ def index() -> str:
     official_panel = '''<div id="official-fields" class="field-help" style="display:none"><div>官方登录使用设备码流程，不写入 API Key。</div><div style="margin-top:8px"><button id="official-login-btn" type="button" class="btn light small" onclick="startOfficialLogin()">开始官方登录</button> <button id="official-refresh-btn" type="button" class="btn light small" onclick="startOfficialLogin()">刷新令牌（重新登录）</button> <button id="official-cancel-btn" type="button" class="btn light small" onclick="cancelOfficialLogin()" style="display:none">取消登录</button></div><div id="official-login-flow" style="display:none;margin-top:10px;padding:10px 12px;border:1px solid #d2d6da;border-radius:7px;background:#f8fafc"><div id="official-login-status">正在准备登录…</div><div id="official-login-code" style="display:none;margin-top:8px;font-weight:700;font-family:monospace"></div><a id="official-login-link" target="_blank" rel="noopener" style="display:none;margin-top:6px;word-break:break-all"></a></div><div id="capture-auth-status" class="muted" style="margin-top:7px">请先保存该档案，再开始官方登录。</div><div style="margin-top:7px">登录完成后可在下方 auth.json 区域查看或编辑认证内容。</div></div>'''
     old_panel = '''<div id="official-fields" class="field-help" style="display:none">官方登录档案会使用当前服务器的 Codex 登录状态。保存档案后点击“捕获当前官方登录”建立加密前的本地认证快照；快照不会在页面显示。</div>'''
     official_script = r'''<script>
+document.head.insertAdjacentHTML('beforeend','<style>#panel-toast{position:fixed;z-index:1401;top:16px;left:50%;width:min(760px,calc(100vw - 32px));padding:12px 16px;border:1px solid #f0cf85;border-radius:9px;background:#fff7df;color:#69521c;box-shadow:0 14px 34px #1f29371f;line-height:1.55;opacity:0;pointer-events:none;visibility:hidden;transform:translate(-50%,-24px);transition:transform .24s ease,opacity .24s ease,visibility 0s linear .24s}#panel-toast.show{opacity:1;visibility:visible;transform:translate(-50%,0);transition:transform .24s ease,opacity .24s ease}#panel-toast.leaving{opacity:0;visibility:visible;transform:translate(-50%,-18px);transition:transform .28s ease,opacity .28s ease}@media(max-width:760px){#panel-toast{top:10px;width:calc(100vw - 24px)}}</style>');
+document.body.insertAdjacentHTML('beforeend','<div id="panel-toast" role="status" aria-live="polite"></div>');
+let panelToastHideTimer=null,panelToastClearTimer=null;
+function note(text,_where){const toast=$('#panel-toast');if(!toast)return;clearTimeout(panelToastHideTimer);clearTimeout(panelToastClearTimer);toast.textContent=text;toast.classList.remove('leaving');void toast.offsetWidth;toast.classList.add('show');panelToastHideTimer=setTimeout(()=>{toast.classList.remove('show');toast.classList.add('leaving');panelToastClearTimer=setTimeout(()=>toast.classList.remove('leaving'),280)},3000)}
 document.head.insertAdjacentHTML('beforeend','<style>#model-list.model-list-box{min-height:150px;max-height:300px;overflow:auto;border:1px solid #d2d6da;border-radius:7px;background:#fff;padding:10px 12px}.model-entry{line-height:1.8;font:14px "Consolas","Microsoft YaHei",sans-serif;color:#2c3035}.model-entry:empty{display:none}.doctor-mask{display:none;position:fixed;inset:0;background:#0008;z-index:1000;align-items:center;justify-content:center}.doctor-mask.show{display:flex}.doctor-card{width:min(560px,calc(100vw - 32px));background:#fff;border-radius:11px;padding:19px;box-shadow:0 18px 60px #0004}.doctor-title{font-size:18px;font-weight:500}.doctor-summary{margin:8px 0 12px;color:#656b73}.doctor-progress{height:8px;background:#e8ebee;border-radius:999px;overflow:hidden;margin-bottom:10px}.doctor-progress i{display:block;height:100%;width:0;background:#1683ff;border-radius:inherit;transition:width .22s}.doctor-check{min-height:64px;border:1px solid #e1e4e8;border-radius:9px;padding:12px 12px 12px 50px;margin-top:10px;position:relative}.doctor-check:before{content:"✓";position:absolute;left:15px;top:17px;width:20px;height:20px;border-radius:50%;background:#f0f1f2;color:#1683ff;display:grid;place-items:center;font-size:12px;font-weight:700}.doctor-check b{display:block}.doctor-check small{display:block;color:#6a7078;margin-top:5px;line-height:1.45}.doctor-check.real-result.expanded{height:130px;overflow:hidden}.doctor-check.real-result.expanded small{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:5;overflow:hidden}.doctor-check.running{border-color:#acd4ff}.doctor-check.running:before{content:"◌"}.doctor-check.fail:before{content:"!";color:#ed5b5b}.doctor-check.warning:before{content:"";background:#f0f1f2}.doctor-advice{margin-top:10px}.doctor-advice .doctor-check{margin-top:0}.doctor-advice .doctor-check:before{content:"◆";color:#e49a13;font-size:10px}</style>');
 document.head.insertAdjacentHTML('beforeend','<style>.btn:disabled{background:#c8ccd1;color:#777d85;cursor:not-allowed}#panel-dialog-mask{display:none;position:fixed;inset:0;z-index:1200;background:#11182773;align-items:center;justify-content:center;padding:20px}#panel-dialog-mask.show{display:flex}.panel-dialog{width:min(460px,100%);box-sizing:border-box;border:1px solid #dfe3e7;border-radius:8px;background:#fff;padding:20px;box-shadow:0 22px 60px #0003}.panel-dialog h3{margin:0;color:#202328;font-size:18px}.panel-dialog p{margin:10px 0 0;color:#4d5560;line-height:1.6}.panel-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}.panel-dialog-actions .btn{min-width:76px}</style>');
 document.head.insertAdjacentHTML('beforeend','<style>#list-view.console-content{max-width:none;margin:22px 0 22px 228px;padding:0 26px}.provider-actions{display:flex;gap:6px;margin-left:auto;opacity:0;pointer-events:none;transition:opacity .15s}.provider-card{cursor:default}.provider-card:hover .provider-actions,.provider-card:focus-within .provider-actions{opacity:1;pointer-events:auto}.provider-action{min-width:52px;height:30px;padding:0 9px;border:1px solid #d7d9dd;border-radius:6px;background:#fff;color:#30343a;font:inherit;font-size:12px;cursor:pointer}.provider-action:hover{border-color:#8a929c;background:#f4f5f6}.provider-action.danger{color:#b42318}.provider-main{min-width:0}.provider-card.active .provider-action{background:#fff}@media(max-width:800px){#list-view.console-content{margin-left:190px}}@media(max-width:760px){#list-view.console-content{padding:0 13px}.provider-card{align-items:flex-start;flex-wrap:wrap}.provider-actions{width:100%;margin-left:47px;opacity:1;pointer-events:auto}.provider-action{flex:1}}</style>');
