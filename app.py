@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import secrets
 import sqlite3
 import subprocess
 import tomllib
@@ -225,6 +226,35 @@ LOGIN_FAILURES_LOCK = threading.Lock()
 LOGIN_FAILURES: dict[str, list[float]] = {}
 
 
+def _read_auth_overrides() -> dict:
+    try:
+        raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8")) if SETTINGS_PATH.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+_AUTH_OVERRIDES = _read_auth_overrides()
+if _AUTH_OVERRIDES.get("panel_username"):
+    PANEL_USERNAME = str(_AUTH_OVERRIDES["panel_username"])
+if _AUTH_OVERRIDES.get("panel_password_hash"):
+    PANEL_PASSWORD = ""
+if _AUTH_OVERRIDES.get("panel_session_secret"):
+    SESSION_SECRET = str(_AUTH_OVERRIDES["panel_session_secret"])
+if "panel_cookie_secure" in _AUTH_OVERRIDES:
+    COOKIE_SECURE = bool(_AUTH_OVERRIDES["panel_cookie_secure"])
+
+
+def current_password_matches(password: str) -> bool:
+    overrides = _read_auth_overrides()
+    stored_hash = str(overrides.get("panel_password_hash") or "")
+    if stored_hash:
+        salt = str(overrides.get("panel_password_salt") or "")
+        candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 210_000).hex()
+        return hmac.compare_digest(candidate, stored_hash)
+    return bool(PANEL_PASSWORD) and hmac.compare_digest(password, PANEL_PASSWORD)
+
+
 class DeviceLoginSession:
     """Owns one local Codex app-server device-code login without exposing tokens."""
 
@@ -413,7 +443,8 @@ class LoginRequest(BaseModel):
 
 
 def auth_configured() -> bool:
-    return bool(PANEL_USERNAME and PANEL_PASSWORD and SESSION_SECRET)
+    overrides = _read_auth_overrides()
+    return bool(PANEL_USERNAME and (PANEL_PASSWORD or overrides.get("panel_password_hash")) and SESSION_SECRET)
 
 
 def session_token(username: str) -> str:
@@ -501,7 +532,7 @@ def login(credentials: LoginRequest, request: Request) -> JSONResponse:
     client_key = login_client_key(request)
     if login_is_rate_limited(client_key):
         raise HTTPException(429, "登录尝试过多，请 5 分钟后重试")
-    if not (hmac.compare_digest(credentials.username, PANEL_USERNAME) and hmac.compare_digest(credentials.password, PANEL_PASSWORD)):
+    if not (hmac.compare_digest(credentials.username, PANEL_USERNAME) and current_password_matches(credentials.password)):
         record_failed_login(client_key)
         raise HTTPException(401, "用户名或密码错误")
     clear_failed_logins(client_key)
@@ -2140,7 +2171,7 @@ def _switch_provider(
                 apply=True,
                 backup_dir=backup_dir,
             )
-            settings = panel_settings()
+            settings = _read_auth_overrides()
             settings["active_provider_id"] = provider_id
             write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
             report(88, "正在启动 Codex App Server")
@@ -2237,6 +2268,13 @@ class PanelSettings(BaseModel):
     active_provider_id: str | None = Field(default=None, pattern=r"^(|[a-zA-Z0-9_-]{1,48})$")
 
 
+class AccountSecurityRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    username: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
+    new_password: str | None = Field(default=None, min_length=8, max_length=256)
+    cookie_secure: bool = False
+
+
 class ReverseProxyApplyRequest(BaseModel):
     domain: str = Field(min_length=1, max_length=253)
     upstream: str = Field(min_length=1, max_length=255)
@@ -2257,7 +2295,7 @@ def get_settings() -> dict:
 
 @app.post("/api/settings")
 def save_settings(request: PanelSettings) -> dict:
-    settings = panel_settings()
+    settings = _read_auth_overrides()
     settings["provider_switching_enabled"] = request.provider_switching_enabled
     settings["reverse_proxy"] = request.reverse_proxy
     if request.active_provider_id is not None:
@@ -2265,6 +2303,44 @@ def save_settings(request: PanelSettings) -> dict:
     write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
     audit("provider_switching_setting_changed", enabled=request.provider_switching_enabled)
     return settings
+
+
+@app.get("/api/account")
+def get_account_settings() -> dict:
+    return {
+        "username": PANEL_USERNAME,
+        "cookie_secure": COOKIE_SECURE,
+        "panel_bind": PANEL_BIND,
+        "public_bind_warning": PANEL_BIND not in {"127.0.0.1", "localhost", "::1"},
+        "restart_required_for_bind": True,
+    }
+
+
+@app.post("/api/account")
+def save_account_settings(request: AccountSecurityRequest) -> dict:
+    global PANEL_USERNAME, PANEL_PASSWORD, SESSION_SECRET, COOKIE_SECURE
+    if not current_password_matches(request.current_password):
+        raise HTTPException(401, "当前密码不正确")
+    settings = _read_auth_overrides()
+    settings["panel_username"] = request.username
+    settings["panel_cookie_secure"] = request.cookie_secure
+    password_to_store = request.new_password or request.current_password
+    if request.new_password or not settings.get("panel_password_hash"):
+        salt = secrets.token_urlsafe(24)
+        settings["panel_password_salt"] = salt
+        settings["panel_password_hash"] = hashlib.pbkdf2_hmac(
+            "sha256", password_to_store.encode("utf-8"), salt.encode("utf-8"), 210_000
+        ).hex()
+    settings["panel_session_secret"] = secrets.token_urlsafe(32)
+    write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+    PANEL_USERNAME = request.username
+    PANEL_PASSWORD = ""
+    SESSION_SECRET = settings["panel_session_secret"]
+    COOKIE_SECURE = request.cookie_secure
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.clear()
+    audit("account_security_settings_changed", username=request.username, cookie_secure=request.cookie_secure)
+    return {"username": PANEL_USERNAME, "cookie_secure": COOKIE_SECURE, "sessions_invalidated": True}
 
 
 @app.get("/api/reverse-proxy/status")
@@ -2301,7 +2377,7 @@ def apply_reverse_proxy(request: ReverseProxyApplyRequest) -> dict:
         except RuntimeError as exc:
             raise HTTPException(502, str(exc)) from exc
     # Keep only non-sensitive deployment metadata in the panel's settings file.
-    settings = panel_settings()
+    settings = _read_auth_overrides()
     settings["reverse_proxy"] = {"domain": domain, "upstream": upstream}
     write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
     audit("reverse_proxy_applied", domain=domain, upstream=upstream)
@@ -2322,7 +2398,7 @@ def delete_reverse_proxy_after_response() -> None:
         except RuntimeError as exc:
             audit("reverse_proxy_delete_failed", detail=str(exc)[:500])
             return
-    settings = panel_settings()
+    settings = _read_auth_overrides()
     settings["reverse_proxy"] = {}
     write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
     audit("reverse_proxy_deleted")
@@ -3160,14 +3236,17 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
  .console-sidebar{position:fixed;inset:0 auto 0 0;width:228px;background:#202124;color:#f7f8fa;padding:22px 14px;z-index:20;display:flex;flex-direction:column;gap:22px}.console-brand{font-size:17px;font-weight:750;padding:0 12px}.console-brand small{display:block;color:#aeb4bb;font-size:11px;font-weight:400;margin-top:5px}.console-nav{display:grid;gap:5px}.console-nav button{border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-nav button:hover,.console-nav button.active{background:#34373b;color:#fff}.console-logout{margin-top:auto;border:0;background:transparent;color:#cfd3d8;text-align:left;border-radius:7px;padding:11px 12px;font:inherit;cursor:pointer}.console-logout:hover{background:#34373b;color:#fff}.console-content{margin-left:228px}.console-panel{max-width:1320px;margin:22px auto;padding:0 26px}.console-panel .list-shell{background:#fff;border:1px solid #dde1e6;border-radius:11px;padding:18px}.console-panel h2{margin:0 0 7px;font-size:18px}.console-panel .panel-note{color:#686e76;font-size:13px;margin:0 0 18px}.console-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.console-form label{display:block;color:#555c64;font-size:12px;margin-bottom:5px}.console-form input,.console-form select,.console-form textarea{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid #d2d6da;border-radius:7px;font:inherit;background:#fff}.console-form textarea{min-height:104px;resize:vertical}.console-form .wide{grid-column:1/-1}.console-form-actions{display:flex;gap:8px;margin-top:17px}.console-code{font:12px Consolas,monospace;background:#f4f5f6;color:#30343a;padding:12px;border-radius:7px;white-space:pre-wrap;overflow:auto}.console-muted{color:#727982;font-size:12px}.console-health-summary{margin:8px 0 14px;padding:11px 13px;background:#f4f5f6;border-radius:7px;color:#4b525a}.health-groups{display:grid;gap:16px}.health-group{border-top:1px solid #e4e7eb;padding-top:13px}.health-group h3{margin:0 0 7px;font-size:14px}.health-check{border:1px solid #dfe3e7;border-left:4px solid #2f9e63;border-radius:7px;padding:9px 12px;margin-top:7px}.health-check.warning{border-left-color:#d18b16;background:#fffaf0}.health-check.fail{border-left-color:#d64545;background:#fff5f5}.health-check.pending{border-left-color:#aab2bb;background:#fafbfc}.health-check.running{border-left-color:#3978c4;background:#f4f8ff}.health-check-top{display:flex;align-items:center;gap:10px;min-width:0}.health-check b{display:block;white-space:nowrap}.health-check small{display:block;margin-top:4px;color:#686e76;line-height:1.45;word-break:break-word}.health-check.compact{padding:8px 12px}.health-check.compact small{margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.health-check details{margin-top:8px}.health-check details summary{cursor:pointer;color:#3a5f8f;font-size:12px}.health-check pre{max-height:220px;overflow:auto;margin:8px 0 0;padding:9px;background:#f4f5f6;border-radius:5px;white-space:pre-wrap;word-break:break-word;font:11px/1.45 Consolas,monospace}.health-copy{margin-top:7px}
  @media(max-width:800px){.console-sidebar{width:190px}.console-content{margin-left:190px}.console-form{grid-template-columns:1fr}}
  </style>`);
- document.body.insertAdjacentHTML('afterbegin', `<aside class="console-sidebar"><div class="console-brand">Codex 控制台<small>通用服务器管理</small></div><nav class="console-nav"><button data-section="providers" onclick="openConsoleSection('providers')">供应商配置</button><button data-section="health" onclick="openConsoleSection('health')">健康检查</button><button data-section="proxy" onclick="openConsoleSection('proxy')">反向代理</button></nav><button class="console-logout" onclick="logoutConsole()">退出登录</button></aside>`);
+ document.body.insertAdjacentHTML('afterbegin', `<aside class="console-sidebar"><div class="console-brand">Codex 控制台<small>通用服务器管理</small></div><nav class="console-nav"><button data-section="providers" onclick="openConsoleSection('providers')">供应商配置</button><button data-section="health" onclick="openConsoleSection('health')">健康检查</button><button data-section="proxy" onclick="openConsoleSection('proxy')">反向代理</button><button data-section="settings" onclick="openConsoleSection('settings')">系统设置</button></nav><button class="console-logout" onclick="logoutConsole()">退出登录</button></aside>`);
  document.querySelector('.top')?.classList.add('console-content');document.querySelectorAll('.page,.detail-top,.detail-main').forEach(e=>e.classList.add('console-content'));
  document.body.insertAdjacentHTML('beforeend', `<section id="console-health" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>健康检查</h2><p class="panel-note">检查 Codex 数据目录、配置文件、认证、当前供应商和磁盘空间，确认服务器是否满足使用条件。</p></div><button class="btn" onclick="runHealth()">立即检查</button></div><div id="health-summary" class="console-health-summary">尚未执行检查。</div><div id="health-checks"></div></div></section><section id="console-proxy" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>反向代理</h2><p class="panel-note">部署独立 Nginx 容器，自动校验证书并重载。证书和私钥仅用于本次部署，不会保存到面板设置。</p></div><span id="proxy-status" class="proxy-status">正在读取状态…</span></div><div id="proxy-success-view" class="proxy-success-view" hidden><div class="proxy-success-card"><div class="proxy-success-icon">✓</div><div><h3 id="proxy-success-title">HTTPS 反向代理已运行</h3><p id="proxy-success-copy">HTTPS 入口已就绪。</p></div></div><dl class="proxy-summary"><div><dt>访问地址</dt><dd><a id="proxy-public-url" target="_blank" rel="noopener"></a></dd></div><div><dt>上游服务</dt><dd id="proxy-success-upstream"></dd></div></dl><div class="console-form-actions"><button class="btn" type="button" id="proxy-edit">修改配置</button><button class="btn light" type="button" id="proxy-disable">停用代理</button></div></div><div id="proxy-form-view"><div class="proxy-warning">部署后请在云防火墙中仅公开 80/443，并限制面板端口 8787 的直接访问。</div><div class="console-form"><div><label>域名</label><input id="proxy-domain" placeholder="console.example.com"></div><div><label>上游地址</label><input id="proxy-upstream" value="codex-provider-console:8787"></div><div class="wide"><label>TLS 证书（PEM）</label><textarea id="proxy-certificate" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea></div><div class="wide"><label>TLS 私钥（PEM）</label><textarea id="proxy-private-key" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----"></textarea></div><div class="wide"><label>Nginx 部署预览</label><pre id="proxy-config" class="console-code">填写域名后生成</pre></div></div><div class="console-form-actions"><button class="btn" type="button" id="proxy-apply">校验并部署</button><button class="btn light" type="button" id="proxy-cancel-edit" hidden>取消修改</button></div></div><div id="proxy-notice" class="notice"></div></div></section>`);
+ document.body.insertAdjacentHTML('beforeend', `<section id="console-settings" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>系统设置</h2><p class="panel-note">修改控制台登录账号、密码和 Cookie 安全属性。保存后所有旧会话会立即失效，需要重新登录。</p></div></div><div class="console-form"><div><label>登录用户名</label><input id="account-username" autocomplete="username"></div><div><label>面板监听地址（只读）</label><input id="account-bind" readonly></div><div><label>当前密码</label><input id="account-current-password" type="password" autocomplete="current-password"></div><div><label>新密码（留空表示不修改）</label><input id="account-new-password" type="password" minlength="8" autocomplete="new-password"></div><div class="wide"><label><input id="account-cookie-secure" type="checkbox"> 通过 HTTPS 访问时启用 Secure Cookie</label><p class="console-muted">启用后必须使用 HTTPS 登录；如果当前仍通过 HTTP 访问，可能会无法登录。</p></div></div><div class="console-form-actions"><button class="btn" type="button" onclick="saveAccountSettings()">保存系统设置</button></div><div id="account-settings-notice" class="notice"></div></div></section>`);
  document.head.insertAdjacentHTML('beforeend','<style>.proxy-status{padding:5px 9px;border:1px solid #d8dde2;border-radius:999px;color:#59616c;background:#f7f8fa;font-size:12px;white-space:nowrap}.proxy-status.running{border-color:#9bd7b3;color:#167143;background:#effaf3}.proxy-warning{margin:12px 0;padding:10px 12px;border-left:3px solid #d69620;border-radius:4px;background:#fff8e8;color:#725114;font-size:12px;line-height:1.5}.proxy-pem{min-height:150px;font:12px/1.45 Consolas,monospace;resize:vertical}.proxy-success-view{margin-top:16px}.proxy-success-card{display:flex;align-items:center;gap:13px;padding:17px;border:1px solid #a9ddbc;border-radius:8px;background:#f1fbf4}.proxy-success-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#198754;color:#fff;font-weight:800}.proxy-success-card h3{margin:0;color:#176b40;font-size:16px}.proxy-success-card p{margin:4px 0 0;color:#3f6d51;font-size:13px}.proxy-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}.proxy-summary div{padding:12px;border:1px solid #e0e6e2;border-radius:7px;background:#fafcfb}.proxy-summary dt{font-size:12px;color:#68736c}.proxy-summary dd{margin:5px 0 0;font:13px Consolas,monospace;color:#202b24;overflow-wrap:anywhere}.proxy-summary a{color:#1769aa;text-decoration:none}@media(max-width:650px){.proxy-summary{grid-template-columns:1fr}}</style>');
  requestAnimationFrame(()=>document.body.classList.add('console-ready'));
  function prepareHealthPanel(){const button=document.querySelector('#console-health .row-between .btn'),note=document.querySelector('#console-health .panel-note'),summary=document.querySelector('#health-summary');if(!button||!note||!summary)return false;button.id='health-run';note.textContent='先查看完整检查清单；点击后会逐项检查运行环境、配置与供应商连接。';if(!healthPlanLoaded)summary.textContent='正在加载检查清单…';return true}
  async function logoutConsole(){await fetch('/logout',{method:'POST'});location.href='/login'}
- function openConsoleSection(section){let target=section==='providers'?null:document.querySelector('#console-'+section);if(section!=='providers'&&!target){section='providers';target=null}document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';target.style.display='block';if(section==='health'&&prepareHealthPanel())loadHealthPlan(true)}localStorage.setItem('console-section',section)}
+ async function loadAccountSettings(){try{const d=await api('/api/account');$('#account-username').value=d.username||'';$('#account-bind').value=d.panel_bind||'';$('#account-cookie-secure').checked=Boolean(d.cookie_secure);const notice=$('#account-settings-notice');notice.textContent=d.public_bind_warning?'当前面板监听在公网地址；建议使用 HTTPS 反向代理并限制 8787 端口。':'当前面板仅监听本机地址。'}catch(e){const notice=$('#account-settings-notice');if(notice)notice.textContent='无法读取系统设置：'+e.message}}
+async function saveAccountSettings(){const current=$('#account-current-password').value,newPassword=$('#account-new-password').value;if(!current){$('#account-settings-notice').textContent='请输入当前密码。';return}if(newPassword&&newPassword.length<8){$('#account-settings-notice').textContent='新密码至少需要 8 位。';return}try{await api('/api/account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password:current,username:$('#account-username').value.trim(),new_password:newPassword||null,cookie_secure:$('#account-cookie-secure').checked})});$('#account-current-password').value='';$('#account-new-password').value='';$('#account-settings-notice').textContent='设置已保存，所有旧会话已注销，请重新登录。';setTimeout(()=>location.href='/login',900)}catch(e){$('#account-settings-notice').textContent=e.message}}
+function openConsoleSection(section){let target=section==='providers'?null:document.querySelector('#console-'+section);if(section!=='providers'&&!target){section='providers';target=null}document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';target.style.display='block';if(section==='health'&&prepareHealthPanel())loadHealthPlan(true);if(section==='settings')loadAccountSettings()}localStorage.setItem('console-section',section)}
  function healthCategory(name){if(name.startsWith('供应商 ·')||name==='当前供应商')return '供应商连接';if(['config.toml','config.toml 语法','Codex 关键配置','auth.json','控制台认证'].includes(name))return 'Codex 配置';return '运行环境'}
  function healthActions(item){const cli=item.name==='Codex CLI'&&item.status==='fail'?'<p><button class="btn small" onclick="installCodexCli(this)">安装 Codex CLI</button></p>':'';const key=item.name==='Codex Desktop 部署密钥'&&['pass','warning','fail'].includes(item.status)?`<p><button class="btn small" onclick="${item.status==='pass'?'downloadDeploymentKey()':'deployDeploymentKey(this)'}">${item.status==='pass'?'下载部署密钥':'创建并部署密钥'}</button></p>`:'';const config=item.name==='config.toml 语法'&&item.status==='fail'?'<p><button class="btn small" onclick="repairConfig(this)">修复配置</button></p>':'';return cli+key+config}
  function copyHealthDiagnostic(button){const detail=decodeURIComponent(button.dataset.detail||'');navigator.clipboard?.writeText(detail).then(()=>{button.textContent='已复制'}).catch(()=>{button.textContent='复制失败'})}
