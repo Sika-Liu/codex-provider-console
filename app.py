@@ -625,6 +625,52 @@ def prune_provider_switch_backups(retain: int = PROVIDER_SWITCH_BACKUP_RETENTION
     return removed
 
 
+
+def prune_backup_history(retain_complete: int = 1, retain_before_restore: int = 1) -> list[str]:
+    """Keep only the latest complete restore point and before-restore point."""
+    if not BACKUP_ROOT.is_dir():
+        return []
+    candidates: list[tuple[Path, dict, set[str]]] = []
+    for candidate in BACKUP_ROOT.iterdir():
+        if not candidate.is_dir() or candidate.parent != BACKUP_ROOT or candidate.is_symlink():
+            continue
+        metadata: dict = {}
+        try:
+            raw = json.loads((candidate / BACKUP_METADATA_NAME).read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                metadata = raw
+        except (OSError, json.JSONDecodeError):
+            pass
+        try:
+            files = {item.name for item in candidate.iterdir() if item.is_file() and item.name != BACKUP_METADATA_NAME}
+        except OSError:
+            continue
+        candidates.append((candidate, metadata, files))
+    complete = [
+        item for item in candidates
+        if {"config.toml", PROFILE_PATH.name, SETTINGS_PATH.name, AUTH_PATH.name}.issubset(item[2])
+    ]
+    before_restore = [item for item in candidates if item[1].get("reason") == "before_restore"]
+    keep = {
+        item[0]
+        for item in sorted(complete, key=lambda item: item[0].name, reverse=True)[:max(retain_complete, 0)]
+    }
+    keep.update(
+        item[0]
+        for item in sorted(before_restore, key=lambda item: item[0].name, reverse=True)[:max(retain_before_restore, 0)]
+    )
+    removed: list[str] = []
+    for candidate, _, _ in candidates:
+        if candidate in keep:
+            continue
+        try:
+            shutil.rmtree(candidate)
+            removed.append(candidate.name)
+        except OSError:
+            continue
+    return removed
+
+
 def restore_session_state(backup_dir: Path) -> None:
     """Restore the session files touched by a failed provider switch."""
     database_backup = backup_dir / "state_5.sqlite"
@@ -2999,6 +3045,9 @@ def delete_server_session(thread_id: str) -> dict:
 
 @app.get("/api/backups")
 def list_backups() -> list[dict]:
+    removed = prune_backup_history()
+    if removed:
+        audit("backup_history_pruned", removed=",".join(removed))
     if not BACKUP_ROOT.exists():
         return []
     backups: list[dict] = []

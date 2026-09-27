@@ -12,3 +12,4 @@ Initial personal self-hosted optimization release.
 - Added regression and Compose contract tests.
 - Extracted host SSH and storage safety primitives; optional Compose smoke check passes.
 - Added read-only deployment diagnostics and final operations acceptance checklist.
+- Backup history now keeps only the latest complete restore point and latest before-restore snapshot.
