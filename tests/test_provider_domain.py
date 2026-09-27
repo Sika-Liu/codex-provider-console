@@ -1,6 +1,6 @@
 import unittest
 
-from provider_domain import backfill_profile_model, is_profile_usable, normalize_profile
+from provider_domain import backfill_profile_model, is_profile_usable, normalize_profile, storage_profile
 
 
 class ProviderDomainTests(unittest.TestCase):
@@ -66,3 +66,10 @@ class ProviderDomainTests(unittest.TestCase):
         self.assertFalse(changed)
         _, changed = backfill_profile_model(profile, "gpt-current")
         self.assertFalse(changed)
+
+    def test_storage_profile_writes_only_canonical_mode_and_protocol(self):
+        stored = storage_profile({"id": "legacy", "name": "Legacy", "auth_mode": "chatgpt", "wire_api": "chat"})
+        self.assertEqual(stored["mode"], "official")
+        self.assertEqual(stored["protocol"], "responses")
+        self.assertNotIn("auth_mode", stored)
+        self.assertNotIn("wire_api", stored)

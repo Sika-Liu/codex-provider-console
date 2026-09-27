@@ -25,12 +25,16 @@ from provider_domain import (
     backfill_profile_model,
     is_profile_usable,
     normalize_profile,
+    storage_profile,
     remote_session_archive_args,
     remote_session_delete_args,
     remote_session_unarchive_args,
     resolve_host_codex_home,
 )
+from host_ops import host_ssh_command as build_host_ssh_command, nss_environment, ssh_host_key_options as verify_ssh_host_key
+from storage_ops import resolve_backup_directory, write_private as atomic_write_private
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
+APP_VERSION = (Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip() if Path(__file__).with_name("VERSION").is_file() else "0.1.0")
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
 CODEX_CLI_USER = os.environ.get("CODEX_CLI_USER", "unknown")
 DEPLOY_USER = os.environ.get("DEPLOY_USER", "unknown")
@@ -43,6 +47,7 @@ HOST_CODEX_BIN_CANDIDATES = (
 )
 HOST_USER_HOME_PATH = os.environ.get("HOST_USER_HOME_PATH", "")
 HOST_CODEX_HOME_PATH = os.environ.get("HOST_CODEX_HOME_PATH", "")
+PANEL_SSH_HOST_ALIAS = os.environ.get("PANEL_SSH_HOST_ALIAS", "").strip()
 DEPLOYMENT_KEY_PATH = USER_HOME / ".ssh" / "codex-provider-console_ed25519"
 DEPLOYMENT_KEY_PUBLIC_PATH = DEPLOYMENT_KEY_PATH.with_suffix(".pub")
 AUTHORIZED_KEYS_PATH = USER_HOME / ".ssh" / "authorized_keys"
@@ -57,6 +62,7 @@ RELAY_BASE_URL = os.environ.get("RELAY_BASE_URL", "http://codex-provider-relay:5
 HOST_RELAY_BASE_URL = os.environ.get("HOST_RELAY_BASE_URL", "http://127.0.0.1:57321/v1")
 BACKUP_ROOT = CODEX_HOME / "backups" / "control-panel"
 BACKUP_METADATA_NAME = "metadata.json"
+BACKUP_ID = re.compile(r"^[0-9]{8}T[0-9]{6,12}Z$")
 # Provider switches are routine operations. Keep a small rollback window for
 # them without touching snapshots created by explicit repair or migration
 # operations.
@@ -199,16 +205,24 @@ else:
     raise SystemExit(f"Timed out waiting for Codex App Server readiness{suffix}")
 '''
 
-app = FastAPI(title="Codex Provider Console", docs_url=None, redoc_url=None)
+app = FastAPI(title="Codex Provider Console", version=APP_VERSION, docs_url=None, redoc_url=None)
 
 AUTH_ENABLED = os.environ.get("PANEL_AUTH_ENABLED", "true").lower() not in {"0", "false", "no"}
 PANEL_USERNAME = os.environ.get("PANEL_USERNAME", "")
 PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "")
 SESSION_SECRET = os.environ.get("PANEL_SESSION_SECRET", "")
 COOKIE_SECURE = os.environ.get("PANEL_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
+PANEL_BIND = os.environ.get("PANEL_BIND", "127.0.0.1")
 SESSION_COOKIE = "codex_panel_session"
 SESSION_MAX_AGE = 12 * 60 * 60
 LOGIN_TIMEOUT_SECONDS = 10
+LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
+try:
+    LOGIN_MAX_FAILURES = max(1, int(os.environ.get("PANEL_LOGIN_MAX_FAILURES", "10")))
+except ValueError:
+    LOGIN_MAX_FAILURES = 10
+LOGIN_FAILURES_LOCK = threading.Lock()
+LOGIN_FAILURES: dict[str, list[float]] = {}
 
 
 class DeviceLoginSession:
@@ -348,9 +362,9 @@ class Provider(BaseModel):
     id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,48}$")
     name: str = Field(min_length=1, max_length=80)
     base_url: str = Field(default="", pattern=r"^(|https?://.+)")
-    wire_api: str = Field(default="responses", pattern=r"^(responses|chat)$")
+    wire_api: str | None = Field(default=None, pattern=r"^(responses|chat)$")
     model: str = Field(default="", max_length=120)
-    auth_mode: Literal["apikey", "chatgpt"] = "apikey"
+    auth_mode: Literal["apikey", "chatgpt"] | None = None
     # The version-2 schema is explicit about the two supported modes. Legacy
     # fields stay accepted while existing browser clients and stored profiles
     # migrate incrementally.
@@ -376,9 +390,9 @@ class ProviderDiagnosticRequest(BaseModel):
     id: str = ""
     name: str = ""
     base_url: str = ""
-    wire_api: str = "responses"
+    wire_api: str | None = None
     model: str = ""
-    auth_mode: Literal["apikey", "chatgpt"] = "apikey"
+    auth_mode: Literal["apikey", "chatgpt"] | None = None
     mode: Literal["official", "pure_api"] | None = None
     protocol: Literal["responses", "chat_completions"] | None = None
     bearer_token: str | None = None
@@ -425,6 +439,35 @@ def valid_session(token: str | None) -> bool:
         return False
 
 
+def login_client_key(request: Request) -> str:
+    """Return a best-effort client key without trusting forwarded headers."""
+    return request.client.host if request.client else "unknown"
+
+
+def login_is_rate_limited(client_key: str, now: float | None = None) -> bool:
+    now = time.monotonic() if now is None else now
+    with LOGIN_FAILURES_LOCK:
+        failures = [occurred for occurred in LOGIN_FAILURES.get(client_key, []) if now - occurred < LOGIN_FAILURE_WINDOW_SECONDS]
+        if failures:
+            LOGIN_FAILURES[client_key] = failures
+        else:
+            LOGIN_FAILURES.pop(client_key, None)
+        return len(failures) >= LOGIN_MAX_FAILURES
+
+
+def record_failed_login(client_key: str, now: float | None = None) -> None:
+    now = time.monotonic() if now is None else now
+    with LOGIN_FAILURES_LOCK:
+        failures = [occurred for occurred in LOGIN_FAILURES.get(client_key, []) if now - occurred < LOGIN_FAILURE_WINDOW_SECONDS]
+        failures.append(now)
+        LOGIN_FAILURES[client_key] = failures
+
+
+def clear_failed_logins(client_key: str) -> None:
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.pop(client_key, None)
+
+
 LOGIN_HTML = '''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录 · Codex 控制台</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f6f8;color:#202124;font:14px Arial,"Microsoft YaHei",sans-serif}.login{width:min(380px,calc(100vw - 36px));background:#fff;border:1px solid #dde1e6;border-radius:8px;padding:28px;box-sizing:border-box;box-shadow:0 12px 32px #0000000d}h1{margin:0;font-size:22px}p{color:#687078;line-height:1.5}label{display:block;font-weight:700;margin:17px 0 7px}input{box-sizing:border-box;width:100%;border:1px solid #cfd5da;border-radius:6px;padding:10px 11px;font:inherit}button{width:100%;border:0;border-radius:6px;background:#202124;color:#fff;padding:11px;margin-top:20px;font:inherit;font-weight:700;cursor:pointer}#message{min-height:20px;color:#bd3131;margin-top:12px}</style></head><body><main class="login"><h1>Codex 控制台</h1><p>请输入管理员账号和密码。</p><form id="login"><label>用户名<input id="username" autocomplete="username" required autofocus></label><label>密码<input id="password" type="password" autocomplete="current-password" required></label><button>登录</button><div id="message"></div></form></main><script>document.querySelector('#login').addEventListener('submit',async e=>{e.preventDefault();const r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:username.value,password:password.value})});if(r.ok)location.href='/';else{const d=await r.json().catch(()=>({}));message.textContent=d.detail||'登录失败。'}})</script></body></html>'''
 
 
@@ -450,13 +493,18 @@ def login_page() -> str:
 
 
 @app.post("/login")
-def login(request: LoginRequest) -> JSONResponse:
+def login(credentials: LoginRequest, request: Request) -> JSONResponse:
     if not AUTH_ENABLED:
         return JSONResponse({"authenticated": True})
     if not auth_configured():
         raise HTTPException(503, "Panel authentication is not configured")
-    if not (hmac.compare_digest(request.username, PANEL_USERNAME) and hmac.compare_digest(request.password, PANEL_PASSWORD)):
+    client_key = login_client_key(request)
+    if login_is_rate_limited(client_key):
+        raise HTTPException(429, "登录尝试过多，请 5 分钟后重试")
+    if not (hmac.compare_digest(credentials.username, PANEL_USERNAME) and hmac.compare_digest(credentials.password, PANEL_PASSWORD)):
+        record_failed_login(client_key)
         raise HTTPException(401, "用户名或密码错误")
+    clear_failed_logins(client_key)
     response = JSONResponse({"authenticated": True})
     response.set_cookie(SESSION_COOKIE, session_token(PANEL_USERNAME), max_age=SESSION_MAX_AGE, httponly=True, samesite="strict", secure=COOKIE_SECURE, path="/")
     return response
@@ -500,25 +548,21 @@ def panel_settings() -> dict:
 
 
 def write_private(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".new")
-    temp.write_text(text, encoding="utf-8")
-    os.chmod(temp, 0o600)
-    os.replace(temp, path)
+    atomic_write_private(path, text)
 
 
 def backup_state(include_sessions: bool = False, reason: str | None = None) -> tuple[str, Path]:
-    destination = BACKUP_ROOT / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    created_at = datetime.now(timezone.utc)
+    destination = BACKUP_ROOT / created_at.strftime("%Y%m%dT%H%M%S%fZ")
     destination.mkdir(parents=True, mode=0o700)
-    if reason:
-        write_private(
-            destination / BACKUP_METADATA_NAME,
-            json.dumps(
-                {"reason": reason, "created_at": datetime.now(timezone.utc).isoformat()},
-                ensure_ascii=False,
-            )
-            + "\n",
+    write_private(
+        destination / BACKUP_METADATA_NAME,
+        json.dumps(
+            {"reason": reason or "manual", "created_at": created_at.isoformat(), "include_sessions": include_sessions},
+            ensure_ascii=False,
         )
+        + "\n",
+    )
     for source in (CONFIG_PATH, PROFILE_PATH, SETTINGS_PATH, AUTH_PATH):
         if source.exists():
             target = destination / source.name
@@ -600,6 +644,39 @@ def restore_session_state(backup_dir: Path) -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
             os.chmod(target, 0o600)
+
+
+def backup_directory(backup_id: str) -> Path:
+    """Resolve a backup id without allowing path traversal."""
+    try:
+        return resolve_backup_directory(BACKUP_ROOT, backup_id, BACKUP_ID)
+    except ValueError as exc:
+        raise HTTPException(422, "无效的备份标识") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "备份不存在") from exc
+
+
+def restore_backup_state(backup_dir: Path) -> list[str]:
+    """Restore panel-owned files from a validated snapshot."""
+    restored: list[str] = []
+    for source_name, target in (
+        (CONFIG_PATH.name, CONFIG_PATH),
+        (PROFILE_PATH.name, PROFILE_PATH),
+        (SETTINGS_PATH.name, SETTINGS_PATH),
+        (AUTH_PATH.name, AUTH_PATH),
+    ):
+        source = backup_dir / source_name
+        if source.is_file():
+            write_private(target, source.read_text(encoding="utf-8"))
+            restored.append(source_name)
+        elif target.exists():
+            target.unlink()
+            restored.append(f"removed:{source_name}")
+    if (backup_dir / "state_5.sqlite").is_file() or (backup_dir / "session_index.jsonl").is_file():
+        restore_session_state(backup_dir)
+        restored.append("sessions")
+    audit("backup_restored", backup_id=backup_dir.name, detail=",".join(restored))
+    return restored
 
 
 def audit(action: str, **details: str | bool | None) -> None:
@@ -1245,12 +1322,18 @@ def preflight() -> dict:
         warnings.append("The active config already contains a bearer token.")
     if auth_keys:
         warnings.append("auth.json contains authentication material; switching to a pure API provider will not delete it.")
+    security_warnings: list[str] = []
+    if PANEL_BIND in {"0.0.0.0", "::"}:
+        security_warnings.append("控制台正在监听网络地址。请仅通过 HTTPS 反向代理访问，并在防火墙中限制面板端口。")
+    if not COOKIE_SECURE:
+        security_warnings.append("会话 Cookie 未启用 Secure 属性；通过 HTTPS 反向代理访问时，请设置 PANEL_COOKIE_SECURE=true 后重启。")
     return {
         "active_provider": active_provider(),
         "auth_keys": auth_keys,
         "has_configured_bearer_token": any("bearer_token" in line for line in config.splitlines()),
         "environment_note": "Shell environment variables are not persisted by Codex and cannot be reliably inspected from this isolated console.",
         "warnings": warnings,
+        "security_warnings": security_warnings,
     }
 
 
@@ -1312,42 +1395,15 @@ def docker_host_gateway() -> str:
 
 
 def ssh_client_environment() -> dict[str, str]:
-    """Provide an NSS entry when this rootless container has only a numeric UID."""
-    environment = os.environ.copy()
-    uid, gid = os.getuid(), os.getgid()
-    try:
-        has_user = any(
-            line.split(":", 3)[2] == str(uid)
-            for line in Path("/etc/passwd").read_text(encoding="utf-8", errors="replace").splitlines()
-            if line.count(":") >= 2
-        )
-    except OSError:
-        return environment
-    if has_user:
-        return environment
-    nss_wrapper = next(Path("/usr/lib").rglob("libnss_wrapper.so"), None)
-    if not nss_wrapper:
-        return environment
-    runtime_dir = Path(f"/tmp/codex-panel-nss-{uid}")
-    runtime_dir.mkdir(mode=0o700, exist_ok=True)
-    passwd_file, group_file = runtime_dir / "passwd", runtime_dir / "group"
-    passwd_file.write_text(
-        Path("/etc/passwd").read_text(encoding="utf-8", errors="replace")
-        + f"codex-panel:x:{uid}:{gid}:Codex Panel:{USER_HOME}:/usr/sbin/nologin\n",
-        encoding="utf-8",
-    )
-    group_file.write_text(
-        Path("/etc/group").read_text(encoding="utf-8", errors="replace")
-        + f"codex-panel:x:{gid}:\n",
-        encoding="utf-8",
-    )
-    os.chmod(passwd_file, 0o600)
-    os.chmod(group_file, 0o600)
-    preload = environment.get("LD_PRELOAD", "")
-    environment["LD_PRELOAD"] = f"{nss_wrapper}:{preload}" if preload else str(nss_wrapper)
-    environment["NSS_WRAPPER_PASSWD"] = str(passwd_file)
-    environment["NSS_WRAPPER_GROUP"] = str(group_file)
-    return environment
+    return nss_environment(USER_HOME)
+
+
+def ssh_host_key_options(gateway: str) -> list[str]:
+    return verify_ssh_host_key(USER_HOME / ".ssh" / "known_hosts", PANEL_SSH_HOST_ALIAS, gateway)
+
+
+def host_ssh_command(gateway: str) -> list[str]:
+    return build_host_ssh_command(DEPLOYMENT_KEY_PATH, DEPLOY_USER, gateway, USER_HOME / ".ssh" / "known_hosts", PANEL_SSH_HOST_ALIAS)
 
 
 def run_host_app_server_control(action: Literal["start", "stop"]) -> str:
@@ -1360,24 +1416,7 @@ def run_host_app_server_control(action: Literal["start", "stop"]) -> str:
     gateway = docker_host_gateway()
     try:
         result = subprocess.run(
-            [
-                "ssh",
-                "-i",
-                str(DEPLOYMENT_KEY_PATH),
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                f"UserKnownHostsFile={USER_HOME / '.ssh' / 'known_hosts'}",
-                "-o",
-                "LogLevel=ERROR",
-                f"{DEPLOY_USER}@{gateway}",
-                "python3",
-                "-",
-            ],
+            host_ssh_command(gateway),
             capture_output=True,
             text=True,
             input=script,
@@ -1407,11 +1446,7 @@ def run_host_reverse_proxy_script(script: str, operation: str, timeout: int = 12
     gateway = docker_host_gateway()
     try:
         result = subprocess.run(
-            [
-                "ssh", "-i", str(DEPLOYMENT_KEY_PATH), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={USER_HOME / '.ssh' / 'known_hosts'}",
-                "-o", "LogLevel=ERROR", f"{DEPLOY_USER}@{gateway}", "python3", "-",
-            ],
+            host_ssh_command(gateway),
             capture_output=True,
             text=True,
             input=script,
@@ -1627,24 +1662,7 @@ def run_host_session_delete(thread_id: str) -> str:
     gateway = docker_host_gateway()
     try:
         result = subprocess.run(
-            [
-                "ssh",
-                "-i",
-                str(DEPLOYMENT_KEY_PATH),
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                f"UserKnownHostsFile={USER_HOME / '.ssh' / 'known_hosts'}",
-                "-o",
-                "LogLevel=ERROR",
-                f"{DEPLOY_USER}@{gateway}",
-                "python3",
-                "-",
-            ],
+            host_ssh_command(gateway),
             capture_output=True,
             text=True,
             input=script,
@@ -1695,24 +1713,7 @@ def run_host_session_archive(thread_id: str, archived: bool) -> str:
     gateway = docker_host_gateway()
     try:
         result = subprocess.run(
-            [
-                "ssh",
-                "-i",
-                str(DEPLOYMENT_KEY_PATH),
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                f"UserKnownHostsFile={USER_HOME / '.ssh' / 'known_hosts'}",
-                "-o",
-                "LogLevel=ERROR",
-                f"{DEPLOY_USER}@{gateway}",
-                "python3",
-                "-",
-            ],
+            host_ssh_command(gateway),
             capture_output=True,
             text=True,
             input=script,
@@ -2074,7 +2075,7 @@ def _switch_provider(
             app_server_stopped = True
             report(74, "正在写入供应商配置")
             if backfilled_provider_id:
-                write_private(PROFILE_PATH, json.dumps(profiles, ensure_ascii=False, indent=2) + "\n")
+                write_private(PROFILE_PATH, json.dumps({key: storage_profile(value) for key, value in profiles.items()}, ensure_ascii=False, indent=2) + "\n")
             write_private(CONFIG_PATH, merged_config + "\n")
             if mode == "pure_api":
                 api_auth = profile.get("auth_contents", "").strip()
@@ -2318,9 +2319,9 @@ def save_provider(provider: Provider) -> dict:
     if not data["bearer_token"] and provider.id in profiles:
         data["bearer_token"] = profiles[provider.id].get("bearer_token")
     data["requires_openai_auth"] = data["mode"] == "official"
-    backup_state()
+    backup_state(reason="provider_save")
     profiles[provider.id] = data
-    write_private(PROFILE_PATH, json.dumps(profiles, ensure_ascii=False, indent=2) + "\n")
+    write_private(PROFILE_PATH, json.dumps({key: storage_profile(value) for key, value in profiles.items()}, ensure_ascii=False, indent=2) + "\n")
     audit("provider_saved", provider_id=provider.id)
     return public_profile(data)
 
@@ -2447,9 +2448,9 @@ def delete_provider(provider_id: str) -> dict:
     profiles = read_profiles()
     if provider_id not in profiles:
         raise HTTPException(404, "Provider profile not found")
-    backup_state()
+    backup_state(reason="provider_delete")
     del profiles[provider_id]
-    write_private(PROFILE_PATH, json.dumps(profiles, ensure_ascii=False, indent=2) + "\n")
+    write_private(PROFILE_PATH, json.dumps({key: storage_profile(value) for key, value in profiles.items()}, ensure_ascii=False, indent=2) + "\n")
     audit("provider_deleted", provider_id=provider_id)
     return {"deleted": provider_id}
 
@@ -2531,7 +2532,7 @@ def repair_config_from_health() -> dict:
         tomllib.loads(repaired)
     except tomllib.TOMLDecodeError as exc:
         raise HTTPException(422, f"配置还包含无法自动修复的 TOML 错误：{exc}") from exc
-    backup_id, _ = backup_state()
+    backup_id, _ = backup_state(reason="repair_config")
     write_private(CONFIG_PATH, repaired + "\n")
     audit("config_repaired", backup_id=backup_id)
     return {"detail": f"已合并重复的 [features] 配置段；已创建备份 {backup_id}。"}
@@ -2652,10 +2653,10 @@ def capture_chatgpt_snapshot(provider_id: str) -> None:
         raise HTTPException(404, "auth.json was not found")
     contents = AUTH_PATH.read_text(encoding="utf-8")
     validate_auth_snapshot(contents)
-    backup_state()
+    backup_state(reason="auth_capture")
     profile["auth_contents"] = contents
     profiles[provider_id] = profile
-    write_private(PROFILE_PATH, json.dumps(profiles, ensure_ascii=False, indent=2) + "\n")
+    write_private(PROFILE_PATH, json.dumps({key: storage_profile(value) for key, value in profiles.items()}, ensure_ascii=False, indent=2) + "\n")
     audit("chatgpt_auth_captured", provider_id=provider_id)
 
 
@@ -2945,7 +2946,7 @@ def migrate_server_sessions(request: SessionMigrationRequest) -> dict:
     backup_id = None
     backup_dir = None
     if request.apply:
-        backup_id, backup_dir = backup_state(include_sessions=True)
+        backup_id, backup_dir = backup_state(include_sessions=True, reason="session_migration")
     result = migrate_session_provider(
         SESSION_PROVIDER_ID,
         request.source_provider,
@@ -3000,7 +3001,39 @@ def delete_server_session(thread_id: str) -> dict:
 def list_backups() -> list[dict]:
     if not BACKUP_ROOT.exists():
         return []
-    return [{"id": path.name, "has_config": (path / "config.toml").exists()} for path in sorted(BACKUP_ROOT.iterdir(), reverse=True) if path.is_dir()]
+    backups: list[dict] = []
+    for path in sorted(BACKUP_ROOT.iterdir(), reverse=True):
+        if not path.is_dir() or not BACKUP_ID.fullmatch(path.name):
+            continue
+        metadata: dict = {}
+        try:
+            raw_metadata = json.loads((path / BACKUP_METADATA_NAME).read_text(encoding="utf-8"))
+            if isinstance(raw_metadata, dict):
+                metadata = raw_metadata
+        except (OSError, json.JSONDecodeError):
+            pass
+        files = [item.name for item in path.iterdir() if item.is_file() and item.name != BACKUP_METADATA_NAME]
+        backups.append({
+            "id": path.name,
+            "created_at": metadata.get("created_at", ""),
+            "reason": metadata.get("reason", "unknown"),
+            "include_sessions": bool(metadata.get("include_sessions")),
+            "files": sorted(files),
+            "has_config": "config.toml" in files,
+        })
+    return backups
+
+
+@app.post("/api/backups/{backup_id}/restore")
+def restore_backup(backup_id: str) -> dict:
+    source = backup_directory(backup_id)
+    current_id, _ = backup_state(include_sessions=True, reason="before_restore")
+    try:
+        restored = restore_backup_state(source)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(500, f"恢复备份失败，当前状态已保存为 {current_id}") from exc
+    audit("backup_restore_completed", backup_id=backup_id, before_backup_id=current_id)
+    return {"restored": backup_id, "before_restore_backup": current_id, "files": restored, "detail": "备份已恢复；恢复前的当前状态也已自动备份。"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -3046,7 +3079,7 @@ async function refreshRoutes(){}
 function addModel(m={name:''}){if(!m.name)return;const entry=document.createElement('div');entry.className='model-entry';entry.dataset.name=m.name;entry.textContent=m.name;$('#model-list').append(entry)}
 function refreshConfigModelOptions(selected=null){const select=$('#p-model');if(!select)return;const preferred=selected===null?select.value:selected,names=[...document.querySelectorAll('.model-entry')].map(entry=>entry.dataset.name).filter(Boolean);select.textContent='';const empty=document.createElement('option');empty.value='';empty.textContent='不设置默认模型';select.append(empty);names.forEach(name=>{const option=document.createElement('option');option.value=name;option.textContent=name;select.append(option)});select.value=names.includes(preferred)?preferred:''}
 async function loadAuthContents(providerId){if(!providerId)return;try{const data=await api(`/api/providers/${encodeURIComponent(providerId)}/auth`);if(state.current?.id===providerId&&data.auth_mode===$('#p-auth').value){$('#auth-preview').value=data.contents||'';if(data.auth_mode==='apikey')syncAuthToKey()}}catch(e){note(e.message)}}
-function openDetail(){const p=state.current;const active=Boolean(p.id&&p.id===state.active),activateButton=$('#activate-btn');$('#list-view').classList.add('hidden');$('#detail').classList.add('visible');$('#detail-name').textContent=p.id?p.name:'添加供应商';$('#detail-sub').textContent=active?'当前正在使用':p.id?'编辑后保存列表，再切换模式时会使用新配置':'新建供应商需要先保存到列表';activateButton.style.display=p.id?'':'none';activateButton.disabled=active;activateButton.textContent=active?'使用中':'设为当前';activateButton.title=active?'当前正在使用该供应商':'设为当前供应商';$('#p-name').value=p.name||'';$('#p-url').value=p.base_url||'';$('#p-key').value=p.auth_mode==='apikey'?(p.bearer_token||''):'';$('#p-auth').value=p.auth_mode||'apikey';$('#auth-preview').value='';$('#p-goals').checked=Boolean(p.goals_enabled);state.goalsConfigured=Boolean(p.goals_configured);state.protocol=p.wire_api||'responses';state.configTouched=Boolean(p.config_contents);$('#config-preview').value=p.config_contents||'';setProtocol(state.protocol);$('#model-list').innerHTML='';(p.models||[]).forEach(addModel);refreshConfigModelOptions(p.model||'');authModeChanged();if(state.goalsConfigured)syncGoalsConfig();updatePreview();if(p.id)loadAuthContents(p.id)}
+function openDetail(){const p=state.current;const active=Boolean(p.id&&p.id===state.active),activateButton=$('#activate-btn');$('#list-view').classList.add('hidden');$('#detail').classList.add('visible');$('#detail-name').textContent=p.id?p.name:'添加供应商';$('#detail-sub').textContent=active?'当前正在使用':p.id?'编辑后保存列表，再切换模式时会使用新配置':'新建供应商需要先保存到列表';activateButton.style.display=p.id?'':'none';activateButton.disabled=active;activateButton.textContent=active?'使用中':'设为当前';activateButton.title=active?'当前正在使用该供应商':'设为当前供应商';$('#p-name').value=p.name||'';$('#p-url').value=p.base_url||'';$('#p-key').value=p.mode==='pure_api'?(p.bearer_token||''):'';$('#p-auth').value=p.mode==='official'?'chatgpt':'apikey';$('#auth-preview').value='';$('#p-goals').checked=Boolean(p.goals_enabled);state.goalsConfigured=Boolean(p.goals_configured);state.protocol=p.protocol==='chat_completions'?'chat':'responses';state.configTouched=Boolean(p.config_contents);$('#config-preview').value=p.config_contents||'';setProtocol(state.protocol);$('#model-list').innerHTML='';(p.models||[]).forEach(addModel);refreshConfigModelOptions(p.model||'');authModeChanged();if(state.goalsConfigured)syncGoalsConfig();updatePreview();if(p.id)loadAuthContents(p.id)}
 function gather(){const id=(state.current?.id||$('#p-name').value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-')).replace(/^-+|-+$/g,'');const auth_mode=$('#p-auth').value,mode=auth_mode==='chatgpt'?'official':'pure_api',protocol=state.protocol==='chat'?'chat_completions':'responses';return {id,name:$('#p-name').value.trim(),base_url:$('#p-url').value.trim(),model:$('#p-model').value.trim(),mode,protocol,wire_api:state.protocol,auth_mode,bearer_token:$('#p-key').value,models:[...document.querySelectorAll('.model-entry')].map(entry=>({name:entry.dataset.name})).filter(m=>m.name),config_contents:$('#config-preview').value,auth_contents:$('#auth-preview').value,goals_enabled:$('#p-goals').checked,goals_configured:Boolean(state.goalsConfigured)}}
 function updatePreview(){if(!state.current)return;const p=gather();if(p.auth_mode==='apikey'&&!$('#auth-preview').value.trim())$('#auth-preview').value=JSON.stringify({OPENAI_API_KEY:$('#p-key').value},null,2)}
 function syncKeyToAuth(){if($('#p-auth').value==='apikey')$('#auth-preview').value=JSON.stringify({OPENAI_API_KEY:$('#p-key').value},null,2)}
@@ -3085,17 +3118,17 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
  requestAnimationFrame(()=>document.body.classList.add('console-ready'));
  function prepareHealthPanel(){const button=document.querySelector('#console-health .row-between .btn'),note=document.querySelector('#console-health .panel-note'),summary=document.querySelector('#health-summary');if(!button||!note||!summary)return false;button.id='health-run';note.textContent='先查看完整检查清单；点击后会逐项检查运行环境、配置与供应商连接。';if(!healthPlanLoaded)summary.textContent='正在加载检查清单…';return true}
  async function logoutConsole(){await fetch('/logout',{method:'POST'});location.href='/login'}
- function openConsoleSection(section){let target=section==='providers'?null:document.querySelector('#console-'+section);if(section!=='providers'&&!target){section='providers';target=null}document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';target.style.display='block';if(section==='health'&&prepareHealthPanel())loadHealthPlan()}localStorage.setItem('console-section',section)}
+ function openConsoleSection(section){let target=section==='providers'?null:document.querySelector('#console-'+section);if(section!=='providers'&&!target){section='providers';target=null}document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';target.style.display='block';if(section==='health'&&prepareHealthPanel())loadHealthPlan(true)}localStorage.setItem('console-section',section)}
  function healthCategory(name){if(name.startsWith('供应商 ·')||name==='当前供应商')return '供应商连接';if(['config.toml','config.toml 语法','Codex 关键配置','auth.json','控制台认证'].includes(name))return 'Codex 配置';return '运行环境'}
  function healthActions(item){const cli=item.name==='Codex CLI'&&item.status==='fail'?'<p><button class="btn small" onclick="installCodexCli(this)">安装 Codex CLI</button></p>':'';const key=item.name==='Codex Desktop 部署密钥'&&['pass','warning','fail'].includes(item.status)?`<p><button class="btn small" onclick="${item.status==='pass'?'downloadDeploymentKey()':'deployDeploymentKey(this)'}">${item.status==='pass'?'下载部署密钥':'创建并部署密钥'}</button></p>`:'';const config=item.name==='config.toml 语法'&&item.status==='fail'?'<p><button class="btn small" onclick="repairConfig(this)">修复配置</button></p>':'';return cli+key+config}
  function copyHealthDiagnostic(button){const detail=decodeURIComponent(button.dataset.detail||'');navigator.clipboard?.writeText(detail).then(()=>{button.textContent='已复制'}).catch(()=>{button.textContent='复制失败'})}
  function healthRow(item){const problem=['warning','fail'].includes(item.status),label=item.status==='pass'?'通过':item.status==='warning'?'提醒':item.status==='fail'?'失败':item.status==='running'?'检查中':'未检查',diagnostic=item.diagnostic_detail&&item.diagnostic_detail!==item.detail?`<details><summary>查看诊断详情</summary><pre>${esc(item.diagnostic_detail)}</pre><button class="btn small health-copy" data-detail="${encodeURIComponent(item.diagnostic_detail)}" onclick="copyHealthDiagnostic(this)">复制诊断详情</button></details>`:'';return `<div class="health-check ${item.status} ${problem?'':'compact'}"><div class="health-check-top"><b>${label} · ${esc(item.name)}</b><small title="${esc(item.detail)}">${esc(item.detail)}</small></div>${diagnostic}${healthActions(item)}</div>`}
  let healthChecks=[],healthPoll=null,healthPlanLoaded=false;
  function renderHealthChecks(){const list=$('#health-checks'),groups=['运行环境','Codex 配置','供应商连接'];list.className='health-groups';list.innerHTML=groups.map(group=>{const items=healthChecks.filter(item=>healthCategory(item.name)===group);return items.length?`<section class="health-group"><h3>${group}</h3>${items.map(healthRow).join('')}</section>`:''}).join('')}
- async function loadHealthPlan(){if(healthPlanLoaded)return;const summary=$('#health-summary');try{const result=await api('/api/health/plan');healthChecks=result.checks||[];healthPlanLoaded=true;summary.textContent='共 '+healthChecks.length+' 项检查。点击“立即检查”开始。';renderHealthChecks()}catch(error){summary.textContent='无法加载检查清单：'+error.message}}
+ async function loadHealthPlan(force=false){if(healthPlanLoaded&&!force)return;const summary=$('#health-summary');try{const result=await api('/api/health/plan');healthChecks=result.checks||[];healthPlanLoaded=true;summary.textContent='共 '+healthChecks.length+' 项检查。点击“立即检查”开始。';renderHealthChecks()}catch(error){summary.textContent='无法加载检查清单：'+error.message}}
  function mergeHealthChecks(completed){const byName=new Map(completed.map(item=>[item.name,item]));healthChecks=healthChecks.map(item=>byName.get(item.name)||item);for(const item of completed)if(!healthChecks.some(existing=>existing.name===item.name))healthChecks.push(item)}
  function healthSummary(stage){const completed=healthChecks.filter(item=>['pass','warning','fail'].includes(item.status)),passed=healthChecks.filter(item=>item.status==='pass').length,warnings=healthChecks.filter(item=>item.status==='warning').length,failed=healthChecks.filter(item=>item.status==='fail').length;return `${stage} · 已完成 ${completed.length}/${healthChecks.length} 项${passed?`，${passed} 项通过`:''}${warnings?`，${warnings} 项提醒`:''}${failed?`，${failed} 项失败`:''}`}
- async function runHealth(){if(healthPoll||!prepareHealthPanel())return;await loadHealthPlan();const summary=$('#health-summary'),button=$('#health-run');healthChecks=healthChecks.map(item=>({...item,status:'pending',detail:'等待检查'}));renderHealthChecks();button.disabled=true;button.textContent='检查中…';try{const started=await api('/api/health/progress',{method:'POST'});const poll=async()=>{try{const job=await api(`/api/health/progress/${encodeURIComponent(started.id)}`);mergeHealthChecks(job.checks||[]);summary.textContent=healthSummary(job.stage||'正在检查');renderHealthChecks();if(job.status==='running'){healthPoll=setTimeout(poll,250);return}healthPoll=null;button.disabled=false;button.textContent='重新检查';if(job.status==='completed')summary.textContent=healthSummary(job.result?.summary||'健康检查完成');else summary.textContent='健康检查失败：'+(job.detail||'任务执行失败')}catch(error){healthPoll=null;button.disabled=false;button.textContent='重新检查';summary.textContent='健康检查失败：'+error.message}};healthPoll=setTimeout(poll,80)}catch(error){button.disabled=false;button.textContent='立即检查';summary.textContent='健康检查请求未能启动：'+error.message}}
+ async function runHealth(){if(healthPoll||!prepareHealthPanel())return;await loadHealthPlan(true);const summary=$('#health-summary'),button=$('#health-run');healthChecks=healthChecks.map(item=>({...item,status:'pending',detail:'等待检查'}));renderHealthChecks();button.disabled=true;button.textContent='检查中…';try{const started=await api('/api/health/progress',{method:'POST'});const poll=async()=>{try{const job=await api(`/api/health/progress/${encodeURIComponent(started.id)}`);mergeHealthChecks(job.checks||[]);summary.textContent=healthSummary(job.stage||'正在检查');renderHealthChecks();if(job.status==='running'){healthPoll=setTimeout(poll,250);return}healthPoll=null;button.disabled=false;button.textContent='重新检查';if(job.status==='completed')summary.textContent=healthSummary(job.result?.summary||'健康检查完成');else summary.textContent='健康检查失败：'+(job.detail||'任务执行失败')}catch(error){healthPoll=null;button.disabled=false;button.textContent='重新检查';summary.textContent='健康检查失败：'+error.message}};healthPoll=setTimeout(poll,80)}catch(error){button.disabled=false;button.textContent='立即检查';summary.textContent='健康检查请求未能启动：'+error.message}}
  async function installCodexCli(button){const confirmed=await panelDialog({title:'安装 Codex CLI',message:'将为部署用户安装官方 Codex CLI。安装完成后会自动重新检查环境。',confirmLabel:'开始安装'});if(!confirmed)return;button.disabled=true;button.textContent='正在安装…';try{const result=await api('/api/health/install-codex',{method:'POST'});await panelDialog({title:'Codex CLI 已安装',message:result.detail,confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'安装失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='安装 Codex CLI'}}
  async function repairConfig(button){const confirmed=await panelDialog({title:'修复 config.toml',message:'将合并重复的 [features] 配置段，并自动创建备份。不会修改 auth.json。',confirmLabel:'开始修复'});if(!confirmed)return;button.disabled=true;button.textContent='正在修复…';try{const result=await api('/api/health/repair-config',{method:'POST'});await panelDialog({title:'配置已修复',message:result.detail+' 请重新连接 Codex App 后再修改模型。',confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'修复失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='修复配置'}}
  async function deployDeploymentKey(button){const confirmed=await panelDialog({title:'创建部署密钥',message:'将为当前部署用户生成新的 SSH 私钥，并将对应公钥加入 authorized_keys。私钥不会在页面显示，但可由已登录的面板重复下载；请勿分享给他人。',confirmLabel:'创建并部署'});if(!confirmed)return;button.disabled=true;button.textContent='正在部署…';try{const result=await api('/api/health/deployment-key',{method:'POST'});const download=await panelDialog({title:'部署密钥已创建',message:`${result.detail}。私钥可在已登录面板中重复下载，请安全保存且不要分享。`,confirmLabel:'立即下载',cancelLabel:'稍后下载'});if(download)window.location.href=result.download_url;await runHealth()}catch(e){await panelDialog({title:'部署失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='创建并部署密钥'}}
@@ -3122,15 +3155,23 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
    const nav=document.querySelector('.console-nav');
    if(!nav)return;
    nav.insertAdjacentHTML('beforeend','<button data-section="sessions" onclick="openConsoleSection(&quot;sessions&quot;)">会话管理</button>');
+   nav.insertAdjacentHTML('beforeend','<button data-section="backups" onclick="openConsoleSection(&quot;backups&quot;)">备份恢复</button>');
    document.body.insertAdjacentHTML('beforeend',`<section id="console-sessions" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>云端会话管理</h2><p class="panel-note">活动会话可以归档；归档会话可以取消归档。恢复操作会校验服务器状态；Codex Desktop 若未自动显示，请重启 Codex Desktop 以重新加载会话列表。永久删除不会创建备份且无法恢复。</p></div><button class="btn" type="button" id="session-refresh">刷新列表</button></div><div id="session-summary" class="console-health-summary">尚未读取服务器会话。</div><div id="session-list" class="session-list"></div><div class="row-between session-section-heading"><div><h3>已归档会话</h3><p class="panel-note" id="archived-session-summary">正在读取归档会话…</p></div></div><div id="archived-session-list" class="session-list"></div></div></section>`);
+   document.body.insertAdjacentHTML('beforeend',`<section id="console-backups" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>备份恢复</h2><p class="panel-note">恢复前会自动备份当前状态。恢复会覆盖配置、供应商档案和认证文件；包含会话快照的备份还会恢复会话索引。</p></div><button class="btn" type="button" id="backup-refresh">刷新备份</button></div><div id="backup-summary" class="console-health-summary">尚未读取备份。</div><div id="backup-list" class="session-list"></div></div></section>`);
    document.head.insertAdjacentHTML('beforeend','<style>.session-list{margin-top:12px}.session-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;border:1px solid #dfe3e7;border-radius:7px;padding:12px;margin-top:8px}.session-title{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-meta{margin-top:5px;color:#6b7280;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.session-delete{background:#fff;color:#be3030;border:1px solid #e3b3b3}.session-section-heading{margin-top:28px;padding-top:20px;border-top:1px solid #dfe3e7}.session-section-heading h3{margin:0 0 4px}.session-empty{padding:24px 0;color:#6b7280;text-align:center}.session-modal-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:rgba(20,24,28,.48)}.session-modal{width:min(440px,100%);border:1px solid #dfe3e7;border-radius:8px;background:#fff;box-shadow:0 18px 48px rgba(0,0,0,.24);padding:22px}.session-modal-kicker{color:#be3030;font-size:12px;font-weight:700}.session-modal-kicker.archive{color:#1769aa}.session-modal h3{margin:7px 0 9px;font-size:18px}.session-modal p{margin:0;color:#535a63;line-height:1.6}.session-modal-session{margin:14px 0;padding:10px 11px;border:1px solid #e0e3e7;border-radius:6px;background:#f7f8fa;font:12px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-modal-confirm{display:flex;align-items:flex-start;gap:9px;margin-top:16px;color:#30353b;line-height:1.45;cursor:pointer}.session-modal-confirm input{margin:3px 0 0;width:15px;height:15px}.session-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}.session-modal-danger{background:#bd3030}.session-modal-danger:disabled{background:#e3b3b3;cursor:not-allowed}@media(max-width:650px){.session-row{grid-template-columns:1fr}.session-actions{justify-content:flex-start}.session-modal{padding:18px}}</style>');
    const baseOpen=window.openConsoleSection;
-   window.openConsoleSection=function(section){baseOpen(section);if(section==='sessions')refreshSessionManagement()};
+   window.openConsoleSection=function(section){baseOpen(section);if(section==='sessions')refreshSessionManagement();if(section==='backups')refreshBackups()};
    document.querySelector('#session-refresh')?.addEventListener('click',refreshSessionManagement);
+   document.querySelector('#backup-refresh')?.addEventListener('click',refreshBackups);
    if(localStorage.getItem('console-section')==='sessions')window.openConsoleSection('sessions');
+   if(localStorage.getItem('console-section')==='backups')window.openConsoleSection('backups');
  })();
  function sessionEscape(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
  function sessionTime(value){const time=new Date(value);return Number.isNaN(time.getTime())?value:time.toLocaleString('zh-CN',{hour12:false})}
+ function backupEscape(value){return sessionEscape(value)}
+ function backupReason(value){return ({provider_switch:'供应商切换',before_restore:'恢复前自动备份',repair_config:'配置修复',session_migration:'会话迁移',manual:'手动/系统备份'}[value]||value||'未知原因')}
+ async function refreshBackups(){const summary=document.querySelector('#backup-summary'),list=document.querySelector('#backup-list');if(!summary||!list)return;summary.textContent='正在读取备份…';try{const backups=await api('/api/backups');summary.textContent=backups.length?`共有 ${backups.length} 个备份。恢复前会自动创建当前状态备份。`:'当前没有可用备份。';list.innerHTML=backups.length?backups.map(item=>`<article class="session-row"><div><div class="session-title">${backupEscape(item.created_at||item.id)} · ${backupEscape(backupReason(item.reason))}</div><div class="session-meta">${backupEscape(item.id)} · ${item.include_sessions?'包含会话快照':'仅配置文件'} · ${backupEscape((item.files||[]).join(', ')||'无配置文件')}</div></div><div class="session-actions"><button class="btn small backup-restore" type="button" data-backup-id="${backupEscape(item.id)}">恢复此备份</button></div></article>`).join(''):'<div class="session-empty">暂无备份。</div>';list.querySelectorAll('.backup-restore').forEach(button=>button.addEventListener('click',()=>restoreBackup(button.dataset.backupId,button)))}catch(error){summary.textContent='读取备份失败：'+error.message}}
+ async function restoreBackup(id,button){if(!id)return;const confirmed=await panelDialog({title:'恢复备份',message:'恢复前会自动备份当前状态。恢复会覆盖当前配置、供应商档案和认证文件，确定继续吗？',confirmLabel:'恢复备份'});if(!confirmed)return;button.disabled=true;button.textContent='恢复中…';try{const result=await api('/api/backups/'+encodeURIComponent(id)+'/restore',{method:'POST'});await panelDialog({title:'备份已恢复',message:`已恢复 ${id}。恢复前的当前状态备份为 ${result.before_restore_backup}。`,confirmLabel:'完成',showCancel:false});await refreshBackups();await refreshAll()}catch(error){button.disabled=false;button.textContent='恢复此备份';await panelDialog({title:'恢复失败',message:error.message,confirmLabel:'知道了',showCancel:false})}}
  function sessionSize(size){if(size<1024)return size+' B';if(size<1024*1024)return (size/1024).toFixed(1)+' KB';return (size/1024/1024).toFixed(1)+' MB'}
  async function refreshSessionManagement(){await Promise.all([loadServerSessions(),loadArchivedSessions()])}
  async function loadServerSessions(){const summary=document.querySelector('#session-summary'),list=document.querySelector('#session-list');if(!summary||!list)return;summary.textContent='正在读取当前服务器的 Codex 会话…';list.innerHTML='';try{const result=await api('/api/sessions');const sessions=result.sessions||[],orphans=sessions.filter(s=>s.kind==='orphaned_index').length;summary.textContent=sessions.length?`发现 ${sessions.length} 项服务器记录${orphans?`，其中 ${orphans} 项为无会话文件的孤立索引。`:''}`:'当前服务器没有可管理的 Codex 会话或索引。';list.innerHTML=sessions.length?sessions.map(session=>`<article class="session-row"><div><div class="session-title" title="${sessionEscape(session.title)}">${sessionEscape(session.title)}</div><div class="session-meta">${sessionEscape(session.id)} · ${session.kind==='orphaned_index'?'孤立索引':sessionTime(session.modified_at)+' · '+sessionSize(session.size)}</div>${session.provider_id?`<div class="session-meta">供应商：${sessionEscape(session.provider_id)}</div>`:''}${session.cwd?`<div class="session-meta" title="${sessionEscape(session.cwd)}">${sessionEscape(session.cwd)}</div>`:''}</div><div class="session-actions">${session.kind==='orphaned_index'?'':`<button class="btn small session-archive" type="button" data-thread-id="${sessionEscape(session.id)}">归档</button>`}<button class="btn small session-delete" type="button" data-thread-id="${sessionEscape(session.id)}">永久删除</button></div></article>`).join(''):'<div class="session-empty">没有找到活动会话或孤立索引。</div>';list.querySelectorAll('.session-archive').forEach(button=>button.addEventListener('click',()=>archiveServerSession(button.dataset.threadId,button)));list.querySelectorAll('.session-delete').forEach(button=>button.addEventListener('click',()=>deleteServerSession(button.dataset.threadId,button)))}catch(error){summary.textContent='读取会话失败：'+error.message}}
@@ -3179,13 +3220,14 @@ const $=s=>document.querySelector(s);let state={profiles:[],active:null,current:
 async function api(url,opt={}){const r=await fetch(url,opt);let d;try{d=await r.json()}catch{d={}}if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:'请求失败');return d}
 function note(text,where='detail-notice'){const e=$('#'+where);e.textContent=text;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),5000)}
 function esc(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-async function refreshAll(){const d=await api('/api/status');state.profiles=d.profiles;state.active=d.active_provider;state.enabled=d.settings?.provider_switching_enabled??true;$('#switch').classList.toggle('on',state.enabled);renderList();populateSelectors();await loadCommon();await refreshRoutes();}
-function renderList(){const profiles=state.profiles;$('#list-count').textContent=`${profiles.length} 个供应商配置；点击编辑按钮进入详情`;$(' #provider-list'.trim()).innerHTML=profiles.length?profiles.map(p=>{const active=p.id===state.active;return `<div class="provider-card ${active?'active':''}"><div class="handle">⋮⋮</div><div class="badge">${esc((p.name||p.id).slice(0,1).toUpperCase())}</div><div class="provider-main"><div class="card-name">${esc(p.name)} ${active?'<span class="section-hint">使用中</span>':''}</div><div class="card-meta">${p.auth_mode==='chatgpt'?'官方登录':'纯 API'} · ${p.wire_api==='responses'?'Responses API':'Chat Completions'} · ${esc(p.base_url||'不写入 API 文件')}</div></div><div class="provider-actions">${active?'<span class="provider-action provider-current" aria-label="当前使用的供应商">使用中</span>':`<button class="provider-action" type="button" title="使用此供应商" onclick="activateFromList('${esc(p.id)}')">使用</button>`}<button class="provider-action" type="button" title="编辑供应商" onclick="openProvider('${esc(p.id)}')">编辑</button><button class="provider-action danger" type="button" title="删除供应商" onclick="deleteProvider('${esc(p.id)}')">删除</button></div></div>`}).join(''):'<div class="empty">尚未添加供应商。可先添加 API 供应商或官方登录档案。</div>'}
+function renderSecurityWarnings(preflight){let notice=$('#security-notice');if(!notice){notice=document.createElement('div');notice.id='security-notice';notice.className='notice';const anchor=document.querySelector('.switch-panel');anchor?.parentNode?.insertBefore(notice,anchor)}const warnings=preflight?.security_warnings||[];notice.textContent=warnings.join(' ');notice.classList.toggle('show',warnings.length>0)}
+async function refreshAll(){const d=await api('/api/status');state.profiles=d.profiles;state.active=d.active_provider;state.enabled=d.settings?.provider_switching_enabled??true;$('#switch').classList.toggle('on',state.enabled);renderSecurityWarnings(d.preflight);renderList();populateSelectors();await loadCommon();await refreshRoutes();}
+function renderList(){const profiles=state.profiles;$('#list-count').textContent=`${profiles.length} 个供应商配置；点击编辑按钮进入详情`;$(' #provider-list'.trim()).innerHTML=profiles.length?profiles.map(p=>{const active=p.id===state.active;return `<div class="provider-card ${active?'active':''}"><div class="handle">⋮⋮</div><div class="badge">${esc((p.name||p.id).slice(0,1).toUpperCase())}</div><div class="provider-main"><div class="card-name">${esc(p.name)} ${active?'<span class="section-hint">使用中</span>':''}</div><div class="card-meta">${p.mode==='official'?'官方登录':'纯 API'} · ${p.protocol==='responses'?'Responses API':'Chat Completions'} · ${esc(p.base_url||'不写入 API 文件')}</div></div><div class="provider-actions">${active?'<span class="provider-action provider-current" aria-label="当前使用的供应商">使用中</span>':`<button class="provider-action" type="button" title="使用此供应商" onclick="activateFromList('${esc(p.id)}')">使用</button>`}<button class="provider-action" type="button" title="编辑供应商" onclick="openProvider('${esc(p.id)}')">编辑</button><button class="provider-action danger" type="button" title="删除供应商" onclick="deleteProvider('${esc(p.id)}')">删除</button></div></div>`}).join(''):'<div class="empty">尚未添加供应商。可先添加 API 供应商或官方登录档案。</div>'}
 async function activateFromList(id){try{const result=await api(`/api/providers/${encodeURIComponent(id)}/activate`,{method:'POST'});state.active=id;note(`已使用 ${id}，备份编号：${result.backup_id}。${result.runtime?.detail||'Codex App Server 已重启。'}`,'list-notice');await refreshAll()}catch(e){note(e.message,'list-notice')}}
 async function deleteProvider(id){if(!confirm(`确认删除供应商「${id}」？`))return;try{await api(`/api/providers/${encodeURIComponent(id)}`,{method:'DELETE'});note('供应商已删除。','list-notice');await refreshAll()}catch(e){note(e.message,'list-notice')}}
 function populateSelectors(){const o=state.profiles.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.id)})</option>`).join('');const routeProvider=$('#route-provider'),migrationTarget=$('#migration-target');if(routeProvider)routeProvider.innerHTML=o;if(migrationTarget)migrationTarget.innerHTML=o}
 function newProvider(mode='apikey'){state.current={id:'',name:'',base_url:'',model:'gpt-5.6-terra',wire_api:'responses',auth_mode:mode,models:[]};openDetail()}
-function openProvider(id){const p=state.profiles.find(x=>x.id===id);if(!p)return;state.current=structuredClone(p);openDetail()}
+function openProvider(id){const p=state.profiles.find(x=>x.id===id);if(!p)return;state.current=structuredClone(p);state.current.auth_mode=p.mode==='official'?'chatgpt':'apikey';state.current.wire_api=p.protocol==='chat_completions'?'chat':'responses';openDetail()}
 function openDetail(){const p=state.current;const active=Boolean(p.id&&p.id===state.active),activateButton=$('#activate-btn');$('#list-view').classList.add('hidden');$('#detail').classList.add('visible');$('#detail-name').textContent=p.id? p.name:'添加供应商';$('#detail-sub').textContent=active?'当前正在使用':'编辑后保存列表，再切换模式时会使用新配置';activateButton.style.display=p.id?'':'none';activateButton.disabled=active;activateButton.textContent=active?'使用中':'设为当前';activateButton.title=active?'当前正在使用该供应商':'设为当前供应商';$('#p-name').value=p.name||'';$('#p-model').value=p.model||'gpt-5.6-terra';$('#p-url').value=p.base_url||'';$('#p-key').value='';$('#p-auth').value=p.auth_mode||'apikey';state.protocol=p.wire_api||'responses';setProtocol(state.protocol);$('#model-list').innerHTML='';(p.models?.length?p.models:[{name:p.model||''}]).forEach(addModel);authModeChanged();updatePreview()}
 function closeDetail(){$('#detail').classList.remove('visible');$('#list-view').classList.remove('hidden');state.current=null;refreshAll()}
 function authModeChanged(){const official=$('#p-auth').value==='chatgpt';$('#api-fields').style.display=official?'none':'grid';$('#official-fields').style.display=official?'block':'none';$('#p-url').required=!official;updatePreview()}

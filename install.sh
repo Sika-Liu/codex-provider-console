@@ -5,7 +5,7 @@ PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ENV_FILE="$PROJECT_DIR/.env"
 CREATED_ENV=false
 CODEX_HOME_HOST="${HOME}/.codex"
-PANEL_BIND="0.0.0.0"
+PANEL_BIND="127.0.0.1"
 PANEL_PORT="8787"
 PORT_SET=false
 BIND_SET=false
@@ -27,14 +27,15 @@ Usage: bash install.sh [options]
 
 Options:
   --codex-home <path>   Host directory mounted as /codex (default: ~/.codex)
-  --bind <address>      Advanced override (default: 0.0.0.0)
+  --bind <address>      Advanced override (default: 127.0.0.1)
   --port <port>         Host port (default: 8787)
   --install-docker      Install Docker when it is missing (common Linux distros)
   --force               Replace matching settings in an existing .env file
   -h, --help            Show this help
 
-The default binds the panel to 0.0.0.0 for direct public-IP access. Protect the
-panel with its administrator login, cloud firewall rules, or an HTTPS reverse proxy.
+The default binds the panel to 127.0.0.1. Use an SSH tunnel or an HTTPS reverse
+proxy for remote access. Public binding is an advanced option and must be protected
+by a firewall and HTTPS.
 EOF
 }
 
@@ -93,6 +94,12 @@ fi
 
 [[ "$PANEL_PORT" =~ ^[1-9][0-9]{0,4}$ && "$PANEL_PORT" -le 65535 ]] || { echo "Invalid port: $PANEL_PORT" >&2; exit 1; }
 [[ "$PANEL_BIND" == "127.0.0.1" || "$PANEL_BIND" == "0.0.0.0" || "$PANEL_BIND" == "::1" || "$PANEL_BIND" == "::" ]] || { echo "Unsupported bind address: $PANEL_BIND" >&2; exit 1; }
+if [[ "$PANEL_BIND" == "0.0.0.0" || "$PANEL_BIND" == "::" ]]; then
+  cat >&2 <<'EOF'
+WARNING: The panel will be reachable from the network. Put it behind an HTTPS
+reverse proxy or restrict the port with your cloud firewall before using it.
+EOF
+fi
 
 port_in_use() {
   if command -v ss >/dev/null 2>&1; then
@@ -359,6 +366,7 @@ set_env PANEL_USERNAME "$PANEL_USERNAME"
 set_env PANEL_PASSWORD "$PANEL_PASSWORD"
 set_env PANEL_SESSION_SECRET "$PANEL_SESSION_SECRET"
 set_env PANEL_COOKIE_SECURE "false"
+set_env PANEL_SSH_HOST_ALIAS ""
 chmod 600 "$ENV_FILE"
 if [[ "$(id -u)" -eq 0 ]]; then
   chown -R "$DEPLOY_USER":"$(id -gn "$DEPLOY_USER")" "$PROJECT_DIR"
@@ -374,11 +382,11 @@ public_ip=${public_ip:-N/A}
 if [[ "$PANEL_BIND" == "0.0.0.0" || "$PANEL_BIND" == "::" ]]; then
   external_address="http://${public_ip}:${PANEL_PORT}"
   internal_address="http://${local_ip}:${PANEL_PORT}"
-  exposure_note="Open TCP port ${PANEL_PORT} in the cloud security group and host firewall. Reverse proxy setup is optional and can be configured in the panel."
+  exposure_note="WARNING: TCP port ${PANEL_PORT} is network-accessible. Restrict it with the cloud firewall, or use the HTTPS reverse proxy and do not expose this port directly."
 else
   external_address="Disabled (custom localhost binding)"
   internal_address="http://127.0.0.1:${PANEL_PORT}"
-  exposure_note="The service uses a custom local bind. Reverse proxy setup is optional and can be configured in the panel."
+  exposure_note="The panel is local-only. Use the SSH tunnel above, or configure the optional HTTPS reverse proxy for remote access."
 fi
 
 cat <<EOF

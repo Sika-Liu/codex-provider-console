@@ -87,6 +87,8 @@ ssh -i "$env:USERPROFILE\.ssh\<部署密钥文件>" <部署用户>@<服务器IP>
 
 确认指纹属于该服务器后输入 `yes`，Windows 会将其写入 `~/.ssh/known_hosts`，随后 Codex App 才能完成主机身份校验。若同一 IP 重装了服务器，先执行 `ssh-keygen -R <服务器IP>`，再重新连接并确认新指纹。此校验与用于登录的 RSA 或 Ed25519 用户私钥无关：用户私钥用于证明“你是谁”，主机指纹用于证明“服务器是谁”。
 
+面板容器管理宿主机时同样会严格校验 SSH 主机指纹，不会自动接受新指纹。如果面板通过 Docker 网关连接而健康检查提示指纹未登记，请在项目 `.env` 中将 `PANEL_SSH_HOST_ALIAS` 设置为上面已经写入 `known_hosts` 的服务器 IP 或主机名，然后执行 `codex-panel restart`。指纹变化时面板会停止宿主机操作，需先核对服务器身份并更新记录。
+
 缺少 Docker 时，先安装 Docker，或明确允许脚本自动安装：
 
 ```bash

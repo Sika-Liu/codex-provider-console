@@ -81,6 +81,7 @@ Commands:
   update    Pull the latest Git revision and rebuild the console
   install-codex Install Codex CLI for the configured SSH user and refresh health status
   config    Print the active .env file path
+  version   Print the installed console version
   uninstall Remove the console, then optionally remove Codex CLI
   help      Show this command reference
 EOF
@@ -125,6 +126,7 @@ case "${1:-}" in
     echo "Codex CLI installed for ${cli_user}: ${version}"
     ;;
   config) printf '%s\n' "$PROJECT_DIR/.env" ;;
+  version) cat "$PROJECT_DIR/VERSION" ;;
   uninstall)
     if [[ -z "${CODEX_HOME_HOST:-}" && -f "$PROJECT_DIR/.env" ]]; then
       CODEX_HOME_HOST=$(sed -n 's/^CODEX_HOME_HOST=//p' "$PROJECT_DIR/.env" | tail -n 1)

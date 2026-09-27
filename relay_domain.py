@@ -2,7 +2,29 @@
 
 from __future__ import annotations
 
+from itertools import chain
 from typing import Any
+
+
+RELAY_CAPABILITIES = {
+    "text": True,
+    "streaming": True,
+    "function_calling": True,
+    "images": False,
+    "files": False,
+    "reasoning_metadata": False,
+    "provider_metadata": False,
+}
+
+
+def relay_capabilities(protocol: object) -> dict[str, Any]:
+    """Describe the intentionally supported compatibility subset."""
+    normalized = "chat_completions" if protocol in {"chat", "chat_completions"} else "responses"
+    return {
+        "protocol": normalized,
+        "conversion": normalized == "chat_completions",
+        "supported": dict(RELAY_CAPABILITIES),
+    }
 
 
 def resolve_active_profile(
@@ -72,7 +94,7 @@ def responses_to_chat_request(body: dict[str, Any]) -> dict[str, Any]:
     converted: dict[str, Any] = {"model": body.get("model", ""), "messages": messages}
     if "max_output_tokens" in body:
         converted["max_tokens"] = body["max_output_tokens"]
-    for key in ("temperature", "top_p", "stop", "seed", "user"):
+    for key in ("temperature", "top_p", "stop", "seed", "user", "response_format", "parallel_tool_calls"):
         if key in body:
             converted[key] = body[key]
     if isinstance(body.get("tools"), list):
@@ -142,7 +164,9 @@ def chat_sse_to_responses_events(chunks: Iterable[bytes]) -> Iterator[bytes]:
             yield _sse("response.created", {"type": "response.created", "response": response})
 
     buffer = b""
-    for chunk in chunks:
+    # A few providers omit the final blank line. Feed one synthetic separator
+    # so the final buffered SSE event is not silently dropped.
+    for chunk in chain(chunks, (b"\n\n",)):
         buffer += chunk.replace(b"\r\n", b"\n")
         while b"\n\n" in buffer:
             raw_event, buffer = buffer.split(b"\n\n", 1)
@@ -186,7 +210,10 @@ def chat_sse_to_responses_events(chunks: Iterable[bytes]) -> Iterator[bytes]:
                 for raw_call in calls:
                     if not isinstance(raw_call, dict):
                         continue
-                    index = int(raw_call.get("index", len(function_calls)))
+                    try:
+                        index = int(raw_call.get("index", len(function_calls)))
+                    except (TypeError, ValueError):
+                        index = len(function_calls)
                     call = function_calls.setdefault(index, {"id": str(raw_call.get("id") or f"call_{index}"), "name": "", "arguments": "", "announced": False})
                     function = raw_call.get("function") if isinstance(raw_call.get("function"), dict) else {}
                     call["name"] = str(function.get("name") or call["name"])

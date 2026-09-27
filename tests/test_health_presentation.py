@@ -22,11 +22,11 @@ class HealthPresentationTests(unittest.TestCase):
         self.assertIn('@app.get("/api/health/plan")', source)
         self.assertIn('@app.post("/api/health/progress")', source)
         self.assertIn('@app.get("/api/health/progress/{job_id}")', source)
-        self.assertIn("async function loadHealthPlan()", source)
+        self.assertIn("async function loadHealthPlan(force=false)", source)
         self.assertIn("function prepareHealthPanel()", source)
         self.assertIn("if(!button||!note||!summary)return false", source)
         self.assertIn("/api/health/progress", source)
-        self.assertIn("if(section==='health'&&prepareHealthPanel())loadHealthPlan()", source)
+        self.assertIn("if(section==='health'&&prepareHealthPanel())loadHealthPlan(true)", source)
         self.assertNotIn("if(section==='health')runHealth()", source)
 
     def test_deployment_key_action_waits_for_a_completed_check(self):

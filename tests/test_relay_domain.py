@@ -1,6 +1,6 @@
 import unittest
 
-from relay_domain import chat_sse_to_responses_events, chat_to_response, resolve_active_profile, responses_to_chat_request
+from relay_domain import chat_sse_to_responses_events, chat_to_response, relay_capabilities, resolve_active_profile, responses_to_chat_request
 
 
 class RelayDomainTests(unittest.TestCase):
@@ -23,10 +23,11 @@ class RelayDomainTests(unittest.TestCase):
         self.assertIs(result, profile)
 
     def test_responses_request_becomes_chat_request(self):
-        result = responses_to_chat_request({"model": "example", "instructions": "Be brief", "input": "Hello", "max_output_tokens": 20})
+        result = responses_to_chat_request({"model": "example", "instructions": "Be brief", "input": "Hello", "max_output_tokens": 20, "response_format": {"type": "json_object"}})
         self.assertEqual(result["model"], "example")
         self.assertEqual(result["messages"], [{"role": "system", "content": "Be brief"}, {"role": "user", "content": "Hello"}])
         self.assertEqual(result["max_tokens"], 20)
+        self.assertEqual(result["response_format"], {"type": "json_object"})
 
     def test_chat_response_becomes_responses_body(self):
         result = chat_to_response({"id": "chatcmpl_1", "model": "example", "choices": [{"message": {"content": "Hi"}}]})

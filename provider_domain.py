@@ -79,6 +79,14 @@ def normalize_profile(raw: Mapping[str, Any]) -> dict[str, Any]:
     return profile
 
 
+def storage_profile(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the canonical on-disk shape; legacy aliases are read-only."""
+    profile = normalize_profile(raw)
+    profile.pop("auth_mode", None)
+    profile.pop("wire_api", None)
+    return profile
+
+
 def is_profile_usable(profile: Mapping[str, Any]) -> tuple[bool, str]:
     """Validate the mode-specific minimum configuration before activation."""
     normalized = normalize_profile(profile)

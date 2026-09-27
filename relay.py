@@ -14,13 +14,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from provider_domain import normalize_profile
-from relay_domain import chat_sse_to_responses_events, chat_to_response, resolve_active_profile, responses_to_chat_request
+from relay_domain import chat_sse_to_responses_events, chat_to_response, relay_capabilities, resolve_active_profile, responses_to_chat_request
 
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
+APP_VERSION = (Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip() if Path(__file__).with_name("VERSION").is_file() else "0.1.0")
 CONFIG_PATH = CODEX_HOME / "config.toml"
 PROFILE_PATH = CODEX_HOME / "control-panel-profiles.json"
 SETTINGS_PATH = CODEX_HOME / "control-panel-settings.json"
-app = FastAPI(title="Codex Provider Relay", docs_url=None, redoc_url=None)
+app = FastAPI(title="Codex Provider Relay", version=APP_VERSION, docs_url=None, redoc_url=None)
 
 
 def upstream_endpoint(base_url: str, path: str) -> str:
@@ -96,9 +97,17 @@ def upstream_stream(
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health() -> dict[str, Any]:
     profile = active_profile()
-    return {"status": "ok", "provider_id": str(profile["id"]), "protocol": str(profile["protocol"])}
+    protocol = str(profile["protocol"])
+    return {"status": "ok", "provider_id": str(profile["id"]), "protocol": protocol, "capabilities": relay_capabilities(protocol)}
+
+
+@app.get("/capabilities")
+def capabilities() -> dict[str, Any]:
+    """Expose the relay's compatibility boundary for diagnostics and tooling."""
+    profile = active_profile()
+    return relay_capabilities(profile["protocol"])
 
 
 @app.post("/v1/responses")
