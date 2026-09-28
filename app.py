@@ -1653,6 +1653,47 @@ print(json.dumps({{"configured": (root / "nginx" / "default.conf").is_file(), "r
 '''
 
 
+def reverse_proxy_secure_mode_script() -> str:
+    project = json.dumps(host_panel_project_path())
+    return f"""
+import json, os, re, shutil, subprocess, uuid
+from pathlib import Path
+project = Path({project})
+env_path = project / ".env"
+if not env_path.is_file():
+    raise SystemExit("云端项目缺少 .env，无法启用安全模式")
+original = env_path.read_text(encoding="utf-8")
+backup = project / (".env.before-secure-" + uuid.uuid4().hex)
+tmp = project / (".env.secure-" + uuid.uuid4().hex)
+shutil.copy2(env_path, backup)
+def set_env(text, key, value):
+    lines = text.splitlines()
+    pattern = re.compile(r"^" + chr(92) + "s*" + re.escape(key) + chr(92) + "s*=")
+    replaced = False
+    output = []
+    for line in lines:
+        if pattern.match(line):
+            output.append(key + "=" + value)
+            replaced = True
+        else:
+            output.append(line)
+    if not replaced:
+        output.append(key + "=" + value)
+    return "\n".join(output) + "\n"
+tmp.write_text(set_env(set_env(original, "PANEL_BIND", "127.0.0.1"), "PANEL_COOKIE_SECURE", "true"), encoding="utf-8")
+os.chmod(tmp, 0o600)
+os.replace(tmp, env_path)
+result = subprocess.run(["docker", "compose", "up", "-d", "--force-recreate", "codex-provider-console"], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+if result.returncode != 0:
+    shutil.copy2(backup, env_path)
+    subprocess.run(["docker", "compose", "up", "-d", "--force-recreate", "codex-provider-console"], cwd=project, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    backup.unlink(missing_ok=True)
+    raise SystemExit(result.stdout[-1200:])
+backup.unlink(missing_ok=True)
+print(json.dumps({{"secure_mode": True, "panel_bind": "127.0.0.1", "cookie_secure": True}}))
+"""
+
+
 def reverse_proxy_delete_script() -> str:
     project = json.dumps(host_panel_project_path())
     return f'''import shutil, subprocess
@@ -2356,9 +2397,30 @@ def reverse_proxy_status() -> dict:
     return {
         "configured": bool(result.get("configured")),
         "running": bool(result.get("running")),
+        "secure_mode": PANEL_BIND in {"127.0.0.1", "localhost", "::1"} and bool(COOKIE_SECURE),
         "domain": str(saved.get("domain", "")),
         "upstream": str(saved.get("upstream", "")),
     }
+
+
+@app.post("/api/reverse-proxy/enable-secure-mode")
+def enable_reverse_proxy_secure_mode(request: Request) -> dict:
+    saved = panel_settings().get("reverse_proxy", {})
+    domain = str(saved.get("domain", "")).strip().lower()
+    if not domain:
+        raise HTTPException(409, "请先部署 HTTPS 反向代理")
+    forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",", 1)[0].strip().lower()
+    request_host = request.headers.get("host", "").split(":", 1)[0].strip().lower()
+    if forwarded_proto != "https" or request_host != domain:
+        raise HTTPException(409, f"请先通过 https://{domain} 访问控制台，再启用安全模式")
+    try:
+        result = json.loads(run_host_reverse_proxy_script(reverse_proxy_secure_mode_script(), "启用安全模式", timeout=150))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(502, "安全模式切换返回格式无效") from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    audit("reverse_proxy_secure_mode_enabled", domain=domain)
+    return {"secure_mode": bool(result.get("secure_mode")), "detail": "HTTPS 已验证，面板已切换为本机监听并启用 Secure Cookie。请刷新页面。"}
 
 
 @app.post("/api/reverse-proxy/apply")
@@ -3238,7 +3300,7 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
  </style>`);
  document.body.insertAdjacentHTML('afterbegin', `<aside class="console-sidebar"><div class="console-brand">Codex 控制台<small>通用服务器管理</small></div><nav class="console-nav"><button data-section="providers" onclick="openConsoleSection('providers')">供应商配置</button><button data-section="health" onclick="openConsoleSection('health')">健康检查</button><button data-section="proxy" onclick="openConsoleSection('proxy')">反向代理</button><button data-section="settings" onclick="openConsoleSection('settings')">系统设置</button></nav><button class="console-logout" onclick="logoutConsole()">退出登录</button></aside>`);
  document.querySelector('.top')?.classList.add('console-content');document.querySelectorAll('.page,.detail-top,.detail-main').forEach(e=>e.classList.add('console-content'));
- document.body.insertAdjacentHTML('beforeend', `<section id="console-health" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>健康检查</h2><p class="panel-note">检查 Codex 数据目录、配置文件、认证、当前供应商和磁盘空间，确认服务器是否满足使用条件。</p></div><button class="btn" onclick="runHealth()">立即检查</button></div><div id="health-summary" class="console-health-summary">尚未执行检查。</div><div id="health-checks"></div></div></section><section id="console-proxy" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>反向代理</h2><p class="panel-note">部署独立 Nginx 容器，自动校验证书并重载。证书和私钥仅用于本次部署，不会保存到面板设置。</p></div><span id="proxy-status" class="proxy-status">正在读取状态…</span></div><div id="proxy-success-view" class="proxy-success-view" hidden><div class="proxy-success-card"><div class="proxy-success-icon">✓</div><div><h3 id="proxy-success-title">HTTPS 反向代理已运行</h3><p id="proxy-success-copy">HTTPS 入口已就绪。</p></div></div><dl class="proxy-summary"><div><dt>访问地址</dt><dd><a id="proxy-public-url" target="_blank" rel="noopener"></a></dd></div><div><dt>上游服务</dt><dd id="proxy-success-upstream"></dd></div></dl><div class="console-form-actions"><button class="btn" type="button" id="proxy-edit">修改配置</button><button class="btn light" type="button" id="proxy-disable">停用代理</button></div></div><div id="proxy-form-view"><div class="proxy-warning">部署后请在云防火墙中仅公开 80/443，并限制面板端口 8787 的直接访问。</div><div class="console-form"><div><label>域名</label><input id="proxy-domain" placeholder="console.example.com"></div><div><label>上游地址</label><input id="proxy-upstream" value="codex-provider-console:8787"></div><div class="wide"><label>TLS 证书（PEM）</label><textarea id="proxy-certificate" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea></div><div class="wide"><label>TLS 私钥（PEM）</label><textarea id="proxy-private-key" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----"></textarea></div><div class="wide"><label>Nginx 部署预览</label><pre id="proxy-config" class="console-code">填写域名后生成</pre></div></div><div class="console-form-actions"><button class="btn" type="button" id="proxy-apply">校验并部署</button><button class="btn light" type="button" id="proxy-cancel-edit" hidden>取消修改</button></div></div><div id="proxy-notice" class="notice"></div></div></section>`);
+ document.body.insertAdjacentHTML('beforeend', `<section id="console-health" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>健康检查</h2><p class="panel-note">检查 Codex 数据目录、配置文件、认证、当前供应商和磁盘空间，确认服务器是否满足使用条件。</p></div><button class="btn" onclick="runHealth()">立即检查</button></div><div id="health-summary" class="console-health-summary">尚未执行检查。</div><div id="health-checks"></div></div></section><section id="console-proxy" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>反向代理</h2><p class="panel-note">部署独立 Nginx 容器，自动校验证书并重载。证书和私钥仅用于本次部署，不会保存到面板设置。</p></div><span id="proxy-status" class="proxy-status">正在读取状态…</span></div><div id="proxy-success-view" class="proxy-success-view" hidden><div class="proxy-success-card"><div class="proxy-success-icon">✓</div><div><h3 id="proxy-success-title">HTTPS 反向代理已运行</h3><p id="proxy-success-copy">HTTPS 入口已就绪。</p></div></div><dl class="proxy-summary"><div><dt>访问地址</dt><dd><a id="proxy-public-url" target="_blank" rel="noopener"></a></dd></div><div><dt>上游服务</dt><dd id="proxy-success-upstream"></dd></div></dl><div class="console-form-actions"><button class="btn" type="button" id="proxy-enable-secure">验证 HTTPS 并启用安全模式</button><button class="btn" type="button" id="proxy-edit">修改配置</button><button class="btn light" type="button" id="proxy-disable">停用代理</button></div><div id="proxy-security-status" class="panel-note">正在读取安全模式状态…</div></div><div id="proxy-form-view"><div class="proxy-warning">部署后请在云防火墙中仅公开 80/443，并限制面板端口 8787 的直接访问。</div><div class="console-form"><div><label>域名</label><input id="proxy-domain" placeholder="console.example.com"></div><div><label>上游地址</label><input id="proxy-upstream" value="codex-provider-console:8787"></div><div class="wide"><label>TLS 证书（PEM）</label><textarea id="proxy-certificate" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea></div><div class="wide"><label>TLS 私钥（PEM）</label><textarea id="proxy-private-key" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----"></textarea></div><div class="wide"><label>Nginx 部署预览</label><pre id="proxy-config" class="console-code">填写域名后生成</pre></div></div><div class="console-form-actions"><button class="btn" type="button" id="proxy-apply">校验并部署</button><button class="btn light" type="button" id="proxy-cancel-edit" hidden>取消修改</button></div></div><div id="proxy-notice" class="notice"></div></div></section>`);
  document.body.insertAdjacentHTML('beforeend', `<section id="console-settings" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>系统设置</h2><p class="panel-note">修改控制台登录账号、密码和 Cookie 安全属性。保存后所有旧会话会立即失效，需要重新登录。</p></div></div><div class="console-form"><div><label>登录用户名</label><input id="account-username" autocomplete="username"></div><div><label>面板监听地址（只读）</label><input id="account-bind" readonly></div><div><label>当前密码</label><input id="account-current-password" type="password" autocomplete="current-password"></div><div><label>新密码（留空表示不修改）</label><input id="account-new-password" type="password" minlength="8" autocomplete="new-password"></div><div class="wide"><label><input id="account-cookie-secure" type="checkbox"> 通过 HTTPS 访问时启用 Secure Cookie</label><p class="console-muted">启用后必须使用 HTTPS 登录；如果当前仍通过 HTTP 访问，可能会无法登录。</p></div></div><div class="console-form-actions"><button class="btn" type="button" onclick="saveAccountSettings()">保存系统设置</button></div><div id="account-settings-notice" class="notice"></div></div></section>`);
  document.head.insertAdjacentHTML('beforeend','<style>.proxy-status{padding:5px 9px;border:1px solid #d8dde2;border-radius:999px;color:#59616c;background:#f7f8fa;font-size:12px;white-space:nowrap}.proxy-status.running{border-color:#9bd7b3;color:#167143;background:#effaf3}.proxy-warning{margin:12px 0;padding:10px 12px;border-left:3px solid #d69620;border-radius:4px;background:#fff8e8;color:#725114;font-size:12px;line-height:1.5}.proxy-pem{min-height:150px;font:12px/1.45 Consolas,monospace;resize:vertical}.proxy-success-view{margin-top:16px}.proxy-success-card{display:flex;align-items:center;gap:13px;padding:17px;border:1px solid #a9ddbc;border-radius:8px;background:#f1fbf4}.proxy-success-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#198754;color:#fff;font-weight:800}.proxy-success-card h3{margin:0;color:#176b40;font-size:16px}.proxy-success-card p{margin:4px 0 0;color:#3f6d51;font-size:13px}.proxy-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}.proxy-summary div{padding:12px;border:1px solid #e0e6e2;border-radius:7px;background:#fafcfb}.proxy-summary dt{font-size:12px;color:#68736c}.proxy-summary dd{margin:5px 0 0;font:13px Consolas,monospace;color:#202b24;overflow-wrap:anywhere}.proxy-summary a{color:#1769aa;text-decoration:none}@media(max-width:650px){.proxy-summary{grid-template-columns:1fr}}</style>');
  requestAnimationFrame(()=>document.body.classList.add('console-ready'));
@@ -3268,13 +3330,14 @@ function openConsoleSection(section){let target=section==='providers'?null:docum
  function showProxyForm(){hideProxyLoading();proxyEditing=true;$('#proxy-success-view').hidden=true;$('#proxy-form-view').hidden=false;$('#proxy-cancel-edit').hidden=!proxyConfigured;$('#proxy-certificate').value='';$('#proxy-private-key').value='';updateProxyConfig()}
  function cancelProxyEdit(){if(!proxyConfigured)return;proxyEditing=false;$('#proxy-certificate').value='';$('#proxy-private-key').value='';refreshReverseProxyStatus()}
  function abandonProxyEdit(){if(!proxyEditing)return;proxyEditing=false;$('#proxy-certificate').value='';$('#proxy-private-key').value=''}
- function showProxySuccess(result){hideProxyLoading();const domain=result.domain||'';proxyEditing=false;$('#proxy-form-view').hidden=true;$('#proxy-success-view').hidden=false;$('#proxy-success-title').textContent='HTTPS 反向代理已运行';$('#proxy-success-copy').textContent='所有请求正在通过 HTTPS 安全转发到控制台。';const link=$('#proxy-public-url');link.textContent=domain?`https://${domain}`:'—';link.href=domain?`https://${domain}`:'#';link.style.pointerEvents=domain?'':'none';$('#proxy-success-upstream').textContent=result.upstream||'—';$('#proxy-disable').textContent='删除代理';$('#proxy-disable').style.display=''}
+ function showProxySuccess(result){hideProxyLoading();const domain=result.domain||'';const secure=Boolean(result.secure_mode);proxyEditing=false;$('#proxy-form-view').hidden=true;$('#proxy-success-view').hidden=false;$('#proxy-success-title').textContent='HTTPS 反向代理已运行';$('#proxy-success-copy').textContent=secure?'HTTPS 反向代理和本机监听已启用。':'所有请求正在通过 HTTPS 安全转发到控制台。建议验证当前 HTTPS 访问后启用安全模式。';const link=$('#proxy-public-url');link.textContent=domain?'https://'+domain:'—';link.href=domain?'https://'+domain:'#';link.style.pointerEvents=domain?'':'none';$('#proxy-success-upstream').textContent=result.upstream||'—';$('#proxy-enable-secure').style.display=secure?'none':'';$('#proxy-security-status').textContent=secure?'安全模式已启用：8787 仅本机监听，Cookie 已启用 Secure。':'尚未启用安全模式：请通过上方 HTTPS 地址访问后再验证。';$('#proxy-disable').textContent='删除代理';$('#proxy-disable').style.display=''}
  async function refreshReverseProxyStatus(){const status=$('#proxy-status');if(!status)return;status.textContent='正在读取状态…';status.classList.remove('running');try{const result=await api('/api/reverse-proxy/status');proxyConfigured=Boolean(result.configured);if(result.domain)$('#proxy-domain').value=result.domain;if(result.upstream)$('#proxy-upstream').value=result.upstream;updateProxyConfig();status.textContent=result.running?`运行中 · ${result.domain||'已部署'}`:result.configured?'已配置，当前已停用':'尚未部署';status.classList.toggle('running',result.running);if(result.configured&&!proxyEditing)showProxySuccess(result);else if(!result.configured)showProxyForm()}catch(error){status.textContent='状态读取失败';showProxyForm()}}
  async function loadConsoleSettings(){try{const s=await api('/api/settings'),proxy=s.reverse_proxy||{};for(const [id,key] of [['proxy-domain','domain'],['proxy-upstream','upstream']])if(proxy[key]!=null)$('#'+id).value=proxy[key];updateProxyConfig()}catch{}}
  async function applyReverseProxy(){const domain=$('#proxy-domain').value.trim(),upstream=$('#proxy-upstream').value.trim()||'codex-provider-console:8787',certificate_pem=$('#proxy-certificate').value,private_key_pem=$('#proxy-private-key').value;if(!await panelDialog({title:'部署反向代理',message:'将校验证书与 Nginx 配置，并在服务器启动或更新 HTTPS 代理。证书和私钥不会写入面板设置。',confirmLabel:'校验并部署'}))return;const button=$('#proxy-apply');button.disabled=true;button.textContent='正在校验并部署…';try{const result=await api('/api/reverse-proxy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain,upstream,certificate_pem,private_key_pem})});$('#proxy-certificate').value='';$('#proxy-private-key').value='';proxyEditing=false;note(result.detail,'proxy-notice');await refreshReverseProxyStatus()}catch(error){note(error.message,'proxy-notice')}finally{button.disabled=false;button.textContent='校验并部署'}}
+ async function enableProxySecureMode(){const domain=$('#proxy-domain').value.trim().toLowerCase();if(location.protocol!=='https:'||location.hostname.toLowerCase()!==domain){note('请先通过 https://'+domain+' 访问控制台，再启用安全模式。','proxy-notice');return}if(!await panelDialog({title:'启用安全模式',message:'将验证当前 HTTPS 访问，并把面板改为仅本机监听，同时启用 Secure Cookie。启用后需要刷新页面。',confirmLabel:'验证并启用'}))return;const button=$('#proxy-enable-secure');button.disabled=true;button.textContent='正在验证并切换…';try{const result=await api('/api/reverse-proxy/enable-secure-mode',{method:'POST'});note(result.detail,'proxy-notice');button.style.display='none';setTimeout(()=>location.reload(),800)}catch(error){note(error.message,'proxy-notice');button.disabled=false;button.textContent='验证 HTTPS 并启用安全模式'}}
  async function deleteReverseProxy(){if(!await panelDialog({title:'删除反向代理',message:'将停止并删除代理容器、服务器上的 Nginx 配置、证书和私钥。此操作无法撤销。',confirmLabel:'删除代理'}))return;const button=$('#proxy-disable');button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/reverse-proxy/delete',{method:'POST'});proxyConfigured=false;proxyEditing=false;$('#proxy-domain').value='';$('#proxy-upstream').value='codex-provider-console:8787';$('#proxy-status').textContent='删除处理中…';$('#proxy-status').classList.remove('running');showProxyForm();note(result.detail,'proxy-notice')}catch(error){note(error.message,'proxy-notice')}finally{button.disabled=false;button.textContent='删除代理'}}
  ['proxy-domain','proxy-upstream'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateProxyConfig));
- document.getElementById('proxy-apply')?.addEventListener('click',applyReverseProxy);document.getElementById('proxy-edit')?.addEventListener('click',showProxyForm);document.getElementById('proxy-cancel-edit')?.addEventListener('click',cancelProxyEdit);document.getElementById('proxy-disable')?.addEventListener('click',deleteReverseProxy);
+ document.getElementById('proxy-apply')?.addEventListener('click',applyReverseProxy);document.getElementById('proxy-enable-secure')?.addEventListener('click',enableProxySecureMode);document.getElementById('proxy-edit')?.addEventListener('click',showProxyForm);document.getElementById('proxy-cancel-edit')?.addEventListener('click',cancelProxyEdit);document.getElementById('proxy-disable')?.addEventListener('click',deleteReverseProxy);
  const baseOpenConsoleSection=window.openConsoleSection;window.openConsoleSection=function(section){if(section!=='proxy')abandonProxyEdit();baseOpenConsoleSection(section);if(section==='proxy')refreshReverseProxyStatus()};
  loadConsoleSettings();openConsoleSection(localStorage.getItem('console-section')||'providers');
  </script>'''
