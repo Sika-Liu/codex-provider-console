@@ -11,6 +11,8 @@ class ReverseProxySecureModeTests(unittest.TestCase):
         self.assertIn("/api/reverse-proxy/enable-secure-mode", self.source)
         self.assertIn("x-forwarded-proto", self.source)
         self.assertIn("request_host != domain", self.source)
+        self.assertIn("https_verified", self.source)
+        self.assertIn("https_error", self.source)
 
     def test_secure_mode_updates_host_environment_and_recreates_panel(self):
         self.assertIn('PANEL_BIND", "127.0.0.1"', self.source)
