@@ -9,6 +9,7 @@ class ReverseProxySecureModeTests(unittest.TestCase):
 
     def test_endpoint_requires_https_proxy_identity(self):
         self.assertIn("/api/reverse-proxy/enable-secure-mode", self.source)
+        self.assertIn("/api/reverse-proxy/disable-secure-mode", self.source)
         self.assertIn("x-forwarded-proto", self.source)
         self.assertIn("request_host != domain", self.source)
         self.assertIn("https_verified", self.source)
@@ -23,6 +24,8 @@ class ReverseProxySecureModeTests(unittest.TestCase):
         self.assertIn('id="proxy-enable-secure"', self.source)
         self.assertIn("enableProxySecureMode", self.source)
         self.assertIn("result.secure_mode", self.source)
+        self.assertIn('id="proxy-disable-secure"', self.source)
+        self.assertIn("disableProxySecureMode", self.source)
         self.assertIn("确认启用安全模式", self.source)
         self.assertIn("公网 IP:8787", self.source)
         self.assertNotIn('id="proxy-security-status"', self.source)
