@@ -1744,7 +1744,7 @@ def set_env(text, key, value):
             output.append(line)
     if not replaced:
         output.append(key + "=" + value)
-    return "\n".join(output) + "\n"
+    return "\\n".join(output) + "\\n"
 tmp.write_text(set_env(set_env(original, "PANEL_BIND", "0.0.0.0"), "PANEL_COOKIE_SECURE", "false"), encoding="utf-8")
 os.chmod(tmp, 0o600)
 os.replace(tmp, env_path)
