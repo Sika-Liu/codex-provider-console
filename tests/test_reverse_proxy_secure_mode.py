@@ -23,6 +23,9 @@ class ReverseProxySecureModeTests(unittest.TestCase):
         self.assertIn('id="proxy-enable-secure"', self.source)
         self.assertIn("enableProxySecureMode", self.source)
         self.assertIn("result.secure_mode", self.source)
+        self.assertIn("确认启用安全模式", self.source)
+        self.assertIn("公网 IP:8787", self.source)
+        self.assertNotIn('id="proxy-security-status"', self.source)
 
 
 if __name__ == "__main__":
