@@ -1683,12 +1683,13 @@ def set_env(text, key, value):
 tmp.write_text(set_env(set_env(original, "PANEL_BIND", "127.0.0.1"), "PANEL_COOKIE_SECURE", "true"), encoding="utf-8")
 os.chmod(tmp, 0o600)
 os.replace(tmp, env_path)
-result = subprocess.run(["docker", "compose", "up", "-d", "--force-recreate", "codex-provider-console"], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-if result.returncode != 0:
-    shutil.copy2(backup, env_path)
-    subprocess.run(["docker", "compose", "up", "-d", "--force-recreate", "codex-provider-console"], cwd=project, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    backup.unlink(missing_ok=True)
-    raise SystemExit(result.stdout[-1200:])
+subprocess.Popen(
+    ["sh", "-c", "sleep 2; exec docker compose up -d --force-recreate codex-provider-console"],
+    cwd=project,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
 backup.unlink(missing_ok=True)
 print(json.dumps({{"secure_mode": True, "panel_bind": "127.0.0.1", "cookie_secure": True}}))
 """

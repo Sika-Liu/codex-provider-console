@@ -15,7 +15,7 @@ class ReverseProxySecureModeTests(unittest.TestCase):
     def test_secure_mode_updates_host_environment_and_recreates_panel(self):
         self.assertIn('PANEL_BIND", "127.0.0.1"', self.source)
         self.assertIn('PANEL_COOKIE_SECURE", "true"', self.source)
-        self.assertIn('"--force-recreate", "codex-provider-console"', self.source)
+        self.assertIn("--force-recreate codex-provider-console", self.source)
 
     def test_ui_exposes_explicit_secure_mode_action(self):
         self.assertIn('id="proxy-enable-secure"', self.source)
