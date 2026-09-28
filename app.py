@@ -1702,7 +1702,7 @@ def set_env(text, key, value):
             output.append(line)
     if not replaced:
         output.append(key + "=" + value)
-    return "\n".join(output) + "\n"
+    return "\\n".join(output) + "\\n"
 tmp.write_text(set_env(set_env(original, "PANEL_BIND", "127.0.0.1"), "PANEL_COOKIE_SECURE", "true"), encoding="utf-8")
 os.chmod(tmp, 0o600)
 os.replace(tmp, env_path)
