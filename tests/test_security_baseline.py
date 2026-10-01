@@ -23,10 +23,10 @@ class SecurityBaselineTests(unittest.TestCase):
         self.assertIn("raise HTTPException(429", source)
         self.assertIn("clear_failed_logins(client_key)", source)
 
-    def test_security_warnings_are_returned_and_rendered(self):
+    def test_security_warnings_are_returned_without_provider_banner(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
         self.assertIn('"security_warnings": security_warnings', source)
-        self.assertIn("renderSecurityWarnings(d.preflight)", source)
+        self.assertNotIn("renderSecurityWarnings(d.preflight)", source)
         self.assertIn("PANEL_COOKIE_SECURE=true", source)
 
 
