@@ -1706,6 +1706,15 @@ def set_env(text, key, value):
 tmp.write_text(set_env(set_env(original, "PANEL_BIND", "127.0.0.1"), "PANEL_COOKIE_SECURE", "true"), encoding="utf-8")
 os.chmod(tmp, 0o600)
 os.replace(tmp, env_path)
+settings_path = Path(project).parent / ".codex" / "control-panel-settings.json"
+if settings_path.is_file():
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        settings = {{}}
+    settings["panel_cookie_secure"] = True
+    settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
+    os.chmod(settings_path, 0o600)
 subprocess.Popen(
     ["sh", "-c", "sleep 8; exec docker compose up -d --force-recreate codex-provider-console"],
     cwd=project,
@@ -1748,6 +1757,15 @@ def set_env(text, key, value):
 tmp.write_text(set_env(set_env(original, "PANEL_BIND", "0.0.0.0"), "PANEL_COOKIE_SECURE", "false"), encoding="utf-8")
 os.chmod(tmp, 0o600)
 os.replace(tmp, env_path)
+settings_path = Path(project).parent / ".codex" / "control-panel-settings.json"
+if settings_path.is_file():
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        settings = {{}}
+    settings["panel_cookie_secure"] = False
+    settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
+    os.chmod(settings_path, 0o600)
 subprocess.Popen(
     ["sh", "-c", "sleep 8; exec docker compose up -d --force-recreate codex-provider-console"],
     cwd=project, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
