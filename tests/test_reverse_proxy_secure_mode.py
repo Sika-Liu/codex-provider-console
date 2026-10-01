@@ -28,7 +28,7 @@ class ReverseProxySecureModeTests(unittest.TestCase):
         self.assertIn("disableProxySecureMode", self.source)
         self.assertNotIn("renderSecurityWarnings(d.preflight)", self.source)
         self.assertIn("确认启用安全模式", self.source)
-        self.assertIn("公网 IP:8787", self.source)
+        self.assertIn("安全性更高", self.source)
         self.assertNotIn('id="proxy-security-status"', self.source)
 
 
