@@ -16,6 +16,8 @@ class AccountSettingsTests(unittest.TestCase):
         self.assertIn("account-change-password", source)
         self.assertIn("account-password-eye", source)
         self.assertIn("account-password-confirm", source)
+        self.assertIn("account-password-mask", source)
+        self.assertNotIn("event.target.id==='account-password-mask'", source)
 
     def test_settings_writes_preserve_auth_overrides(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
