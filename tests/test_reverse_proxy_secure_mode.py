@@ -21,6 +21,7 @@ class ReverseProxySecureModeTests(unittest.TestCase):
         self.assertIn('settings["panel_cookie_secure"] = True', self.source)
         self.assertIn('settings["panel_cookie_secure"] = False', self.source)
         self.assertIn("--force-recreate codex-provider-console", self.source)
+        self.assertIn("import json, os, re, shutil, subprocess, uuid", self.source)
 
     def test_ui_exposes_explicit_secure_mode_action(self):
         self.assertIn('id="proxy-enable-secure"', self.source)
