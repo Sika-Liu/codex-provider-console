@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 
-def ssh_host_key_options(known_hosts: Path, alias: str, gateway: str) -> list[str]:
+def ssh_host_key_options(known_hosts: Path, alias: str, gateway: str, environment: dict[str, str] | None = None) -> list[str]:
     """Require an operator-registered host key before host-side actions."""
     resolved_alias = alias or gateway
     if not known_hosts.is_file():
@@ -21,6 +21,7 @@ def ssh_host_key_options(known_hosts: Path, alias: str, gateway: str) -> list[st
             text=True,
             check=False,
             timeout=5,
+            env=environment,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError("无法检查宿主机 SSH 指纹，请确认 ssh-keygen 可用") from exc
@@ -39,12 +40,13 @@ def host_ssh_command(
     gateway: str,
     known_hosts: Path,
     host_alias: str,
+    environment: dict[str, str] | None = None,
 ) -> list[str]:
     """Build the single SSH command shape used by host-side operations."""
     return [
         "ssh", "-i", str(deployment_key),
         "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-        *ssh_host_key_options(known_hosts, host_alias, gateway),
+        *ssh_host_key_options(known_hosts, host_alias, gateway, environment=environment),
         "-o", "LogLevel=ERROR", f"{deploy_user}@{gateway}", "python3", "-",
     ]
 
