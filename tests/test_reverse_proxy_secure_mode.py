@@ -20,7 +20,8 @@ class ReverseProxySecureModeTests(unittest.TestCase):
         self.assertIn('PANEL_COOKIE_SECURE", "true"', self.source)
         self.assertIn('settings["panel_cookie_secure"] = True', self.source)
         self.assertIn('settings["panel_cookie_secure"] = False', self.source)
-        self.assertIn("--force-recreate codex-provider-console", self.source)
+        self.assertIn('"docker", "compose", "up"', self.source)
+        self.assertNotIn("sleep 8; exec docker compose", self.source)
         self.assertIn("import json, os, re, shutil, subprocess, uuid", self.source)
 
     def test_ui_exposes_explicit_secure_mode_action(self):
