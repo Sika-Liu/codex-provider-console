@@ -29,6 +29,12 @@ class HealthPresentationTests(unittest.TestCase):
         self.assertIn("if(section==='health'&&prepareHealthPanel())loadHealthPlan(true)", source)
         self.assertNotIn("if(section==='health')runHealth()", source)
 
+    def test_supplier_health_memory_is_cleared_when_active_provider_changes(self):
+        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        self.assertIn("healthProviderKey&&healthProviderKey!==nextHealthProvider", source)
+        self.assertIn("resetHealthProviderMemory()", source)
+        self.assertIn("尚未检查当前供应商", source)
+
     def test_deployment_key_action_waits_for_a_completed_check(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
         self.assertIn("item.name==='Codex Desktop 部署密钥'&&['pass','warning','fail'].includes(item.status)", source)
