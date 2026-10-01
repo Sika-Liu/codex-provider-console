@@ -1731,7 +1731,7 @@ print(json.dumps({{"secure_mode": True, "panel_bind": "127.0.0.1", "cookie_secur
 def reverse_proxy_disable_secure_mode_script() -> str:
     project = json.dumps(host_panel_project_path())
     return f"""
-import os, re, shutil, subprocess, uuid
+import json, os, re, shutil, subprocess, uuid
 from pathlib import Path
 project = Path({project})
 env_path = project / ".env"
