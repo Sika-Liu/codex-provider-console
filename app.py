@@ -1718,6 +1718,7 @@ if settings_path.is_file():
 subprocess.Popen(
     ["sh", "-c", "sleep 8; exec docker compose up -d --force-recreate codex-provider-console"],
     cwd=project,
+    stdin=subprocess.DEVNULL,
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
     start_new_session=True,
@@ -1768,7 +1769,7 @@ if settings_path.is_file():
     os.chmod(settings_path, 0o600)
 subprocess.Popen(
     ["sh", "-c", "sleep 8; exec docker compose up -d --force-recreate codex-provider-console"],
-    cwd=project, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    cwd=project, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
 )
 backup.unlink(missing_ok=True)
 print(json.dumps({{"secure_mode": False, "panel_bind": "0.0.0.0", "cookie_secure": False}}))
