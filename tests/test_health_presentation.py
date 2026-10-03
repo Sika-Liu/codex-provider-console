@@ -19,6 +19,9 @@ class HealthPresentationTests(unittest.TestCase):
         self.assertIn("CODEX_LATEST_RELEASE_URL", source)
         self.assertIn("/api/health/update-codex", source)
         self.assertIn("更新 Codex CLI", source)
+        self.assertIn("检查安装环境", source)
+        self.assertIn("下载并安装 Codex CLI", source)
+        self.assertIn("验证安装版本", source)
 
     def test_health_page_loads_a_plan_then_polls_incremental_results(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
