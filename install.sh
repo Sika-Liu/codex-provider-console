@@ -5,7 +5,7 @@ PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ENV_FILE="$PROJECT_DIR/.env"
 CREATED_ENV=false
 CODEX_HOME_HOST="${HOME}/.codex"
-PANEL_BIND="127.0.0.1"
+PANEL_BIND="0.0.0.0"
 PANEL_PORT="8787"
 PORT_SET=false
 BIND_SET=false
@@ -27,15 +27,14 @@ Usage: bash install.sh [options]
 
 Options:
   --codex-home <path>   Host directory mounted as /codex (default: ~/.codex)
-  --bind <address>      Advanced override (default: 127.0.0.1)
+  --bind <address>      Advanced override (default: 0.0.0.0)
   --port <port>         Host port (default: 8787)
   --install-docker      Install Docker when it is missing (common Linux distros)
   --force               Replace matching settings in an existing .env file
   -h, --help            Show this help
 
-The default binds the panel to 127.0.0.1. Use an SSH tunnel or an HTTPS reverse
-proxy for remote access. Public binding is an advanced option and must be protected
-by a firewall and HTTPS.
+The default binds the panel to 0.0.0.0 for direct public access. Keep panel login
+enabled, restrict the port with your cloud firewall, and use HTTPS for production.
 EOF
 }
 
