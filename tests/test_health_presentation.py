@@ -41,6 +41,11 @@ class HealthPresentationTests(unittest.TestCase):
         self.assertIn("resetHealthProviderMemory()", source)
         self.assertIn("尚未检查当前供应商", source)
 
+    def test_provider_navigation_restores_list_after_detail_view(self):
+        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        self.assertIn("list.classList.remove('hidden')", source)
+        self.assertIn("detail.classList.remove('visible')", source)
+
     def test_deployment_key_action_waits_for_a_completed_check(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
         self.assertIn("item.name==='Codex Desktop 部署密钥'&&['pass','warning','fail'].includes(item.status)", source)
