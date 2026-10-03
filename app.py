@@ -3637,7 +3637,7 @@ async function previewMigration(){try{const d=await api('/api/sessions/migrate',
 async function applyMigration(){if(!confirm('确认迁移会话供应商标签？系统会创建备份。'))return;try{const d=await api('/api/sessions/migrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_provider:$('#migration-target').value,source_provider:$('#migration-source').value||null,apply:true})});$('#migration-result').textContent=`已迁移 ${d.changed_sessions||0} 个会话，备份：${d.backup_id||'无'}`;}catch(e){note(e.message)}}
 async function toggleSwitch(){try{const enabled=!state.enabled;await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_switching_enabled:enabled})});state.enabled=enabled;$('#switch').classList.toggle('on',enabled);note(enabled?'已启用供应商切换写入。':'已关闭供应商切换写入；页面仍可编辑档案。','list-notice')}catch(e){note(e.message,'list-notice')}}
 function restartHint(){note('供应商切换会直接写入配置；运行中的 Codex 进程需由你在服务器终端重启。','list-notice')}
-refreshAll().catch(error=>{const count=document.querySelector('#list-count');if(count)count.textContent='读取失败：'+(error?.message||'请刷新重试');const notice=document.querySelector('#list-notice');if(notice){notice.textContent='供应商配置读取失败，请刷新页面重试。';notice.classList.add('show')}});
+window.setTimeout(()=>refreshAll().catch(error=>{const count=document.querySelector('#list-count');if(count)count.textContent='读取失败：'+(error?.message||'请刷新重试');const notice=document.querySelector('#list-notice');if(notice){notice.textContent='供应商配置读取失败，请刷新页面重试。';notice.classList.add('show')}}),0);
 </script></body></html>'''
 
 HTML = r'''<!doctype html>

@@ -44,7 +44,7 @@ class HealthPresentationTests(unittest.TestCase):
     def test_provider_refresh_has_no_health_state_initialization_race(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
         self.assertIn("var healthChecks=[],healthPoll=null,healthPlanLoaded=false,healthProviderKey='',healthStoragePrefix='codex-health-result:';", source)
-        self.assertIn("refreshAll().catch(error=>", source)
+        self.assertIn("window.setTimeout(()=>refreshAll().catch(error=>", source)
 
     def test_provider_navigation_restores_list_after_detail_view(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
