@@ -136,39 +136,85 @@ case "${1:-}" in
       CODEX_HOME_HOST=${CODEX_HOME_HOST%\'}
     fi
     CODEX_HOME_HOST="${CODEX_HOME_HOST:-$PROJECT_DIR/codex-data}"
-    read -r -p "This permanently deletes the console, .env, and its Docker image. Continue? [y/N]: " confirm
-    case "${confirm:-n}" in
-      y|Y|yes|YES)
-        if command -v docker >/dev/null 2>&1; then
-          docker compose down --remove-orphans
-          docker image rm codex-provider-console-codex-provider-console:latest 2>/dev/null || true
-        else
-          echo "Docker is not installed; skipping container cleanup."
-        fi
-        rm -f -- "$HOME/.local/bin/codex-panel"
-        rm -rf -- "$PROJECT_DIR"
-        echo "Codex Provider Console was removed."
+    project_real=$(realpath -m "$PROJECT_DIR")
+    data_real=$(realpath -m "$CODEX_HOME_HOST")
+    [[ "$project_real" != "/" && "$project_real" != "$HOME" ]] || {
+      echo "无法安全确认项目目录，卸载已取消。" >&2
+      exit 1
+    }
 
-        codex_data_paths="$CODEX_HOME_HOST"
-        if [[ "$CODEX_HOME_HOST" != "$HOME/.codex" ]]; then
-          codex_data_paths+=" and $HOME/.codex"
-        fi
-        read -r -p "Remove Codex CLI and Codex data at ${codex_data_paths}? [y/N]: " remove_codex
-        case "${remove_codex:-n}" in
-          y|Y|yes|YES)
-            rm -f -- "$HOME/.local/bin/codex"
-            rm -rf -- "$CODEX_HOME_HOST"
-            if [[ "$CODEX_HOME_HOST" != "$HOME/.codex" ]]; then
-              rm -rf -- "$HOME/.codex"
-            fi
-            echo "Codex CLI and Codex data were removed."
-            ;;
-          *) echo "Codex CLI and Codex data were kept." ;;
-        esac
+    cat <<EOF
+即将卸载 Codex 控制台。
 
-        ;;
-      *) echo "Uninstall cancelled." ;;
+请选择处理方式：
+  1. 卸载控制台，保留 Codex 数据（推荐）
+  2. 卸载控制台，同时删除 Codex 数据、登录信息、会话和备份
+  N. 取消
+EOF
+    read -r -p "请选择 [1/2/N]: " uninstall_mode
+    case "${uninstall_mode:-N}" in
+      1) REMOVE_CODEX=false ;;
+      2) REMOVE_CODEX=true; echo "警告：选择 2 后，Codex 数据将无法恢复。" ;;
+      *) echo "卸载已取消。"; exit 0 ;;
     esac
+
+    read -r -p "确认执行卸载？[y/N]: " confirm
+    case "${confirm:-n}" in
+      y|Y|yes|YES) ;;
+      *) echo "卸载已取消。"; exit 0 ;;
+    esac
+
+    if [[ "$REMOVE_CODEX" == false && ( "$data_real" == "$project_real" || "$data_real" == "$project_real/"* ) ]]; then
+      preserved="$HOME/.codex-preserved-$(date +%Y%m%d-%H%M%S)"
+      echo "检测到数据位于项目目录内，正在将数据保留到：$preserved"
+      mkdir -p "$(dirname "$preserved")"
+      mv -- "$data_real" "$preserved"
+      data_real="$preserved"
+    fi
+
+    project_images=""
+    if command -v docker >/dev/null 2>&1; then
+      project_images=$(docker compose images -q 2>/dev/null | sort -u || true)
+      docker compose down --remove-orphans
+    else
+      echo "未检测到 Docker，跳过容器清理。"
+    fi
+
+    if [[ -n "$project_images" ]] && command -v docker >/dev/null 2>&1; then
+      while IFS= read -r image_id; do
+        [[ -n "$image_id" ]] && docker image rm "$image_id" >/dev/null 2>&1 || true
+      done <<< "$project_images"
+    fi
+
+    cli_link="/usr/local/bin/codex"
+    if [[ -L "$cli_link" ]]; then
+      cli_target=$(readlink -f "$cli_link" 2>/dev/null || true)
+      if [[ "$cli_target" == "$HOME/.local/bin/codex" || "$cli_target" == "$HOME/.codex/"* || "$cli_target" == "$data_real/"* ]]; then
+        if [[ -w "$(dirname "$cli_link")" ]]; then
+          rm -f -- "$cli_link"
+        elif command -v sudo >/dev/null 2>&1; then
+          sudo rm -f -- "$cli_link"
+        fi
+      fi
+    fi
+
+    rm -f -- "$HOME/.local/bin/codex-panel"
+    if [[ -f "$HOME/.bashrc" ]]; then
+      sed -i '/^export PATH="\$HOME\/\.local\/bin:\$PATH"$/d' "$HOME/.bashrc"
+    fi
+    rm -rf -- "$PROJECT_DIR"
+
+    if [[ "$REMOVE_CODEX" == true ]]; then
+      rm -f -- "$HOME/.local/bin/codex"
+      rm -rf -- "$data_real"
+      if [[ "$data_real" != "$HOME/.codex" && -d "$HOME/.codex" ]]; then
+        rm -rf -- "$HOME/.codex"
+      fi
+      echo "控制台和 Codex 数据已删除。"
+    else
+      echo "控制台已卸载，Codex 数据已保留：$data_real"
+    fi
+    echo "如需重新安装，请重新运行安装命令。"
     ;;
   -h|--help|help|'') usage ;;
   *) echo "Unknown command: $1" >&2; usage; exit 1 ;;
