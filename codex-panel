@@ -164,6 +164,33 @@ EOF
       *) echo "卸载已取消。"; exit 0 ;;
     esac
 
+    if [[ "$REMOVE_CODEX" == true ]]; then
+      codex_pids=$(pgrep -f '[c]odex app-server' || true)
+      if [[ -n "$codex_pids" ]]; then
+        echo
+        echo "检测到 Codex 正在运行（进程：$codex_pids）。"
+        echo "删除 Codex 数据前必须先停止这些进程；正在执行的任务可能会被中断。"
+        read -r -p "确认停止进程并继续删除？[y/N]: " stop_confirm
+        case "${stop_confirm:-n}" in
+          y|Y|yes|YES) ;;
+          *) echo "卸载已取消，Codex 数据未删除。"; exit 0 ;;
+        esac
+
+        kill $codex_pids 2>/dev/null || true
+        for _ in {1..10}; do
+          sleep 1
+          remaining_pids=$(pgrep -f '[c]odex app-server' || true)
+          [[ -z "$remaining_pids" ]] && break
+        done
+        if [[ -n "${remaining_pids:-}" ]]; then
+          echo "Codex 进程未能在限定时间内退出，已停止卸载以避免缓存被重新创建。" >&2
+          echo "请先关闭 Codex 后重新执行 codex-panel uninstall。" >&2
+          exit 1
+        fi
+        echo "Codex 进程已停止，继续删除数据。"
+      fi
+    fi
+
     if [[ "$REMOVE_CODEX" == false && ( "$data_real" == "$project_real" || "$data_real" == "$project_real/"* ) ]]; then
       preserved="$HOME/.codex-preserved-$(date +%Y%m%d-%H%M%S)"
       echo "检测到数据位于项目目录内，正在将数据保留到：$preserved"
@@ -210,7 +237,11 @@ EOF
       if [[ "$data_real" != "$HOME/.codex" && -d "$HOME/.codex" ]]; then
         rm -rf -- "$HOME/.codex"
       fi
-      echo "控制台和 Codex 数据已删除。"
+      if [[ -e "$data_real" || -e "$HOME/.codex" ]]; then
+        echo "控制台已卸载，但 Codex 数据仍有残留，请检查：$data_real" >&2
+        exit 1
+      fi
+      echo "控制台和 Codex 数据已删除，已确认无残留。"
     else
       echo "控制台已卸载，Codex 数据已保留：$data_real"
     fi
