@@ -56,6 +56,7 @@ CONFIG_PATH = CODEX_HOME / "config.toml"
 PROFILE_PATH = CODEX_HOME / "control-panel-profiles.json"
 SETTINGS_PATH = CODEX_HOME / "control-panel-settings.json"
 AUTH_PATH = CODEX_HOME / "auth.json"
+COMMON_CONFIG_PATH = CODEX_HOME / "control-panel-common-config.toml"
 RELAY_BASE_URL = os.environ.get("RELAY_BASE_URL", "http://codex-provider-relay:57321/v1")
 # The panel reaches the relay over Docker DNS, but the host-side Codex App
 # Server cannot resolve that container name. Generated Codex config must use
@@ -594,7 +595,7 @@ def backup_state(include_sessions: bool = False, reason: str | None = None) -> t
         )
         + "\n",
     )
-    for source in (CONFIG_PATH, PROFILE_PATH, SETTINGS_PATH, AUTH_PATH):
+    for source in (CONFIG_PATH, PROFILE_PATH, SETTINGS_PATH, AUTH_PATH, COMMON_CONFIG_PATH):
         if source.exists():
             target = destination / source.name
             shutil.copy2(source, target)
@@ -741,6 +742,7 @@ def restore_backup_state(backup_dir: Path) -> list[str]:
         (PROFILE_PATH.name, PROFILE_PATH),
         (SETTINGS_PATH.name, SETTINGS_PATH),
         (AUTH_PATH.name, AUTH_PATH),
+        (COMMON_CONFIG_PATH.name, COMMON_CONFIG_PATH),
     ):
         source = backup_dir / source_name
         if source.is_file():
@@ -2210,7 +2212,8 @@ def _switch_provider(
 
     report(48, "正在创建配置备份")
     backup_id, backup_dir = backup_state(include_sessions=True, reason="provider_switch")
-    base = remove_goals_feature(canonicalize_base_config(config_text()))
+    saved_common = COMMON_CONFIG_PATH.read_text(encoding="utf-8") if COMMON_CONFIG_PATH.exists() else config_text()
+    base = remove_goals_feature(canonicalize_base_config(saved_common))
     if mode == "pure_api" and not profile.get("bearer_token") and not profile.get("no_auth", False):
         raise HTTPException(422, "An API key is required for a pure API provider")
     if mode == "official":
@@ -2405,6 +2408,10 @@ class ReverseProxyApplyRequest(BaseModel):
     private_key_pem: str = Field(min_length=1, max_length=200_000)
 
 
+class CommonConfigRequest(BaseModel):
+    contents: str = Field(default="", max_length=200000)
+
+
 class SessionMigrationRequest(BaseModel):
     target_provider: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,48}$")
     source_provider: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,48}$")
@@ -2466,6 +2473,32 @@ def save_account_settings(request: AccountSecurityRequest) -> dict:
         LOGIN_FAILURES.clear()
     audit("account_security_settings_changed", username=request.username, cookie_secure=request.cookie_secure)
     return {"username": PANEL_USERNAME, "cookie_secure": COOKIE_SECURE, "sessions_invalidated": True}
+
+
+@app.get("/api/common-config")
+def get_common_config() -> dict:
+    contents = COMMON_CONFIG_PATH.read_text(encoding="utf-8") if COMMON_CONFIG_PATH.exists() else remove_provider_sections(config_text())
+    return {"contents": contents}
+
+
+@app.post("/api/common-config/extract")
+def extract_common_config() -> dict:
+    contents = remove_provider_sections(config_text())
+    write_private(COMMON_CONFIG_PATH, contents + ("\n" if contents else ""))
+    audit("common_config_extracted")
+    return {"contents": contents}
+
+
+@app.post("/api/common-config")
+def save_common_config(request: CommonConfigRequest) -> dict:
+    contents = canonicalize_base_config(request.contents.strip())
+    try:
+        tomllib.loads(contents or "")
+    except tomllib.TOMLDecodeError as exc:
+        raise HTTPException(422, "通用配置不是有效的 TOML") from exc
+    write_private(COMMON_CONFIG_PATH, contents + ("\n" if contents else ""))
+    audit("common_config_saved")
+    return {"contents": contents}
 
 
 @app.get("/api/reverse-proxy/status")
