@@ -151,11 +151,12 @@ codex-panel uninstall
 在服务器上执行以下命令：
 
 ```bash
-test ! -e "$HOME/codex-provider-console" && echo "项目目录已删除"
-test ! -e "$HOME/.codex" && echo "Codex 数据已删除"
+test ! -e ~/codex-provider-console && echo "控制台目录已删除"
+test ! -e ~/.codex && echo "Codex 数据目录已删除"
+test ! -e ~/.local/bin/codex-panel && echo "管理命令已删除"
 ```
 
-第一条提示出现即表示项目文件已清除。仅在卸载时选择删除 Codex 后，第二条才应出现。若卸载时保留了 Docker，可再检查是否有项目容器、网络或镜像残留：
+第一条提示出现即表示控制台文件已清除。仅在卸载时选择删除 Codex 后，第二条才应出现；第三条用于确认管理命令已清除。若卸载时保留了 Docker，可再检查是否有项目容器、网络或镜像残留：
 
 ```bash
 docker ps -a

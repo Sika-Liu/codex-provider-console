@@ -227,13 +227,14 @@ Installation creates the `codex-panel` command so it can be used from any direct
 Run the following on the server:
 
 ```bash
-test ! -e "$HOME/codex-provider-console" && echo "Project directory removed"
-test ! -e "$HOME/.codex" && echo "Codex data removed"
+test ! -e ~/codex-provider-console && echo "Console directory removed"
+test ! -e ~/.codex && echo "Codex data directory removed"
+test ! -e ~/.local/bin/codex-panel && echo "Management command removed"
 ```
 
-The first message confirms that the project files are removed. The second only
-appears when Codex removal was selected. If Docker was kept, check for remaining
-project resources:
+The first message confirms that the console files are removed. The second only
+appears when Codex removal was selected. The third confirms that the management
+command is removed. If Docker was kept, check for remaining project resources:
 
 ```bash
 docker ps -a
