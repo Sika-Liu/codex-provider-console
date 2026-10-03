@@ -41,6 +41,11 @@ class HealthPresentationTests(unittest.TestCase):
         self.assertIn("resetHealthProviderMemory()", source)
         self.assertIn("尚未检查当前供应商", source)
 
+    def test_add_provider_uses_stable_entrypoint(self):
+        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        self.assertIn("onclick=\"openNewProvider()\"", source)
+        self.assertIn("function openNewProvider(mode='apikey')", source)
+
     def test_health_state_uses_window_scope_across_embedded_scripts(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
         self.assertIn("window.healthProviderKey=''", source)
