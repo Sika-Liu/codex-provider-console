@@ -37,13 +37,18 @@ class HealthPresentationTests(unittest.TestCase):
 
     def test_supplier_health_memory_is_cleared_when_active_provider_changes(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
-        self.assertIn("healthProviderKey&&healthProviderKey!==nextHealthProvider", source)
+        self.assertIn("window.healthProviderKey&&window.healthProviderKey!==nextHealthProvider", source)
         self.assertIn("resetHealthProviderMemory()", source)
         self.assertIn("尚未检查当前供应商", source)
 
+    def test_health_state_uses_window_scope_across_embedded_scripts(self):
+        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        self.assertIn("window.healthProviderKey=''", source)
+        self.assertNotIn("if(!healthProviderKey)", source)
+
     def test_provider_refresh_has_no_health_state_initialization_race(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
-        self.assertIn("var healthChecks=[],healthPoll=null,healthPlanLoaded=false,healthProviderKey='',healthStoragePrefix='codex-health-result:';", source)
+        self.assertIn("window.healthProviderKey=''", source)
         self.assertIn("window.setTimeout(()=>refreshAll().catch(error=>", source)
 
     def test_provider_navigation_restores_list_after_detail_view(self):
