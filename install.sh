@@ -379,14 +379,15 @@ local_ip=${local_ip:-127.0.0.1}
 public_ip=$(curl -4fsS --connect-timeout 3 --max-time 5 https://api.ipify.org 2>/dev/null || true)
 public_ip=${public_ip:-N/A}
 
+public_address="http://${public_ip}:${PANEL_PORT}"
 if [[ "$PANEL_BIND" == "0.0.0.0" || "$PANEL_BIND" == "::" ]]; then
-  external_address="http://${public_ip}:${PANEL_PORT}"
+  external_address="$public_address"
   internal_address="http://${local_ip}:${PANEL_PORT}"
-  exposure_note="WARNING: TCP port ${PANEL_PORT} is network-accessible. Restrict it with the cloud firewall, or use the HTTPS reverse proxy and do not expose this port directly."
+  exposure_note="Public access is enabled. Restrict TCP port ${PANEL_PORT} with the cloud firewall, or use the HTTPS reverse proxy."
 else
-  external_address="Disabled (custom localhost binding)"
+  external_address="Not directly accessible (local-only binding)"
   internal_address="http://127.0.0.1:${PANEL_PORT}"
-  exposure_note="The panel is local-only. Use the SSH tunnel above, or configure the optional HTTPS reverse proxy for remote access."
+  exposure_note="Public address (blocked by local-only binding): ${public_address}. Use the SSH tunnel above, or configure the HTTPS reverse proxy."
 fi
 
 cat <<EOF
@@ -405,6 +406,7 @@ Codex CLI user: ${CODEX_CLI_USER}
 Management command: codex-panel
 Username: ${PANEL_USERNAME}
 Password: ${PANEL_PASSWORD}
+Login URL: ${external_address}
 Codex CLI: ${CODEX_CLI_VERSION}
 
 ${DOCKER_GROUP_NOTE}
