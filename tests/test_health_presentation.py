@@ -16,6 +16,9 @@ class HealthPresentationTests(unittest.TestCase):
         self.assertIn("查看诊断详情", source)
         self.assertIn("复制诊断详情", source)
         self.assertIn("health-check ${item.status} ${problem?'':'compact'}", source)
+        self.assertIn("CODEX_LATEST_RELEASE_URL", source)
+        self.assertIn("/api/health/update-codex", source)
+        self.assertIn("更新 Codex CLI", source)
 
     def test_health_page_loads_a_plan_then_polls_incremental_results(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")

@@ -177,7 +177,9 @@ page only when needed; the panel can read and replace Codex credentials, so
 public deployments must retain login authentication.
 
 After signing in, use the left-side **健康检查** page before running Codex. It
-checks the mounted Codex directory, write permissions, Codex CLI, the saved SSH
+checks the mounted Codex directory, write permissions, Codex CLI, and compares
+the installed CLI with the latest version published by OpenAI. When an update
+is available, the page shows an **更新 Codex CLI** button. The saved SSH
 login user and deployment user match, configuration and auth files, panel
 authentication, the active provider, a real upstream request, and available disk
 space. SSH private keys are never uploaded or read. When the CLI is missing,

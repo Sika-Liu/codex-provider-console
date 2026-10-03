@@ -38,6 +38,7 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 APP_VERSION = (Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip() if Path(__file__).with_name("VERSION").is_file() else "0.1.0")
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
 CODEX_CLI_USER = os.environ.get("CODEX_CLI_USER", "unknown")
+CODEX_LATEST_RELEASE_URL = "https://releases.openai.com/codex/channels/latest"
 DEPLOY_USER = os.environ.get("DEPLOY_USER", "unknown")
 USER_HOME = Path(os.environ.get("USER_HOME_PATH", "/user-home"))
 HOST_CODEX_BIN = Path(os.environ.get("HOST_CODEX_BIN", "/user-home/.local/bin/codex"))
@@ -1317,10 +1318,12 @@ def diagnose_profile(
         if progress:
             progress(percent, stage)
 
-    def add(name: str, status: str, detail: str, diagnostic_detail: str | None = None) -> None:
+    def add(name: str, status: str, detail: str, diagnostic_detail: str | None = None, action: str | None = None) -> None:
         item = {"name": name, "status": status, "detail": detail}
         if diagnostic_detail:
             item["diagnostic_detail"] = diagnostic_detail
+        if action:
+            item["action"] = action
         checks.append(item)
         if on_check:
             on_check(dict(item))
@@ -2004,6 +2007,22 @@ def migrate_session_provider(
     return {"threads": database_changes, "rollout_files": rollout_files, "rollout_records": rollout_records}
 
 
+def cli_version_number(value: str) -> str:
+    match = re.search(r"(?<!\d)(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)", value or "")
+    return match.group(1) if match else ""
+
+def fetch_latest_cli_version() -> str:
+    request = urllib.request.Request(
+        CODEX_LATEST_RELEASE_URL,
+        headers={"User-Agent": "codex-provider-console-health"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.load(response)
+    version = cli_version_number(str(payload.get("tag_name", "")))
+    if not version:
+        raise ValueError("官方版本信息格式无法识别")
+    return version
+
 def health_check(on_check: Callable[[dict[str, str]], None] | None = None) -> dict:
     checks: list[dict[str, str]] = []
 
@@ -2038,6 +2057,23 @@ def health_check(on_check: Callable[[dict[str, str]], None] | None = None) -> di
         "pass" if cli_installed else "fail",
         cli_detail,
     )
+    if cli_installed:
+        try:
+            latest_cli_version = fetch_latest_cli_version()
+            current_cli_version = cli_version_number(cli_version)
+            current_key = tuple(int(part) for part in current_cli_version.split("-", 1)[0].split(".")) if current_cli_version else ()
+            latest_key = tuple(int(part) for part in latest_cli_version.split("-", 1)[0].split("."))
+            if not current_key:
+                add("Codex CLI 版本", "warning", f"当前版本无法识别；官方最新版本为 {latest_cli_version}")
+            elif current_key < latest_key:
+                add("Codex CLI 版本", "warning", f"当前 {current_cli_version}，最新 {latest_cli_version}；可以更新", action="update-codex")
+            else:
+                add("Codex CLI 版本", "pass", f"当前 {current_cli_version}，已是最新版本")
+        except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+            add("Codex CLI 版本", "warning", f"暂时无法获取官方最新版本：{exc}")
+    else:
+        add("Codex CLI 版本", "warning", "尚未安装 Codex CLI")
+
     deployment_key_ready, deployment_key_detail = deployment_key_status()
     add("Codex Desktop 部署密钥", "pass" if deployment_key_ready else "warning", deployment_key_detail)
     add("目录写入权限", "pass" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "fail", "可写" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "控制台无法写入 Codex 数据目录")
@@ -2114,6 +2150,7 @@ def health_check_plan() -> list[dict[str, str]]:
     names = [
         "Codex 数据目录",
         "Codex CLI",
+        "Codex CLI 版本",
         "Codex Desktop 部署密钥",
         "目录写入权限",
         "config.toml",
@@ -2902,6 +2939,10 @@ def install_codex_from_health() -> dict:
     return {"version": version, "detail": f"Codex CLI 已安装到用户 {DEPLOY_USER}；健康检查已刷新。"}
 
 
+@app.post("/api/health/update-codex")
+def update_codex_from_health() -> dict:
+    return install_codex_from_health()
+
 @app.post("/api/health/deployment-key")
 def deploy_ssh_key() -> dict:
     ssh_dir = DEPLOYMENT_KEY_PATH.parent
@@ -3460,7 +3501,7 @@ document.getElementById('account-change-password')?.addEventListener('click',ope
  async function logoutConsole(){await fetch('/logout',{method:'POST'});location.href='/login'}
  function openConsoleSection(section){let target=section==='providers'?null:document.querySelector('#console-'+section);if(section!=='providers'&&!target){section='providers';target=null}document.querySelectorAll('.console-nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===section));document.querySelectorAll('.console-nav-panel').forEach(p=>p.style.display='none');const list=document.querySelector('#list-view'),detail=document.querySelector('#detail');if(section==='providers'){if(list)list.style.display='';if(detail&&detail.classList.contains('visible'))detail.style.display='';}else{if(list)list.style.display='none';if(detail)detail.style.display='none';target.style.display='block';if(section==='health'&&prepareHealthPanel())loadHealthPlan(true);if(section==='settings')loadAccountSettings()}localStorage.setItem('console-section',section)}
  function healthCategory(name){if(name.startsWith('供应商 ·')||name==='当前供应商')return '供应商连接';if(['config.toml','config.toml 语法','Codex 关键配置','auth.json','控制台认证'].includes(name))return 'Codex 配置';return '运行环境'}
- function healthActions(item){const cli=item.name==='Codex CLI'&&item.status==='fail'?'<p><button class="btn small" onclick="installCodexCli(this)">安装 Codex CLI</button></p>':'';const key=item.name==='Codex Desktop 部署密钥'&&['pass','warning','fail'].includes(item.status)?`<p><button class="btn small" onclick="${item.status==='pass'?'downloadDeploymentKey()':'deployDeploymentKey(this)'}">${item.status==='pass'?'下载部署密钥':'创建并部署密钥'}</button></p>`:'';const config=item.name==='config.toml 语法'&&item.status==='fail'?'<p><button class="btn small" onclick="repairConfig(this)">修复配置</button></p>':'';return cli+key+config}
+ function healthActions(item){const cli=item.name==='Codex CLI'&&item.status==='fail'?'<p><button class="btn small" onclick="installCodexCli(this)">安装 Codex CLI</button></p>':'';const update=item.name==='Codex CLI 版本'&&item.action==='update-codex'?'<p><button class="btn small" onclick="updateCodexCli(this)">更新 Codex CLI</button></p>':'';const key=item.name==='Codex Desktop 部署密钥'&&['pass','warning','fail'].includes(item.status)?`<p><button class="btn small" onclick="${item.status==='pass'?'downloadDeploymentKey()':'deployDeploymentKey(this)'}">${item.status==='pass'?'下载部署密钥':'创建并部署密钥'}</button></p>`:'';const config=item.name==='config.toml 语法'&&item.status==='fail'?'<p><button class="btn small" onclick="repairConfig(this)">修复配置</button></p>':'';return cli+update+key+config}
  function copyHealthDiagnostic(button){const detail=decodeURIComponent(button.dataset.detail||'');navigator.clipboard?.writeText(detail).then(()=>{button.textContent='已复制'}).catch(()=>{button.textContent='复制失败'})}
  function healthRow(item){const problem=['warning','fail'].includes(item.status),label=item.status==='pass'?'通过':item.status==='warning'?'提醒':item.status==='fail'?'失败':item.status==='running'?'检查中':'未检查',diagnostic=item.diagnostic_detail&&item.diagnostic_detail!==item.detail?`<details><summary>查看诊断详情</summary><pre>${esc(item.diagnostic_detail)}</pre><button class="btn small health-copy" data-detail="${encodeURIComponent(item.diagnostic_detail)}" onclick="copyHealthDiagnostic(this)">复制诊断详情</button></details>`:'';return `<div class="health-check ${item.status} ${problem?'':'compact'}"><div class="health-check-top"><b>${label} · ${esc(item.name)}</b><small title="${esc(item.detail)}">${esc(item.detail)}</small></div>${diagnostic}${healthActions(item)}</div>`}
  let healthChecks=[],healthPoll=null,healthPlanLoaded=false,healthProviderKey='',healthStoragePrefix='codex-health-result:';
@@ -3473,7 +3514,7 @@ document.getElementById('account-change-password')?.addEventListener('click',ope
  function healthSummary(stage){const completed=healthChecks.filter(item=>['pass','warning','fail'].includes(item.status)),passed=healthChecks.filter(item=>item.status==='pass').length,warnings=healthChecks.filter(item=>item.status==='warning').length,failed=healthChecks.filter(item=>item.status==='fail').length;return `${stage} · 已完成 ${completed.length}/${healthChecks.length} 项${passed?`，${passed} 项通过`:''}${warnings?`，${warnings} 项提醒`:''}${failed?`，${failed} 项失败`:''}`}
  async function runHealth(){if(healthPoll||!prepareHealthPanel())return;await loadHealthPlan(true);const summary=$('#health-summary'),button=$('#health-run');healthChecks=healthChecks.map(item=>({...item,status:'pending',detail:'等待检查'}));renderHealthChecks();button.disabled=true;button.textContent='检查中…';try{const started=await api('/api/health/progress',{method:'POST'});const poll=async()=>{try{const job=await api(`/api/health/progress/${encodeURIComponent(started.id)}`);mergeHealthChecks(job.checks||[]);summary.textContent=healthSummary(job.stage||'正在检查');renderHealthChecks();if(job.status==='running'){healthPoll=setTimeout(poll,250);return}healthPoll=null;button.disabled=false;button.textContent='重新检查';if(job.status==='completed'){const resultSummary=healthSummary(job.result?.summary||'健康检查完成');summary.textContent=resultSummary;saveHealthMemory(resultSummary)}else summary.textContent='健康检查失败：'+(job.detail||'任务执行失败')}catch(error){healthPoll=null;button.disabled=false;button.textContent='重新检查';summary.textContent='健康检查失败：'+error.message}};healthPoll=setTimeout(poll,80)}catch(error){button.disabled=false;button.textContent='立即检查';summary.textContent='健康检查请求未能启动：'+error.message}}
  async function installCodexCli(button){const confirmed=await panelDialog({title:'安装 Codex CLI',message:'将为部署用户安装官方 Codex CLI。安装完成后会自动重新检查环境。',confirmLabel:'开始安装'});if(!confirmed)return;button.disabled=true;button.textContent='正在安装…';try{const result=await api('/api/health/install-codex',{method:'POST'});await panelDialog({title:'Codex CLI 已安装',message:result.detail,confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'安装失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='安装 Codex CLI'}}
- async function repairConfig(button){const confirmed=await panelDialog({title:'修复 config.toml',message:'将合并重复的 [features] 配置段，并自动创建备份。不会修改 auth.json。',confirmLabel:'开始修复'});if(!confirmed)return;button.disabled=true;button.textContent='正在修复…';try{const result=await api('/api/health/repair-config',{method:'POST'});await panelDialog({title:'配置已修复',message:result.detail+' 请重新连接 Codex App 后再修改模型。',confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'修复失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='修复配置'}}
+ async function updateCodexCli(button){const confirmed=await panelDialog({title:'更新 Codex CLI',message:'将从官方发布源安装最新稳定版本。安装期间面板会重新创建容器，正在运行的面板请求可能短暂中断。',confirmLabel:'开始更新'});if(!confirmed)return;button.disabled=true;button.textContent='正在更新…';try{const result=await api('/api/health/update-codex',{method:'POST'});await panelDialog({title:'Codex CLI 已更新',message:result.detail,confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'更新失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='更新 Codex CLI'}} async function repairConfig(button){const confirmed=await panelDialog({title:'修复 config.toml',message:'将合并重复的 [features] 配置段，并自动创建备份。不会修改 auth.json。',confirmLabel:'开始修复'});if(!confirmed)return;button.disabled=true;button.textContent='正在修复…';try{const result=await api('/api/health/repair-config',{method:'POST'});await panelDialog({title:'配置已修复',message:result.detail+' 请重新连接 Codex App 后再修改模型。',confirmLabel:'完成',showCancel:false});await runHealth()}catch(e){await panelDialog({title:'修复失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='修复配置'}}
  async function deployDeploymentKey(button){const confirmed=await panelDialog({title:'创建部署密钥',message:'将为当前部署用户生成新的 SSH 私钥，并将对应公钥加入 authorized_keys。私钥不会在页面显示，但可由已登录的面板重复下载；请勿分享给他人。',confirmLabel:'创建并部署'});if(!confirmed)return;button.disabled=true;button.textContent='正在部署…';try{const result=await api('/api/health/deployment-key',{method:'POST'});const download=await panelDialog({title:'部署密钥已创建',message:`${result.detail}。私钥可在已登录面板中重复下载，请安全保存且不要分享。`,confirmLabel:'立即下载',cancelLabel:'稍后下载'});if(download)window.location.href=result.download_url;await runHealth()}catch(e){await panelDialog({title:'部署失败',message:e.message,confirmLabel:'知道了',showCancel:false});button.disabled=false;button.textContent='创建并部署密钥'}}
  function downloadDeploymentKey(){window.location.href='/api/health/deployment-key/download'}
  function updateProxyConfig(){const domain=$('#proxy-domain')?.value.trim(),upstream=$('#proxy-upstream')?.value.trim()||'codex-provider-console:8787';$('#proxy-config').textContent=domain?`server {\n    listen 443 ssl;\n    server_name ${domain};\n    ssl_certificate /etc/nginx/certs/certificate.pem;\n    ssl_certificate_key /etc/nginx/certs/private-key.pem;\n    location / {\n        proxy_pass http://${upstream};\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    }\n}`:'填写域名后生成'}

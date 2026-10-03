@@ -47,7 +47,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 
 1. 使用安装输出的地址打开面板。
 2. 输入安装时显示的管理员账号和密码。
-3. 打开左侧“健康检查”，确认 Codex 目录、权限、CLI 和供应商连接正常。
+3. 打开左侧“健康检查”，确认 Codex 目录、权限、CLI 和供应商连接正常。健康检查会比较官方最新 CLI 版本；如果版本落后，会显示“更新 Codex CLI”按钮。
 4. 在“供应商配置”中添加或选择供应商。
 5. 如需官方登录，进入对应供应商后点击“开始官方登录”。
 
