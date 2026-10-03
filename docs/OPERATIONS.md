@@ -4,7 +4,7 @@
 
 ## 新安装
 
-1. 复制 `.env.example` 为 `.env`，确认 `PANEL_BIND=127.0.0.1`。
+1. 复制 `.env.example` 为 `.env`。默认安装使用 `PANEL_BIND=0.0.0.0` 以支持公网 IP 访问；个人使用时应在云安全组中限制端口来源。若只需本机或 SSH 隧道访问，改为 `PANEL_BIND=127.0.0.1`。
 2. 执行 `docker compose config --quiet`。
 3. 执行 `docker compose up -d --build`，确认两个核心服务处于 running。
 4. 浏览器完成登录，验证供应商测试和 Relay 健康检查。
@@ -23,7 +23,7 @@
 
 ## 故障诊断
 
-在项目目录运行 `python scripts/diagnose.py`。该命令只读检查版本、`.env` 和 Compose 配置，不会重启、删除或修改容器与数据。
+在项目目录运行 `python scripts/diagnose.py`。该命令只读检查版本、`.env` 和 Compose 配置，不会重启、删除或修改容器与数据。公网长期使用时，优先放在 HTTPS 反向代理后面，不要直接长期暴露 HTTP 端口。
 
 ## 备份保留策略
 

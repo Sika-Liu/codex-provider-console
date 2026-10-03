@@ -154,8 +154,10 @@ Useful installer options:
 bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --codex-home /home/alice/.codex --port 8787
 ```
 
-The panel login is enabled by default. When using HTTPS through a reverse proxy,
-set `PANEL_COOKIE_SECURE=true` in `.env` and restart the service:
+The panel login is enabled by default. Direct HTTP access is intended only for
+personal use with a restricted cloud firewall. For public access, use HTTPS
+through a reverse proxy, set `PANEL_COOKIE_SECURE=true` in `.env`, and
+restart the service:
 
 ```bash
 codex-panel restart
@@ -234,12 +236,16 @@ test ! -e ~/.local/bin/codex-panel && echo "Management command removed"
 
 The first message confirms that the console files are removed. The second only
 appears when Codex removal was selected. The third confirms that the management
-command is removed. If Docker was kept, check for remaining project resources:
+command is removed. Removing Codex data first checks for and stops a running
+Codex App Server; active tasks may be interrupted. The command returns to the
+user's home directory before removing the project directory.
+
+If Docker was kept, check only this project's remaining resources:
 
 ```bash
-docker ps -a
-docker network ls | grep codex-provider-console
-docker images | grep codex-provider-console
+docker ps -a --filter "name=codex-provider-console"
+docker network ls --filter "name=codex-provider-console"
+docker images --filter "reference=*codex-provider-console*"
 ```
 
 No output from `which docker` means Docker is not installed, so this project

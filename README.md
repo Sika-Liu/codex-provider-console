@@ -40,7 +40,7 @@ sudo dnf upgrade -y    # CentOS 7 可使用 yum update -y
 bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
 ```
 
-请使用 Codex Desktop SSH 连接所用的非 root 用户执行该命令，不要在 root 会话中部署。脚本会克隆项目到当前用户的 `~/codex-provider-console`，然后自动运行安装脚本；需要管理员权限时会请求 `sudo`。项目目录、Codex CLI、`~/.codex` 目录和面板容器运行身份会统一使用当前账户。默认监听 `0.0.0.0:8787`，便于直接通过服务器公网 IP 访问。
+请使用 Codex Desktop SSH 连接所用的非 root 用户执行该命令，不要在 root 会话中部署。脚本会克隆项目到当前用户的 `~/codex-provider-console`，然后自动运行安装脚本；需要管理员权限时会请求 `sudo`。项目目录、Codex CLI、`~/.codex` 目录和面板容器运行身份会统一使用当前账户。默认监听 `0.0.0.0:8787`，便于直接通过服务器公网 IP 访问。首次部署或个人临时使用时，可以通过云安全组只允许自己的 IP 访问该端口；长期公网使用建议配置 HTTPS 反向代理，不要长期直接暴露 HTTP 端口。
 
 如果服务器没有 `curl` 但有 `wget`，执行：
 
@@ -52,7 +52,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 
 安装时会交互式询问控制台端口。服务默认监听 `0.0.0.0`，完成后会输出公网地址、内网地址、SSH 隧道命令、配置文件路径和安全组提示，行为与 1Panel 类似。
 
-首次安装还会生成管理员用户名、随机密码和会话密钥，并在结果中显示一次。登录后可从左侧菜单退出登录。
+首次安装还会生成管理员用户名、随机密码和会话密钥，并在结果中显示一次。登录后点击左下角用户名，可在下拉菜单中修改密码或退出登录。
 
 ### 部署中断后继续安装
 
@@ -156,12 +156,14 @@ test ! -e ~/.codex && echo "Codex 数据目录已删除"
 test ! -e ~/.local/bin/codex-panel && echo "管理命令已删除"
 ```
 
-第一条提示出现即表示控制台文件已清除。仅在卸载时选择删除 Codex 后，第二条才应出现；第三条用于确认管理命令已清除。若卸载时保留了 Docker，可再检查是否有项目容器、网络或镜像残留：
+第一条提示出现即表示控制台文件已清除。仅在卸载时选择删除 Codex 后，第二条才应出现；第三条用于确认管理命令已清除。选择删除 Codex 数据时，卸载程序会先检测并停止 Codex App Server；如果有正在执行的任务，任务可能会被中断。卸载完成后会自动返回用户主目录。
+
+若卸载时保留了 Docker，可再精确检查本项目的容器、网络或镜像是否残留：
 
 ```bash
-docker ps -a
-docker network ls | grep codex-provider-console
-docker images | grep codex-provider-console
+docker ps -a --filter "name=codex-provider-console"
+docker network ls --filter "name=codex-provider-console"
+docker images --filter "reference=*codex-provider-console*"
 ```
 
 若 `which docker` 没有任何输出，表示 Docker 未安装；因此不会存在该项目的 Docker 容器、网络或镜像残留。
