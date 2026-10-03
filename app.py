@@ -3440,6 +3440,7 @@ function closeSwitchProgress(){if(activationPoll)return;$('#switch-progress-mask
 async function activateWithProgress(id,where='list-notice'){if(activationPoll)return;const mask=$('#switch-progress-mask');mask.classList.add('show');renderSwitchProgress({progress:2,stage:'正在准备切换任务',status:'running'});try{const started=await api(`/api/providers/${encodeURIComponent(id)}/activate-progress`,{method:'POST'});const poll=async()=>{try{const job=await api(`/api/provider-activations/${encodeURIComponent(started.id)}`);renderSwitchProgress(job);if(job.status==='running'){activationPoll=setTimeout(poll,450);return}activationPoll=null;if(job.status==='completed'){state.active=id;note(`已使用 ${id}，备份编号：${job.result?.backup_id||'未知'}。${job.detail||''}`,where);await refreshAll();setTimeout(()=>$('#switch-progress-mask').classList.remove('show'),500)}else note(job.detail||'供应商切换失败。',where)}catch(e){activationPoll=null;renderSwitchProgress({status:'failed',stage:'切换未完成',detail:e.message})}};activationPoll=setTimeout(poll,120)}catch(e){activationPoll=null;renderSwitchProgress({status:'failed',stage:'切换未开始',detail:e.message})}}
 async function activateFromList(id){await activateWithProgress(id,'list-notice')}
 function newProvider(){state.current={id:'',name:'',base_url:'',model:'',mode:'official',protocol:'responses',wire_api:'responses',auth_mode:'chatgpt',models:[],goals_enabled:false,goals_configured:false};openDetail()}
+function openNewProvider(mode='apikey'){state.current={id:'',name:'',base_url:'',model:'',mode:mode==='chatgpt'?'official':'pure_api',protocol:'responses',wire_api:'responses',auth_mode:mode,models:[],goals_enabled:false,goals_configured:false};try{openDetail()}catch(error){console.error('openNewProvider failed',error);const notice=$('#detail-notice');if(notice){notice.textContent='打开供应商编辑页失败：'+(error?.message||'请刷新页面重试');notice.classList.add('notice-error','show')}}}
 const migrationTarget=$('#migration-target');if(migrationTarget){const migrationPanel=migrationTarget.parentElement;const migrationSection=migrationPanel?.parentElement;migrationPanel?.remove();if(migrationSection)migrationSection.style.gridTemplateColumns='1fr'}
 const commonConfig=$('#common-config');if(commonConfig){const commonPanel=commonConfig.parentElement;const commonSection=commonPanel?.parentElement;commonPanel?.remove();if(commonSection)commonSection.style.gridTemplateColumns='1fr'}
 const routeModel=$('#route-model');if(routeModel){const routeRow=routeModel.parentElement;const routeHelp=routeRow?.previousElementSibling;const routeTitle=routeHelp?.previousElementSibling;routeRow?.remove();routeHelp?.remove();routeTitle?.remove()}
@@ -3572,29 +3573,6 @@ document.getElementById('account-change-password')?.addEventListener('click',ope
  async function unarchiveServerSession(threadId,button){if(!threadId)return;button.disabled=true;button.textContent='正在取消…';try{const result=await api('/api/archived-sessions/'+encodeURIComponent(threadId)+'/unarchive',{method:'POST'});document.querySelector('#archived-session-summary').textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='取消归档';document.querySelector('#archived-session-summary').textContent='取消归档失败：'+error.message}}
  async function deleteServerSession(threadId,button){if(!threadId)return;const title=button.closest('.session-row')?.querySelector('.session-title')?.textContent||'',summary=document.querySelector(button.closest('#archived-session-list')?'#archived-session-summary':'#session-summary');if(!await confirmPermanentDeletion(threadId,title))return;button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId),{method:'DELETE'});summary.textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='永久删除';summary.textContent='删除失败：'+error.message}}
  </script>'''
-    provider_entrypoint_script = r'''<script>
-(function(){
-  function showProviderDetail(){
-    const list=document.querySelector('#list-view'), detail=document.querySelector('#detail');
-    if(!list||!detail) throw new Error('供应商编辑区域未加载');
-    document.body.classList.add('console-ready');
-    list.classList.add('hidden');
-    detail.classList.add('visible');
-  }
-  window.openNewProvider=function(mode='apikey'){
-    try{
-      state.current={id:'',name:'',base_url:'',model:'gpt-5.6-terra',wire_api:'responses',auth_mode:mode,models:[]};
-      showProviderDetail();
-      if(typeof window.openDetail==='function') window.openDetail();
-    }catch(error){
-      console.error('openNewProvider failed',error);
-      try{showProviderDetail()}catch(_){return}
-      const notice=document.querySelector('#detail-notice');
-      if(notice){notice.textContent='打开供应商编辑页失败：'+(error?.message||'请刷新页面重试');notice.classList.add('notice-error','show')}
-    }
-  };
-})();
-</script>'''
     return (
         NEW_HTML.replace(old_panel, official_panel)
         .replace('<button class="btn outline" onclick="loadCommon()">通用配置</button>', "")
@@ -3611,7 +3589,7 @@ document.getElementById('account-change-password')?.addEventListener('click',ope
         .replace('<div class="field"><label>名称</label><input id="p-name" placeholder="例如 chatgpt" oninput="updatePreview()"></div>', '<div class="field"><label>名称</label><input id="p-name" placeholder="例如 chatgpt_1" oninput="updatePreview()"><div class="field-help">系统会据此自动生成供应商标识，用于写入 Codex 配置；请使用英文、数字、`-` 或 `_`。</div></div>')
         .replace('<div class="field"><label>配置模型</label><input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()"><div class="field-help">默认启动 Codex 时使用的模型名称。</div></div>', '<div id="p-model-field" class="field"><label>配置模型（可选）</label><select id="p-model" onchange="updatePreview()"><option value="">不设置默认模型</option></select><div class="field-help">仅可从“从上游获取”的模型列表中选择。</div></div>')
         .replace('<div class="field"><label>Codex 目标</label><select id="p-target"><option value="">不启用目标功能</option></select></div>', '<div class="field"><label>Codex 目标</label><label style="display:flex;align-items:center;gap:8px;border:1px solid #d2d6da;border-radius:7px;padding:10px 12px;font-weight:400"><input id="p-goals" type="checkbox" onchange="syncGoalsConfig()" style="width:auto">启用目标功能</label></div>')
-         .replace("</body></html>", official_script + model_diagnostics_script + navigation_script + session_management_script + provider_entrypoint_script + "</body></html>")
+         .replace("</body></html>", official_script + model_diagnostics_script + navigation_script + session_management_script + "</body></html>")
     )
 
 
@@ -3639,9 +3617,6 @@ function renderList(){const profiles=state.profiles;$('#list-count').textContent
 async function activateFromList(id){try{const result=await api(`/api/providers/${encodeURIComponent(id)}/activate`,{method:'POST'});state.active=id;note(`已使用 ${id}，备份编号：${result.backup_id}。${result.runtime?.detail||'Codex App Server 已重启。'}`,'list-notice');await refreshAll()}catch(e){note(e.message,'list-notice')}}
 async function deleteProvider(id){if(!confirm(`确认删除供应商「${id}」？`))return;try{await api(`/api/providers/${encodeURIComponent(id)}`,{method:'DELETE'});note('供应商已删除。','list-notice');await refreshAll()}catch(e){note(e.message,'list-notice')}}
 function populateSelectors(){const o=state.profiles.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.id)})</option>`).join('');const routeProvider=$('#route-provider'),migrationTarget=$('#migration-target');if(routeProvider)routeProvider.innerHTML=o;if(migrationTarget)migrationTarget.innerHTML=o}
-function newProvider(mode='apikey'){state.current={id:'',name:'',base_url:'',model:'gpt-5.6-terra',wire_api:'responses',auth_mode:mode,models:[]};openDetail()} function openNewProvider(mode='apikey'){state.current={id:'',name:'',base_url:'',model:'gpt-5.6-terra',wire_api:'responses',auth_mode:mode,models:[]};openDetail()}
-function openProvider(id){const p=state.profiles.find(x=>x.id===id);if(!p)return;state.current=structuredClone(p);state.current.auth_mode=p.mode==='official'?'chatgpt':'apikey';state.current.wire_api=p.protocol==='chat_completions'?'chat':'responses';openDetail()}
-function openDetail(){const p=state.current;const active=Boolean(p.id&&p.id===state.active),activateButton=$('#activate-btn');$('#list-view').classList.add('hidden');$('#detail').classList.add('visible');$('#detail-name').textContent=p.id? p.name:'添加供应商';$('#detail-sub').textContent=active?'当前正在使用':'编辑后保存列表，再切换模式时会使用新配置';activateButton.style.display=p.id?'':'none';activateButton.disabled=active;activateButton.textContent=active?'使用中':'设为当前';activateButton.title=active?'当前正在使用该供应商':'设为当前供应商';$('#p-name').value=p.name||'';$('#p-model').value=p.model||'gpt-5.6-terra';$('#p-url').value=p.base_url||'';$('#p-key').value='';$('#p-auth').value=p.auth_mode||'apikey';state.protocol=p.wire_api||'responses';setProtocol(state.protocol);$('#model-list').innerHTML='';(p.models?.length?p.models:[{name:p.model||''}]).forEach(addModel);authModeChanged();updatePreview()}
 function closeDetail(){$('#detail').classList.remove('visible');$('#list-view').classList.remove('hidden');state.current=null;refreshAll()}
 function authModeChanged(){const official=$('#p-auth').value==='chatgpt';$('#api-fields').style.display=official?'none':'grid';$('#official-fields').style.display=official?'block':'none';$('#p-url').required=!official;updatePreview()}
 function setProtocol(v){state.protocol=v;$('#responses-tab').classList.toggle('selected',v==='responses');$('#chat-tab').classList.toggle('selected',v==='chat');updatePreview()}
