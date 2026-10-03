@@ -1,131 +1,74 @@
 # Codex Provider Console
 
-通用的 Codex 供应商控制台，可部署到安装了 Docker 的 Linux 云服务器（Ubuntu、Debian、CentOS、RHEL、Rocky、AlmaLinux 等）。
+通用的 Codex 供应商控制台，适合部署在安装了 Docker 的 Linux 云服务器上。
 
-## 供应商模式与协议
+它可以管理：
 
-控制台只支持两种供应商模式：
-
-- **官方登录**：远程 Codex 使用服务器保存的 ChatGPT / Codex 登录状态。
-- **纯 API**：远程 Codex 通过容器内部 Relay 调用自定义上游。Relay 保存真实上游地址和密钥，并将 Codex 的 Responses 请求转换为上游所需的 Responses 或 Chat Completions 协议。
-
-切换默认供应商不会删除历史会话。已有会话保留稳定的内部 provider 身份，打开旧会话后发送的新消息会使用当前选中的供应商；系统会在切换过程中自动完成必要的会话标签迁移。需要单独调整历史标签时，仍可在会话管理中先预览、再执行显式迁移。
-
-纯 API 档案的模型列表仅保存上游返回的模型名称；不会覆盖 Codex 自己的上下文窗口或压缩策略。Relay 仅绑定宿主机回环地址，供宿主机上的 Codex App Server 使用，不对公网暴露；面板容器内部仍通过 Docker 服务名访问 Relay。
-
-本地开发可执行标准库测试：
-
-```bash
-python -m unittest discover -s tests -v
-```
+- 官方登录供应商
+- 自定义 API 供应商
+- Codex 配置、认证和会话
+- 供应商切换、备份恢复和健康检查
 
 ## 快速部署
 
-### 部署前准备
+### 1. 准备服务器
 
-请先手动更新服务器系统。Debian/Ubuntu 使用：
+使用 Ubuntu、Debian、CentOS、RHEL、Rocky 或 AlmaLinux 等 Linux 系统，并使用非 root 用户登录。
 
-```bash
-sudo apt update
-sudo apt upgrade -y
-```
-
-CentOS/RHEL/Rocky/AlmaLinux 使用：
-
-```bash
-sudo dnf upgrade -y    # CentOS 7 可使用 yum update -y
-```
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
-```
-
-请使用 Codex Desktop SSH 连接所用的非 root 用户执行该命令，不要在 root 会话中部署。脚本会克隆项目到当前用户的 `~/codex-provider-console`，然后自动运行安装脚本；需要管理员权限时会请求 `sudo`。项目目录、Codex CLI、`~/.codex` 目录和面板容器运行身份会统一使用当前账户。默认监听 `0.0.0.0:8787`，便于直接通过服务器公网 IP 访问。首次部署或个人临时使用时，可以通过云安全组只允许自己的 IP 访问该端口；长期公网使用建议配置 HTTPS 反向代理，不要长期直接暴露 HTTP 端口。
-
-如果服务器没有 `curl` 但有 `wget`，执行：
-
-```bash
-bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
-```
-
-引导脚本发现缺少 `curl` 或 `git` 时会询问是否安装，例如 `curl is not installed. Install curl now? [y/N]:`。若 `curl` 和 `wget` 都不存在，无法从网络下载引导脚本，需先通过系统包管理器安装其中任一个下载工具。
-
-安装时会交互式询问控制台端口。服务默认监听 `0.0.0.0`，完成后会输出公网地址、内网地址、SSH 隧道命令、配置文件路径和安全组提示，行为与 1Panel 类似。
-
-首次安装还会生成管理员用户名、随机密码和会话密钥，并在结果中显示一次。登录后点击左下角用户名，可在下拉菜单中修改密码或退出登录。
-
-### 部署中断后继续安装
-
-部署过程中可以随时按 `Ctrl+C` 中断，不会删除已有项目文件。处理方式取决于中断时机：
-
-- 在首次 `Panel port [8787]:` 提示前或此处中断时，项目仅完成克隆，尚未生成 `.env`。再次执行同一条一键部署命令即可自动续装：
-
-  ```bash
-  bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
-  ```
-
-- 已生成 `.env`、正在安装 Docker/CLI，或已开始构建容器后中断时，为保护已有配置，一键引导不会覆盖项目。请进入项目目录续装：
-
-  ```bash
-  cd ~/codex-provider-console
-  codex-panel update
-  ```
-
-  `codex-panel update` 会拉取最新代码并重建已有容器，能够复用正在使用的面板端口。若已手动执行过 `git pull --ff-only`，可使用 `codex-panel restart` 仅重建并重启面板。
-
-再次看到 `Panel port [8787]:` 时，直接按 Enter 使用默认端口，或输入未被占用的端口后按 Enter。
-
-登录控制台后打开左侧“健康检查”，可检查 Codex 数据目录、写入权限、Codex CLI、`config.toml`、`auth.json`、控制台认证、当前供应商、供应商真实请求和磁盘空间。CLI 检查会实际执行部署用户目录中的 CLI，并验证其版本；部署和更新命令会维护 `/usr/local/bin/codex` 作为 Codex Desktop 非交互 SSH 的稳定入口。若未安装 Codex CLI，可直接在健康检查页选择安装；安装器会在部署用户的主目录中写入 CLI 和必要的 shell 配置。
-
-健康检查还会验证面板管理的 Codex Desktop 部署密钥。没有密钥时，可在面板生成 Ed25519 密钥、将公钥授权到部署用户的 `authorized_keys`，并下载私钥。在 Codex App 的 SSH 连接中选择下载的私钥文件；私钥不会显示在页面中，但已登录面板可重复下载，请勿分享给他人。已有密钥不会被覆盖。
-
-首次通过 Codex App 连接一台新服务器前，请先使用 Windows OpenSSH 手动连接一次并核对服务器指纹：
-
-```powershell
-ssh -i "$env:USERPROFILE\.ssh\<部署密钥文件>" <部署用户>@<服务器IP>
-```
-
-确认指纹属于该服务器后输入 `yes`，Windows 会将其写入 `~/.ssh/known_hosts`，随后 Codex App 才能完成主机身份校验。若同一 IP 重装了服务器，先执行 `ssh-keygen -R <服务器IP>`，再重新连接并确认新指纹。此校验与用于登录的 RSA 或 Ed25519 用户私钥无关：用户私钥用于证明“你是谁”，主机指纹用于证明“服务器是谁”。
-
-面板容器管理宿主机时同样会严格校验 SSH 主机指纹，不会自动接受新指纹。如果面板通过 Docker 网关连接而健康检查提示指纹未登记，请在项目 `.env` 中将 `PANEL_SSH_HOST_ALIAS` 设置为上面已经写入 `known_hosts` 的服务器 IP 或主机名，然后执行 `codex-panel restart`。指纹变化时面板会停止宿主机操作，需先核对服务器身份并更新记录。
-
-缺少 Docker 时，先安装 Docker，或明确允许脚本自动安装：
+如果服务器还没有 Docker，可以让安装器自动安装：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --install-docker
 ```
 
-交互式一键安装时，如果检测不到 Docker，脚本会询问是否安装；输入 `y` 后会继续完成部署。Debian/Ubuntu 会使用系统包管理器，CentOS/RHEL 系列会使用 Docker 官方安装脚本。脚本不会自动执行可能触发系统重启的系统升级。
-
-首次部署只安装控制台，不会询问或下载 Codex CLI。完成部署后，登录控制台并打开“健康检查”，在“Codex CLI”项中选择“安装 Codex CLI”。CLI 会安装到当前登录的非 root 运维用户，例如 `ubuntu`、`debian`、`ec2-user` 或自建账户。部署过程会准备 `/usr/local/bin/codex` 链接，使后续由健康检查安装的 CLI 可被 Codex Desktop 的非交互 SSH 检测到；此准备步骤可能请求一次 `sudo`，但不会下载或安装 CLI。
-
-已有 root 部署如需切换为非 root 运维用户，请先卸载面板，再按本节重新部署；新项目会直接创建在目标用户的家目录中。登录令牌不会迁移，重新部署后请在控制台重新进行官方登录。
-
-### 在控制台完成官方登录
-
-选择“官方登录”供应商后，点击“开始官方登录”。控制台会显示 OpenAI 登录网址和一次性设备码；在自己的浏览器完成登录后，认证会安全写入服务器的 Codex 目录。点击“刷新令牌（重新登录）”会重新发起该流程。页面不会显示 `auth.json` 或任何登录令牌。
-
-### 切换供应商后应用配置
-
-成功切换供应商后，页面右上角“应用配置”按钮才会变为可用。控制台不会终止 SSH 终端中手动运行的 Codex 对话或任务；点击该按钮会重置控制台自身的登录会话，并确认后续由控制台发起的 Codex 会话读取新配置。已在 SSH 终端中运行的 Codex 请在任务完成后自行退出并重新启动。
-
-会话管理删除远程会话时必须通过宿主机托管 App Server 执行 `codex delete --remote unix:// --force <会话 ID>`。这是同步删除的兼容边界：远程文件和索引被删除，同时连接中的 Codex Desktop 会收到 `thread/deleted`，只移除相同 ID 的远程缓存条目；不得退回为不带 `--remote` 的本地 CLI 删除或直接删除 JSONL 文件，否则桌面列表会残留。
-
-会话管理会将 App Server 的 `threads` 目录作为会话是否有效及是否归档的权威状态，只显示已正式注册的会话；服务器上未注册的残留 JSONL 或索引不会显示。归档和取消归档分别通过宿主机托管 App Server 执行 `codex archive --remote unix:// <会话 ID>` 与 `codex unarchive --remote unix:// <会话 ID>`，并在返回成功前校验 App Server 数据库和会话目录已经收敛到目标状态。Codex Desktop 当前可能无法为外部触发的 `thread/unarchived` 自动重建已被移除的渲染状态；如果服务器已经恢复但活动区仍未显示，请重启 Codex Desktop 以重新加载会话列表。面板不会自动重启 App Server，因为这会中断连接中的会话。活动会话和归档会话均可永久删除；永久删除不会创建隐藏备份且无法恢复。禁止直接在服务器上搬移或删除会话 JSONL 文件。
-
-自定义 Codex 目录或端口：
+### 2. 一键安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh) --codex-home /home/ubuntu/.codex --port 8787
+bash <(curl -fsSL https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
 ```
 
-反向代理不是部署必选项。直接使用公网 IP 访问即可；如需域名和 HTTPS，登录控制台后打开左侧“反向代理”，填写域名、上游地址和证书路径。通过 HTTPS 反向代理访问时，将 `.env` 中的 `PANEL_COOKIE_SECURE` 改为 `true`，然后执行：
+没有 `curl` 时可以使用：
 
 ```bash
-codex-panel restart
+bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-console/main/bootstrap.sh)
 ```
 
-通过 SSH 隧道访问：
+安装过程中会询问面板端口，默认是 `8787`。首次安装还会生成管理员用户名、随机密码和会话密钥，并在终端中显示一次，请及时保存。
+
+安装完成后，终端会显示：
+
+- 公网访问地址
+- 内网访问地址
+- SSH 隧道命令
+- 配置文件位置
+- 云安全组提醒
+
+## 首次使用
+
+1. 使用安装输出的地址打开面板。
+2. 输入安装时显示的管理员账号和密码。
+3. 打开左侧“健康检查”，确认 Codex 目录、权限、CLI 和供应商连接正常。
+4. 在“供应商配置”中添加或选择供应商。
+5. 如需官方登录，进入对应供应商后点击“开始官方登录”。
+
+面板左下角的用户名菜单可用于修改密码和退出登录。
+
+## 公网访问安全
+
+安装器默认监听：
+
+```text
+0.0.0.0:8787
+```
+
+这便于通过服务器公网 IP 访问，但请注意：
+
+- 个人临时使用时，至少在云安全组中限制端口来源；
+- 长期公网使用建议配置 HTTPS 反向代理；
+- 使用 HTTPS 反向代理时，将 `.env` 中的 `PANEL_COOKIE_SECURE` 改为 `true`，然后执行 `codex-panel restart`；
+- 不要将管理员密码、`.env`、`auth.json` 或备份文件分享给他人。
+
+如只想本机访问，可将 `PANEL_BIND` 设置为 `127.0.0.1`，再通过 SSH 隧道访问：
 
 ```bash
 ssh -N -L 8787:127.0.0.1:8787 用户名@服务器IP
@@ -133,7 +76,7 @@ ssh -N -L 8787:127.0.0.1:8787 用户名@服务器IP
 
 然后打开 `http://127.0.0.1:8787`。
 
-## 日常管理
+## 常用管理命令
 
 ```bash
 codex-panel status
@@ -144,11 +87,9 @@ codex-panel help
 codex-panel uninstall
 ```
 
-安装完成后会创建 `codex-panel` 命令，可在任意目录使用。执行 `uninstall` 后，先确认移除面板容器、项目目录、`.env`、本项目 Docker 镜像和该命令；随后会询问是否删除 Codex CLI 与 Codex 数据，默认 `N`。卸载脚本绝不会卸载 Docker Engine 或删除其他 Docker 服务的数据。
+更新前建议备份 `.env` 和 Codex 数据目录。卸载时可以选择保留或删除 Codex 数据；如果选择删除，正在运行的 Codex App Server 可能会被停止，当前任务也可能中断。
 
-### 卸载后确认
-
-在服务器上执行以下命令：
+卸载完成后可检查：
 
 ```bash
 test ! -e ~/codex-provider-console && echo "控制台目录已删除"
@@ -156,16 +97,31 @@ test ! -e ~/.codex && echo "Codex 数据目录已删除"
 test ! -e ~/.local/bin/codex-panel && echo "管理命令已删除"
 ```
 
-第一条提示出现即表示控制台文件已清除。仅在卸载时选择删除 Codex 后，第二条才应出现；第三条用于确认管理命令已清除。选择删除 Codex 数据时，卸载程序会先检测并停止 Codex App Server；如果有正在执行的任务，任务可能会被中断。卸载完成后会自动返回用户主目录。
+## 数据位置
 
-若卸载时保留了 Docker，可再精确检查本项目的容器、网络或镜像是否残留：
+默认情况下，Codex 数据位于：
 
-```bash
-docker ps -a --filter "name=codex-provider-console"
-docker network ls --filter "name=codex-provider-console"
-docker images --filter "reference=*codex-provider-console*"
+```text
+~/.codex
 ```
 
-若 `which docker` 没有任何输出，表示 Docker 未安装；因此不会存在该项目的 Docker 容器、网络或镜像残留。
+安装项目位于：
 
-完整说明请查看 [`DEPLOYMENT.md`](DEPLOYMENT.md)。公网访问时，请放在带 HTTPS 和登录认证的 Nginx/Caddy 反向代理后面。
+```text
+~/codex-provider-console
+```
+
+如需迁移到新服务器，请安全复制 Codex 数据目录，并在新部署中使用对应的 `CODEX_HOME_HOST`。
+
+## 详细文档
+
+- [完整部署与访问说明](DEPLOYMENT.md)
+- [运行验收与故障诊断](docs/OPERATIONS.md)
+- [升级、回滚与失败处理](docs/UPGRADING.md)
+- [系统架构边界](docs/architecture.md)
+
+本地开发或修改后可运行测试：
+
+```bash
+python -m unittest discover -s tests -v
+```
