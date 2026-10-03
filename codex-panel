@@ -175,7 +175,7 @@ EOF
     project_images=""
     if command -v docker >/dev/null 2>&1; then
       project_images=$(docker compose images -q 2>/dev/null | sort -u || true)
-      docker compose down --remove-orphans
+      docker compose --profile reverse-proxy down --remove-orphans
     else
       echo "未检测到 Docker，跳过容器清理。"
     fi

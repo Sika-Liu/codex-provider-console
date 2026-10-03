@@ -10,7 +10,7 @@ class UninstallContractTests(unittest.TestCase):
         source = (ROOT / "codex-panel").read_text(encoding="utf-8")
         self.assertIn("卸载控制台，保留 Codex 数据（推荐）", source)
         self.assertIn("REMOVE_CODEX=false", source)
-        self.assertIn("docker compose down --remove-orphans", source)
+        self.assertIn("docker compose --profile reverse-proxy down --remove-orphans", source)
         self.assertIn("project_images=$(docker compose images -q", source)
         self.assertIn("realpath -m", source)
         self.assertIn("codex-panel-preserved", source) if "codex-panel-preserved" in source else self.assertIn(".codex-preserved-", source)
