@@ -16,6 +16,7 @@ class UninstallContractTests(unittest.TestCase):
         self.assertIn("pgrep -f '[c]odex app-server'", source)
         self.assertIn("确认停止进程并继续删除", source)
         self.assertIn("已确认无残留", source)
+        self.assertIn('cd "$HOME"', source)
         self.assertIn("codex-panel-preserved", source) if "codex-panel-preserved" in source else self.assertIn(".codex-preserved-", source)
 
     def test_uninstall_requires_confirmation_before_moving_relative_data(self):

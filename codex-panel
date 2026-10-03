@@ -229,6 +229,8 @@ EOF
     if [[ -f "$HOME/.bashrc" ]]; then
       sed -i '/^export PATH="\$HOME\/\.local\/bin:\$PATH"$/d' "$HOME/.bashrc"
     fi
+    # When uninstall is launched from the project directory, leave it before removal.
+    cd "$HOME"
     rm -rf -- "$PROJECT_DIR"
 
     if [[ "$REMOVE_CODEX" == true ]]; then
