@@ -3572,6 +3572,29 @@ document.getElementById('account-change-password')?.addEventListener('click',ope
  async function unarchiveServerSession(threadId,button){if(!threadId)return;button.disabled=true;button.textContent='正在取消…';try{const result=await api('/api/archived-sessions/'+encodeURIComponent(threadId)+'/unarchive',{method:'POST'});document.querySelector('#archived-session-summary').textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='取消归档';document.querySelector('#archived-session-summary').textContent='取消归档失败：'+error.message}}
  async function deleteServerSession(threadId,button){if(!threadId)return;const title=button.closest('.session-row')?.querySelector('.session-title')?.textContent||'',summary=document.querySelector(button.closest('#archived-session-list')?'#archived-session-summary':'#session-summary');if(!await confirmPermanentDeletion(threadId,title))return;button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId),{method:'DELETE'});summary.textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='永久删除';summary.textContent='删除失败：'+error.message}}
  </script>'''
+    provider_entrypoint_script = r'''<script>
+(function(){
+  function showProviderDetail(){
+    const list=document.querySelector('#list-view'), detail=document.querySelector('#detail');
+    if(!list||!detail) throw new Error('供应商编辑区域未加载');
+    document.body.classList.add('console-ready');
+    list.classList.add('hidden');
+    detail.classList.add('visible');
+  }
+  window.openNewProvider=function(mode='apikey'){
+    try{
+      state.current={id:'',name:'',base_url:'',model:'gpt-5.6-terra',wire_api:'responses',auth_mode:mode,models:[]};
+      showProviderDetail();
+      if(typeof window.openDetail==='function') window.openDetail();
+    }catch(error){
+      console.error('openNewProvider failed',error);
+      try{showProviderDetail()}catch(_){return}
+      const notice=document.querySelector('#detail-notice');
+      if(notice){notice.textContent='打开供应商编辑页失败：'+(error?.message||'请刷新页面重试');notice.classList.add('notice-error','show')}
+    }
+  };
+})();
+</script>'''
     return (
         NEW_HTML.replace(old_panel, official_panel)
         .replace('<button class="btn outline" onclick="loadCommon()">通用配置</button>', "")
@@ -3588,7 +3611,7 @@ document.getElementById('account-change-password')?.addEventListener('click',ope
         .replace('<div class="field"><label>名称</label><input id="p-name" placeholder="例如 chatgpt" oninput="updatePreview()"></div>', '<div class="field"><label>名称</label><input id="p-name" placeholder="例如 chatgpt_1" oninput="updatePreview()"><div class="field-help">系统会据此自动生成供应商标识，用于写入 Codex 配置；请使用英文、数字、`-` 或 `_`。</div></div>')
         .replace('<div class="field"><label>配置模型</label><input id="p-model" placeholder="例如 gpt-5.6-terra" oninput="updatePreview()"><div class="field-help">默认启动 Codex 时使用的模型名称。</div></div>', '<div id="p-model-field" class="field"><label>配置模型（可选）</label><select id="p-model" onchange="updatePreview()"><option value="">不设置默认模型</option></select><div class="field-help">仅可从“从上游获取”的模型列表中选择。</div></div>')
         .replace('<div class="field"><label>Codex 目标</label><select id="p-target"><option value="">不启用目标功能</option></select></div>', '<div class="field"><label>Codex 目标</label><label style="display:flex;align-items:center;gap:8px;border:1px solid #d2d6da;border-radius:7px;padding:10px 12px;font-weight:400"><input id="p-goals" type="checkbox" onchange="syncGoalsConfig()" style="width:auto">启用目标功能</label></div>')
-         .replace("</body></html>", official_script + model_diagnostics_script + navigation_script + session_management_script + "</body></html>")
+         .replace("</body></html>", official_script + model_diagnostics_script + navigation_script + session_management_script + provider_entrypoint_script + "</body></html>")
     )
 
 
