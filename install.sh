@@ -349,11 +349,31 @@ set_env CODEX_USER_HOME_CONTAINER_PATH "$CODEX_USER_HOME_HOST" true
 existing_username=$(sed -n 's/^PANEL_USERNAME=//p' "$ENV_FILE" | tail -n 1)
 existing_password=$(sed -n 's/^PANEL_PASSWORD=//p' "$ENV_FILE" | tail -n 1)
 existing_secret=$(sed -n 's/^PANEL_SESSION_SECRET=//p' "$ENV_FILE" | tail -n 1)
-PANEL_USERNAME="${existing_username:-$PANEL_USERNAME}"
-if [[ -z "$existing_password" || "$existing_password" == "change-this-password" ]]; then
-  PANEL_PASSWORD=$(random_hex 18)
+if [[ "$CREATED_ENV" == true && -t 0 ]]; then
+  read -r -p "管理员用户名 [admin]: " requested_username
+  PANEL_USERNAME="${requested_username:-admin}"
+  while true; do
+    read -r -s -p "管理员密码（留空自动生成）: " requested_password
+    printf '\n'
+    if [[ -z "$requested_password" ]]; then
+      PANEL_PASSWORD=$(random_hex 18)
+      break
+    fi
+    read -r -s -p "确认密码: " confirmed_password
+    printf '\n'
+    if [[ "$requested_password" == "$confirmed_password" ]]; then
+      PANEL_PASSWORD="$requested_password"
+      break
+    fi
+    echo "两次密码不一致，请重新输入。"
+  done
 else
-  PANEL_PASSWORD="$existing_password"
+  PANEL_USERNAME="${existing_username:-$PANEL_USERNAME}"
+  if [[ -z "$existing_password" || "$existing_password" == "change-this-password" ]]; then
+    PANEL_PASSWORD=$(random_hex 18)
+  else
+    PANEL_PASSWORD="$existing_password"
+  fi
 fi
 if [[ -z "$existing_secret" || "$existing_secret" == "change-this-session-secret" ]]; then
   PANEL_SESSION_SECRET=$(random_hex 32)
