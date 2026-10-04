@@ -59,13 +59,12 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertIn("归档会话", source)
         self.assertNotIn("confirm('归档此会话？", source)
 
-    def test_archive_endpoints_verify_server_state_and_do_not_overpromise_desktop_sync(self):
+    def test_archive_endpoints_confirm_state_asynchronously_without_overpromising_desktop_sync(self):
         source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
-        self.assertIn("wait_for_session_archive_state(normalized_id, True)", source)
-        self.assertIn("wait_for_session_archive_state(normalized_id, False)", source)
-        self.assertIn('"desktop_sync": "client_refresh_required"', source)
+        self.assertIn("confirm_session_archive_in_background(normalized_id, True)", source)
+        self.assertIn("confirm_session_archive_in_background(normalized_id, False)", source)
+        self.assertIn('"sync": "pending"', source)
         self.assertNotIn("桌面端将同步更新", source)
-        self.assertIn("请重启 Codex Desktop 以重新加载会话列表", source)
         self.assertNotIn("搜索此会话 ID 并打开一次", source)
 
     def test_session_lists_require_app_server_registration(self):

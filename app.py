@@ -971,6 +971,22 @@ def wait_for_session_archive_state(thread_id: str, archived: bool, timeout_secon
         time.sleep(0.2)
 
 
+def confirm_session_archive_in_background(thread_id: str, archived: bool) -> None:
+    """Confirm eventual App Server index sync without blocking the HTTP response."""
+    def confirm() -> None:
+        try:
+            wait_for_session_archive_state(thread_id, archived, timeout_seconds=10.0)
+            audit("server_session_archive_sync_completed", thread_id=thread_id, archived=archived)
+        except RuntimeError as exc:
+            audit("server_session_archive_sync_failed", thread_id=thread_id, archived=archived, detail=str(exc))
+
+    threading.Thread(
+        target=confirm,
+        name=f"session-archive-sync-{thread_id[:8]}",
+        daemon=True,
+    ).start()
+
+
 def toml_quote(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -3291,11 +3307,11 @@ def archive_server_session(thread_id: str) -> dict:
                 raise HTTPException(404, "活动会话不存在或已经归档")
             run_host_app_server_control("start")
             run_host_session_archive(normalized_id, True)
-            wait_for_session_archive_state(normalized_id, True)
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
+    confirm_session_archive_in_background(normalized_id, True)
     audit("server_session_archived", thread_id=normalized_id, command="host codex archive --remote unix://")
-    return {"archived": normalized_id, "detail": "会话已归档，服务器状态已确认。"}
+    return {"archived": normalized_id, "sync": "pending", "detail": "归档命令已提交，会话将从列表中移除。"}
 
 
 @app.post("/api/archived-sessions/{thread_id}/unarchive")
@@ -3309,17 +3325,15 @@ def unarchive_server_session(thread_id: str) -> dict:
                 raise HTTPException(404, "归档会话不存在或已经取消归档")
             run_host_app_server_control("start")
             run_host_session_archive(normalized_id, False)
-            wait_for_session_archive_state(normalized_id, False)
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
+    confirm_session_archive_in_background(normalized_id, False)
     audit("server_session_unarchived", thread_id=normalized_id, command="host codex unarchive --remote unix://")
     return {
         "unarchived": normalized_id,
         "desktop_sync": "client_refresh_required",
-        "detail": (
-            "会话已恢复到服务器并完成校验。Codex Desktop 可能不会自动重建外部恢复的会话；"
-            "若活动区仍未显示，请重启 Codex Desktop 以重新加载会话列表。"
-        ),
+        "sync": "pending",
+        "detail": "取消归档命令已提交，会话将重新出现在活动列表。",
     }
 
 
@@ -3592,8 +3606,9 @@ document.getElementById('account-change-password')?.addEventListener('click',ope
  async function loadArchivedSessions(){const summary=document.querySelector('#archived-session-summary'),list=document.querySelector('#archived-session-list');if(!summary||!list)return;try{const result=await api('/api/archived-sessions'),sessions=result.sessions||[];summary.textContent=sessions.length?`${sessions.length} 个归档会话。`:'暂无归档会话。';list.innerHTML=sessions.length?sessions.map(session=>`<article class="session-row"><div><div class="session-title" title="${sessionEscape(session.title)}">${sessionEscape(session.title)}</div><div class="session-meta">${sessionEscape(session.id)} · ${sessionTime(session.modified_at)} · ${sessionSize(session.size)}</div>${session.cwd?`<div class="session-meta" title="${sessionEscape(session.cwd)}">${sessionEscape(session.cwd)}</div>`:''}</div><div class="session-actions"><button class="btn small session-unarchive" type="button" data-thread-id="${sessionEscape(session.id)}">取消归档</button><button class="btn small session-delete" type="button" data-thread-id="${sessionEscape(session.id)}">永久删除</button></div></article>`).join(''):'<div class="session-empty">暂无归档会话。</div>';list.querySelectorAll('.session-unarchive').forEach(button=>button.addEventListener('click',()=>unarchiveServerSession(button.dataset.threadId,button)));list.querySelectorAll('.session-delete').forEach(button=>button.addEventListener('click',()=>deleteServerSession(button.dataset.threadId,button)))}catch(error){summary.textContent='读取归档会话失败：'+error.message}}
  function confirmPermanentDeletion(threadId,title){return new Promise(resolve=>{const backdrop=document.createElement('div');backdrop.className='session-modal-backdrop';backdrop.innerHTML='<section class="session-modal" role="dialog" aria-modal="true" aria-labelledby="session-delete-title"><div class="session-modal-kicker">不可恢复的操作</div><h3 id="session-delete-title">永久删除云端会话</h3><p>会话记录及服务器索引会被彻底删除，不会创建备份。</p><div class="session-modal-session" title="'+sessionEscape(threadId)+'">'+sessionEscape(title||'未命名会话')+'<br>'+sessionEscape(threadId)+'</div><label class="session-modal-confirm"><input type="checkbox"><span>我理解此操作无法撤销，并确认永久删除。</span></label><div class="session-modal-actions"><button class="btn light" type="button" data-action="cancel">取消</button><button class="btn session-modal-danger" type="button" data-action="delete" disabled>永久删除</button></div></section>';const checkbox=backdrop.querySelector('input'),confirmButton=backdrop.querySelector('[data-action="delete"]'),onKey=event=>{if(event.key==='Escape')close(false)},close=value=>{document.removeEventListener('keydown',onKey);backdrop.remove();resolve(value)};checkbox.addEventListener('change',()=>confirmButton.disabled=!checkbox.checked);backdrop.querySelector('[data-action="cancel"]').addEventListener('click',()=>close(false));confirmButton.addEventListener('click',()=>close(true));backdrop.addEventListener('click',event=>{if(event.target===backdrop)close(false)});document.addEventListener('keydown',onKey);document.body.append(backdrop);backdrop.querySelector('[data-action="cancel"]').focus()})}
  function confirmSessionArchive(threadId,title){return new Promise(resolve=>{const backdrop=document.createElement('div');backdrop.className='session-modal-backdrop';backdrop.innerHTML='<section class="session-modal" role="dialog" aria-modal="true" aria-labelledby="session-archive-title"><div class="session-modal-kicker archive">可恢复的操作</div><h3 id="session-archive-title">归档云端会话</h3><p>会话将移至“已归档会话”，之后可随时取消归档。</p><div class="session-modal-session" title="'+sessionEscape(threadId)+'">'+sessionEscape(title||'未命名会话')+'<br>'+sessionEscape(threadId)+'</div><div class="session-modal-actions"><button class="btn light" type="button" data-action="cancel">取消</button><button class="btn" type="button" data-action="archive">归档会话</button></div></section>';const onKey=event=>{if(event.key==='Escape')close(false)},close=value=>{document.removeEventListener('keydown',onKey);backdrop.remove();resolve(value)};backdrop.querySelector('[data-action="cancel"]').addEventListener('click',()=>close(false));backdrop.querySelector('[data-action="archive"]').addEventListener('click',()=>close(true));backdrop.addEventListener('click',event=>{if(event.target===backdrop)close(false)});document.addEventListener('keydown',onKey);document.body.append(backdrop);backdrop.querySelector('[data-action="cancel"]').focus()})}
- async function archiveServerSession(threadId,button){const title=button.closest('.session-row')?.querySelector('.session-title')?.textContent||'';if(!threadId||!await confirmSessionArchive(threadId,title))return;button.disabled=true;button.textContent='正在归档…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId)+'/archive',{method:'POST'});document.querySelector('#session-summary').textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='归档';document.querySelector('#session-summary').textContent='归档失败：'+error.message}}
- async function unarchiveServerSession(threadId,button){if(!threadId)return;button.disabled=true;button.textContent='正在取消…';try{const result=await api('/api/archived-sessions/'+encodeURIComponent(threadId)+'/unarchive',{method:'POST'});document.querySelector('#archived-session-summary').textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='取消归档';document.querySelector('#archived-session-summary').textContent='取消归档失败：'+error.message}}
+ function refreshSessionManagementSoon(){setTimeout(()=>refreshSessionManagement(),800)}
+ async function archiveServerSession(threadId,button){const title=button.closest('.session-row')?.querySelector('.session-title')?.textContent||'',row=button.closest('.session-row');if(!threadId||!await confirmSessionArchive(threadId,title))return;button.disabled=true;button.textContent='正在归档…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId)+'/archive',{method:'POST'});row?.remove();document.querySelector('#session-summary').textContent=result.detail;refreshSessionManagementSoon()}catch(error){button.disabled=false;button.textContent='归档';document.querySelector('#session-summary').textContent='归档失败：'+error.message}}
+ async function unarchiveServerSession(threadId,button){if(!threadId)return;const row=button.closest('.session-row');button.disabled=true;button.textContent='正在取消…';try{const result=await api('/api/archived-sessions/'+encodeURIComponent(threadId)+'/unarchive',{method:'POST'});row?.remove();document.querySelector('#archived-session-summary').textContent=result.detail;refreshSessionManagementSoon()}catch(error){button.disabled=false;button.textContent='取消归档';document.querySelector('#archived-session-summary').textContent='取消归档失败：'+error.message}}
  async function deleteServerSession(threadId,button){if(!threadId)return;const title=button.closest('.session-row')?.querySelector('.session-title')?.textContent||'',summary=document.querySelector(button.closest('#archived-session-list')?'#archived-session-summary':'#session-summary');if(!await confirmPermanentDeletion(threadId,title))return;button.disabled=true;button.textContent='正在删除…';try{const result=await api('/api/sessions/'+encodeURIComponent(threadId),{method:'DELETE'});summary.textContent=result.detail;await refreshSessionManagement()}catch(error){button.disabled=false;button.textContent='永久删除';summary.textContent='删除失败：'+error.message}}
  </script>'''
     return (
