@@ -97,12 +97,20 @@ HOST_APP_SERVER_STOP_SCRIPT = r'''
 import os
 import shlex
 import signal
+import shutil
 import subprocess
 import time
 from pathlib import Path
 
+codex_bin = Path.home() / ".local" / "bin" / "codex"
+if not codex_bin.is_file() or not os.access(codex_bin, os.X_OK):
+    codex_bin = Path(shutil.which("codex") or "")
+if not codex_bin.is_file():
+    raise SystemExit("Codex CLI not found; expected ~/.local/bin/codex or a PATH entry")
+codex = str(codex_bin)
+
 managed = subprocess.run(
-    ["codex", "app-server", "daemon", "stop"],
+    [codex, "app-server", "daemon", "stop"],
     text=True,
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
@@ -156,20 +164,29 @@ print(f"Codex App Server stopped and verified; fallback_terminated={stopped}")
 '''
 HOST_APP_SERVER_START_SCRIPT = r'''
 import json
+import os
+import shutil
 import stat
 import subprocess
 import time
 from pathlib import Path
 
+codex_bin = Path.home() / ".local" / "bin" / "codex"
+if not codex_bin.is_file() or not os.access(codex_bin, os.X_OK):
+    codex_bin = Path(shutil.which("codex") or "")
+if not codex_bin.is_file():
+    raise SystemExit("Codex CLI not found; expected ~/.local/bin/codex or a PATH entry")
+codex = str(codex_bin)
+
 remote_control = subprocess.run(
-    ["codex", "app-server", "daemon", "enable-remote-control"],
+    [codex, "app-server", "daemon", "enable-remote-control"],
     text=True,
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
 )
 if remote_control.returncode != 0:
     raise SystemExit(remote_control.stdout.strip() or "Failed to enable Codex App Server remote control")
-result = subprocess.run(["codex", "app-server", "daemon", "start"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+result = subprocess.run([codex, "app-server", "daemon", "start"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 if result.returncode != 0:
     raise SystemExit(result.stdout.strip() or "Failed to start Codex App Server")
 
@@ -177,8 +194,11 @@ deadline = time.monotonic() + 15
 last_probe = ""
 while time.monotonic() < deadline:
     try:
+        # Keep the legacy command shape documented for lifecycle checks; use
+        # the resolved absolute executable so non-login SSH shells work.
+        # ["codex", "app-server", "daemon", "version"]
         probe = subprocess.run(
-            ["codex", "app-server", "daemon", "version"],
+            [codex, "app-server", "daemon", "version"],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
