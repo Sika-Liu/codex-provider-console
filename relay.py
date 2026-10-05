@@ -99,9 +99,6 @@ def upstream_stream(
 @app.get("/health")
 def health() -> dict[str, Any]:
     profile = active_profile()
-    unsupported = unsupported_request_features(body)
-    if unsupported:
-        raise HTTPException(422, {"type": "relay_unsupported_feature", "features": unsupported})
     protocol = str(profile["protocol"])
     return {"status": "ok", "provider_id": str(profile["id"]), "protocol": protocol, "capabilities": relay_capabilities(protocol)}
 
@@ -119,6 +116,9 @@ async def create_response(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         raise HTTPException(422, "Responses request body must be a JSON object")
     profile = active_profile()
+    unsupported = unsupported_request_features(body)
+    if unsupported:
+        raise HTTPException(422, {"type": "relay_unsupported_feature", "features": unsupported})
     if body.get("stream"):
         if profile["protocol"] == "responses":
             return upstream_stream(profile, "/responses", body)
