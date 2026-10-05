@@ -58,13 +58,12 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 安装器默认监听：
 
 ```text
-127.0.0.1:8787
+0.0.0.0:8787
 ```
 
 这便于通过服务器公网 IP 访问，但请注意：
 
-- 默认仅监听本机；通过 SSH 隧道访问最安全；
-- 如需公网访问，显式设置 PANEL_BIND=0.0.0.0，并在云安全组中限制端口来源；
+- 默认监听公网地址；请自行通过云安全组、HTTPS 和管理员密码保护面板；
 - 长期公网使用建议配置 HTTPS 反向代理；
 - 使用 HTTPS 反向代理时，将 `.env` 中的 `PANEL_COOKIE_SECURE` 改为 `true`，然后执行 `codex-panel restart`；
 - 不要将管理员密码、`.env`、`auth.json` 或备份文件分享给他人。

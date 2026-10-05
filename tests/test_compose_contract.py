@@ -14,9 +14,9 @@ class ComposeContractTests(unittest.TestCase):
         cls.compose = (ROOT / "compose.yml").read_text(encoding="utf-8")
         cls.dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
-    def test_console_defaults_to_loopback_and_passes_security_settings(self):
-        self.assertIn('${PANEL_BIND:-127.0.0.1}:${PANEL_PORT:-8787}:8787', self.compose)
-        self.assertIn('PANEL_BIND: "${PANEL_BIND:-127.0.0.1}"', self.compose)
+    def test_console_defaults_to_public_and_passes_security_settings(self):
+        self.assertIn('${PANEL_BIND:-0.0.0.0}:${PANEL_PORT:-8787}:8787', self.compose)
+        self.assertIn('PANEL_BIND: "${PANEL_BIND:-0.0.0.0}"', self.compose)
         self.assertIn('PANEL_SSH_HOST_ALIAS: "${PANEL_SSH_HOST_ALIAS:-}"', self.compose)
         self.assertIn('no-new-privileges:true', self.compose)
 
