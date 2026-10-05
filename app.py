@@ -1185,6 +1185,31 @@ def test_profile(profile: dict) -> dict:
 
 MODEL_DIAGNOSTIC_TIMEOUT_SECONDS = 45
 MODEL_DIAGNOSTIC_TIMEOUT_ATTEMPTS = 2
+MODEL_DIAGNOSTIC_MAX_MODELS = 100
+
+
+def validate_model_diagnostic_response(body_text: str, wire_api: str) -> tuple[bool, str]:
+    """Validate the minimal response shape instead of accepting any non-empty body."""
+    if not body_text.strip():
+        return False, "响应内容为空"
+    try:
+        payload = json.loads(body_text)
+    except json.JSONDecodeError:
+        return False, "上游返回的不是有效 JSON"
+    if not isinstance(payload, dict):
+        return False, "上游响应不是 JSON 对象"
+    if wire_api == "chat":
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            return False, "Chat Completions 响应缺少 choices"
+        if not isinstance(choices[0].get("message") or choices[0].get("delta"), dict):
+            return False, "Chat Completions 响应缺少 message 或 delta"
+        return True, ""
+    if payload.get("object") not in {"response", None}:
+        return False, "Responses 响应 object 字段不正确"
+    if not isinstance(payload.get("output"), list):
+        return False, "Responses 响应缺少 output"
+    return True, ""
 
 
 def is_timeout_error(error: object) -> bool:
@@ -1222,12 +1247,14 @@ def test_model_request(
         try:
             with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 body_text = response.read().decode("utf-8", errors="replace")
+                shape_ok, shape_detail = validate_model_diagnostic_response(body_text, wire_api)
                 return {
-                    "ok": 200 <= response.status < 300 and bool(body_text.strip()),
+                    "ok": 200 <= response.status < 300 and shape_ok,
                     "endpoint": endpoint,
                     "status": response.status,
                     "body": body_text[:2400],
-                    "detail": "响应内容为空" if not body_text.strip() else "",
+                    "detail": shape_detail,
+                    "error_kind": "" if shape_ok else "invalid_response",
                     "attempts": attempt,
                 }
         except urllib.error.HTTPError as exc:
@@ -3175,6 +3202,8 @@ def start_model_diagnostics(request: ModelDiagnosticRequest) -> dict:
             names.append(name)
     if not names:
         raise HTTPException(422, "请先从上游获取模型列表")
+    if len(names) > MODEL_DIAGNOSTIC_MAX_MODELS:
+        raise HTTPException(422, f"单次最多诊断 {MODEL_DIAGNOSTIC_MAX_MODELS} 个模型")
 
     job_id = uuid.uuid4().hex
     with MODEL_DIAGNOSTIC_JOBS_LOCK:

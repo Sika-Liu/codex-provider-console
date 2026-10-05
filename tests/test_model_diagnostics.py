@@ -3,6 +3,12 @@ from pathlib import Path
 
 
 class ModelDiagnosticTests(unittest.TestCase):
+    def test_response_shape_validation_is_explicit(self):
+        source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+        self.assertIn("validate_model_diagnostic_response", source)
+        self.assertIn('"error_kind": "" if shape_ok else "invalid_response"', source)
+        self.assertIn("MODEL_DIAGNOSTIC_MAX_MODELS", source)
+
     def test_rate_limit_handling_is_explicit(self):
         source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
         self.assertIn('status": exc.code', source)
