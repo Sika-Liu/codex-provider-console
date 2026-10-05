@@ -1296,6 +1296,41 @@ def test_model_request(
     raise AssertionError("timeout retry loop did not return")  # pragma: no cover
 
 
+def test_model_request_via_relay(
+    profile: dict,
+    test_model: str,
+    *,
+    timeout_seconds: int = MODEL_DIAGNOSTIC_TIMEOUT_SECONDS,
+) -> dict:
+    """Probe the active local Relay using the same Responses shape as Codex."""
+    endpoint = f"{RELAY_BASE_URL.rstrip('/')}/responses"
+    payload = {"model": test_model, "input": "hi", "max_output_tokens": 1}
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "CodexProviderConsole/RelayDiagnostic"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body_text = response.read().decode("utf-8", errors="replace")
+            shape_ok, shape_detail = validate_model_diagnostic_response(body_text, "responses")
+            return {
+                "ok": 200 <= response.status < 300 and shape_ok,
+                "endpoint": endpoint,
+                "status": response.status,
+                "body": body_text[:2400],
+                "detail": shape_detail,
+                "error_kind": "" if shape_ok else "invalid_relay_response",
+            }
+    except urllib.error.HTTPError as exc:
+        body_text = exc.read().decode("utf-8", errors="replace")
+        return {"ok": False, "endpoint": endpoint, "status": exc.code, "detail": f"Relay HTTP {exc.code}: {body_text[:1200]}", "error_kind": "relay_http_error"}
+    except (TimeoutError, urllib.error.URLError) as exc:
+        reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        return {"ok": False, "endpoint": endpoint, "detail": str(reason), "error_kind": "relay_connection_error"}
+
+
 def fetch_upstream_models(request: UpstreamModelFetch) -> dict:
     base = request.base_url.rstrip("/")
     candidates = [f"{base}/models"] if base.endswith("/v1") else [f"{base}/v1/models", f"{base}/models"]
@@ -3111,6 +3146,24 @@ def test_saved_provider(provider_id: str) -> dict:
         raise HTTPException(404, "Provider profile not found")
     result = diagnose_profile(profile)
     audit("provider_tested", provider_id=provider_id, passed=result["ok"])
+    return result
+
+
+@app.post("/api/providers/{provider_id}/relay-test")
+def relay_test_provider(provider_id: str) -> dict:
+    profile = read_profiles().get(provider_id)
+    if not profile:
+        raise HTTPException(404, "Provider profile not found")
+    if active_provider() != provider_id:
+        raise HTTPException(409, "Relay test requires the provider to be active")
+    normalized = normalize_profile(profile)
+    if normalized["mode"] != "pure_api":
+        raise HTTPException(422, "Relay test is only available for pure API providers")
+    model = str(normalized.get("model") or "").strip()
+    if not model:
+        raise HTTPException(422, "The active provider has no model configured")
+    result = test_model_request_via_relay(normalized, model)
+    audit("provider_relay_tested", provider_id=provider_id, passed=result["ok"])
     return result
 
 

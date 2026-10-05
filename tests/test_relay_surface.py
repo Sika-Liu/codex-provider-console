@@ -8,6 +8,7 @@ class RelaySurfaceTests(unittest.TestCase):
         self.assertIn('@app.get("/capabilities")', source)
         self.assertIn('"capabilities": relay_capabilities(protocol)', source)
         self.assertIn('return relay_capabilities(profile["protocol"])', source)
+        self.assertIn('@app.post("/api/providers/{provider_id}/relay-test")', (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
