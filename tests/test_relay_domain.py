@@ -1,9 +1,16 @@
 import unittest
 
-from relay_domain import chat_sse_to_responses_events, chat_to_response, relay_capabilities, resolve_active_profile, responses_to_chat_request
+from relay_domain import unsupported_request_features, chat_sse_to_responses_events, chat_to_response, relay_capabilities, resolve_active_profile, responses_to_chat_request
 
 
 class RelayDomainTests(unittest.TestCase):
+    def test_unsupported_request_features_are_reported(self):
+        features = unsupported_request_features({
+            "input": [{"type": "input_image"}, {"type": "input_file"}],
+            "reasoning": {"effort": "high"},
+        })
+        self.assertEqual(features, ["files", "images", "reasoning_metadata"])
+
     def test_relay_uses_panel_selection_when_sessions_use_stable_custom_provider(self):
         profile = {"id": "fhl", "mode": "pure_api"}
         result = resolve_active_profile(

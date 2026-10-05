@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:
-      - "${PANEL_BIND:-0.0.0.0}:${PANEL_PORT:-8787}:8787"
+      - "${PANEL_BIND:-127.0.0.1}:${PANEL_PORT:-8787}:8787"
     volumes:
       - "${CODEX_HOME_HOST:-./codex-data}:/codex"
       # Mount the home directory at its original absolute path. The official
@@ -18,7 +18,7 @@ services:
       PANEL_PASSWORD: "${PANEL_PASSWORD:-}"
       PANEL_SESSION_SECRET: "${PANEL_SESSION_SECRET:-}"
       PANEL_COOKIE_SECURE: "${PANEL_COOKIE_SECURE:-false}"
-      PANEL_BIND: "${PANEL_BIND:-0.0.0.0}"
+      PANEL_BIND: "${PANEL_BIND:-127.0.0.1}"
       PANEL_SSH_HOST_ALIAS: "${PANEL_SSH_HOST_ALIAS:-}"
       CODEX_CLI_VERSION: "${CODEX_CLI_VERSION:-not_installed}"
       CODEX_CLI_USER: "${CODEX_CLI_USER:-unknown}"

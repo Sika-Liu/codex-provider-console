@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from provider_domain import normalize_profile
-from relay_domain import chat_sse_to_responses_events, chat_to_response, relay_capabilities, resolve_active_profile, responses_to_chat_request
+from relay_domain import chat_sse_to_responses_events, chat_to_response, relay_capabilities, resolve_active_profile, responses_to_chat_request, unsupported_request_features
 
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 APP_VERSION = (Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip() if Path(__file__).with_name("VERSION").is_file() else "0.1.0")
@@ -99,6 +99,9 @@ def upstream_stream(
 @app.get("/health")
 def health() -> dict[str, Any]:
     profile = active_profile()
+    unsupported = unsupported_request_features(body)
+    if unsupported:
+        raise HTTPException(422, {"type": "relay_unsupported_feature", "features": unsupported})
     protocol = str(profile["protocol"])
     return {"status": "ok", "provider_id": str(profile["id"]), "protocol": protocol, "capabilities": relay_capabilities(protocol)}
 

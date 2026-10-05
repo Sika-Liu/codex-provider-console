@@ -17,6 +17,26 @@ RELAY_CAPABILITIES = {
 }
 
 
+def unsupported_request_features(body: dict[str, Any]) -> list[str]:
+    """Return Responses features this compatibility relay cannot preserve."""
+    unsupported: list[str] = []
+    raw_input = body.get("input")
+    items = raw_input if isinstance(raw_input, list) else []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "")
+        if item_type in {"input_image", "image_url"}:
+            unsupported.append("images")
+        elif item_type in {"input_file", "file", "file_search_call"}:
+            unsupported.append("files")
+    if body.get("reasoning") is not None or body.get("reasoning_effort") is not None:
+        unsupported.append("reasoning_metadata")
+    if body.get("metadata") is not None:
+        unsupported.append("provider_metadata")
+    return sorted(set(unsupported))
+
+
 def relay_capabilities(protocol: object) -> dict[str, Any]:
     """Describe the intentionally supported compatibility subset."""
     normalized = "chat_completions" if protocol in {"chat", "chat_completions"} else "responses"
