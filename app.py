@@ -407,6 +407,7 @@ DEVICE_LOGIN: DeviceLoginSession | None = None
 
 
 from provider_schemas import (LoginRequest, ModelDiagnosticRequest, ModelEntry, Provider, ProviderDiagnosticRequest, UpstreamModelFetch)
+from model_diagnostic_domain import validate_model_diagnostic_response
 
 
 def auth_configured() -> bool:
@@ -1185,31 +1186,11 @@ def test_profile(profile: dict) -> dict:
 
 MODEL_DIAGNOSTIC_TIMEOUT_SECONDS = 45
 MODEL_DIAGNOSTIC_TIMEOUT_ATTEMPTS = 2
-MODEL_DIAGNOSTIC_MAX_MODELS = 100
+MODEL_DIAGNOSTIC_MAX_MODELS = 30
+MODEL_DIAGNOSTIC_MAX_SECONDS = 180
+MODEL_DIAGNOSTIC_JOB_TTL_SECONDS = 3600
+MODEL_DIAGNOSTIC_MAX_JOBS = 30
 
-
-def validate_model_diagnostic_response(body_text: str, wire_api: str) -> tuple[bool, str]:
-    """Validate the minimal response shape instead of accepting any non-empty body."""
-    if not body_text.strip():
-        return False, "响应内容为空"
-    try:
-        payload = json.loads(body_text)
-    except json.JSONDecodeError:
-        return False, "上游返回的不是有效 JSON"
-    if not isinstance(payload, dict):
-        return False, "上游响应不是 JSON 对象"
-    if wire_api == "chat":
-        choices = payload.get("choices")
-        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-            return False, "Chat Completions 响应缺少 choices"
-        if not isinstance(choices[0].get("message") or choices[0].get("delta"), dict):
-            return False, "Chat Completions 响应缺少 message 或 delta"
-        return True, ""
-    if payload.get("object") not in {"response", None}:
-        return False, "Responses 响应 object 字段不正确"
-    if not isinstance(payload.get("output"), list):
-        return False, "Responses 响应缺少 output"
-    return True, ""
 
 
 def is_timeout_error(error: object) -> bool:
@@ -1229,9 +1210,9 @@ def test_model_request(
     suffix = "/chat/completions" if wire_api == "chat" else "/responses"
     endpoint = upstream_endpoint(base, suffix)
     payload = (
-        {"model": test_model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
+        {"model": test_model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 16}
         if wire_api == "chat"
-        else {"model": test_model, "input": "hi", "max_output_tokens": 1}
+        else {"model": test_model, "input": "hi", "max_output_tokens": 16}
     )
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "CodexPlusPlus/RelayTest"}
@@ -1252,7 +1233,6 @@ def test_model_request(
                     "ok": 200 <= response.status < 300 and shape_ok,
                     "endpoint": endpoint,
                     "status": response.status,
-                    "body": body_text[:2400],
                     "detail": shape_detail,
                     "error_kind": "" if shape_ok else "invalid_response",
                     "attempts": attempt,
@@ -1266,11 +1246,9 @@ def test_model_request(
                 else "model_or_endpoint_not_found" if exc.code == 404
                 else "upstream_http_error"
             )
-            detail = f"HTTP {exc.code}{': ' + body_text[:1200] if body_text else ''}"
+            detail = f"上游返回 HTTP {exc.code}"
             if exc.code == 429:
                 detail = f"上游限流（HTTP 429），请稍后重试{f'；Retry-After: {retry_after} 秒' if retry_after.isdigit() else ''}。"
-                if body_text:
-                    detail += f" 上游响应：{body_text[:600]}"
             return {
                 "ok": False,
                 "endpoint": endpoint,
@@ -1304,7 +1282,7 @@ def test_model_request_via_relay(
 ) -> dict:
     """Probe the active local Relay using the same Responses shape as Codex."""
     endpoint = f"{RELAY_BASE_URL.rstrip('/')}/responses"
-    payload = {"model": test_model, "input": "hi", "max_output_tokens": 1}
+    payload = {"model": test_model, "input": "hi", "max_output_tokens": 16}
     request = urllib.request.Request(
         endpoint,
         data=json.dumps(payload).encode("utf-8"),
@@ -1319,13 +1297,12 @@ def test_model_request_via_relay(
                 "ok": 200 <= response.status < 300 and shape_ok,
                 "endpoint": endpoint,
                 "status": response.status,
-                "body": body_text[:2400],
                 "detail": shape_detail,
                 "error_kind": "" if shape_ok else "invalid_relay_response",
             }
     except urllib.error.HTTPError as exc:
         body_text = exc.read().decode("utf-8", errors="replace")
-        return {"ok": False, "endpoint": endpoint, "status": exc.code, "detail": f"Relay HTTP {exc.code}: {body_text[:1200]}", "error_kind": "relay_http_error"}
+        return {"ok": False, "endpoint": endpoint, "status": exc.code, "detail": f"Relay 返回 HTTP {exc.code}", "error_kind": "relay_http_error"}
     except (TimeoutError, urllib.error.URLError) as exc:
         reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
         return {"ok": False, "endpoint": endpoint, "detail": str(reason), "error_kind": "relay_connection_error"}
@@ -3231,12 +3208,41 @@ def get_provider_diagnostic(job_id: str) -> dict:
     return provider_diagnostic_snapshot(job_id)
 
 
+def prune_model_diagnostic_jobs(now: float | None = None) -> None:
+    """Bound the in-memory job registry without removing running jobs."""
+    now = time.time() if now is None else now
+    with MODEL_DIAGNOSTIC_JOBS_LOCK:
+        for job_id, job in list(MODEL_DIAGNOSTIC_JOBS.items()):
+            if job["status"] != "running" and now - job["updated_at"] > MODEL_DIAGNOSTIC_JOB_TTL_SECONDS:
+                del MODEL_DIAGNOSTIC_JOBS[job_id]
+        finished = sorted(
+            ((job_id, job) for job_id, job in MODEL_DIAGNOSTIC_JOBS.items() if job["status"] != "running"),
+            key=lambda pair: pair[1]["updated_at"],
+        )
+        for job_id, _ in finished[:max(0, len(MODEL_DIAGNOSTIC_JOBS) - MODEL_DIAGNOSTIC_MAX_JOBS)]:
+            del MODEL_DIAGNOSTIC_JOBS[job_id]
+
+
 def model_diagnostic_snapshot(job_id: str) -> dict:
+    prune_model_diagnostic_jobs()
     with MODEL_DIAGNOSTIC_JOBS_LOCK:
         job = MODEL_DIAGNOSTIC_JOBS.get(job_id)
         if not job:
             raise HTTPException(404, "模型诊断任务不存在或已过期")
         return dict(job)
+
+
+def relay_diagnostic_eligible(profile: dict, names: list[str]) -> bool:
+    """Only test the deployed Relay when the editor matches its active profile."""
+    provider_id = str(profile.get("id") or "")
+    saved = read_profiles().get(provider_id)
+    if not saved or active_provider() != provider_id:
+        return False
+    saved = normalize_profile(saved)
+    keys = ("base_url", "bearer_token", "protocol", "model")
+    return (all(saved.get(key) == profile.get(key) for key in keys)
+            and bool(saved.get("no_auth")) == bool(profile.get("no_auth"))
+            and str(profile.get("model") or "") in names)
 
 
 @app.post("/api/providers/diagnose-models-progress")
@@ -3258,8 +3264,12 @@ def start_model_diagnostics(request: ModelDiagnosticRequest) -> dict:
     if len(names) > MODEL_DIAGNOSTIC_MAX_MODELS:
         raise HTTPException(422, f"单次最多诊断 {MODEL_DIAGNOSTIC_MAX_MODELS} 个模型")
 
+    prune_model_diagnostic_jobs()
+    relay_eligible = relay_diagnostic_eligible(profile, names)
     job_id = uuid.uuid4().hex
     with MODEL_DIAGNOSTIC_JOBS_LOCK:
+        if len(MODEL_DIAGNOSTIC_JOBS) >= MODEL_DIAGNOSTIC_MAX_JOBS:
+            raise HTTPException(429, "正在运行的诊断任务过多，请稍后重试")
         MODEL_DIAGNOSTIC_JOBS[job_id] = {
             "id": job_id,
             "status": "running",
@@ -3269,28 +3279,56 @@ def start_model_diagnostics(request: ModelDiagnosticRequest) -> dict:
             "failed": 0,
             "rate_limited": 0,
             "skipped": 0,
-            "stage": "正在准备模型诊断",
+            "stage": "正在准备上游直连诊断",
             "results": [],
+            "relay_result": {"status": "pending" if relay_eligible else "skipped",
+                             "detail": "等待上游直连诊断" if relay_eligible else "仅当前启用、未修改的供应商选中模型可测试 Relay"},
+            "cancel_requested": False,
             "updated_at": time.time(),
         }
 
+    def skip_remaining(start_index: int, reason: str, kind: str) -> None:
+        with MODEL_DIAGNOSTIC_JOBS_LOCK:
+            job = MODEL_DIAGNOSTIC_JOBS[job_id]
+            for name in names[start_index:]:
+                job["results"].append({
+                    "model": name, "status": "skipped", "http_status": None,
+                    "elapsed_ms": 0, "detail": reason, "error_kind": kind, "retry_after": "",
+                })
+                job["skipped"] += 1
+            job["completed"] = len(names)
+            job["updated_at"] = time.time()
+
     def run() -> None:
-        for index, name in enumerate(names, start=1):
+        deadline = time.monotonic() + MODEL_DIAGNOSTIC_MAX_SECONDS
+        final_status = "completed"
+        for index, name in enumerate(names):
             with MODEL_DIAGNOSTIC_JOBS_LOCK:
-                job = MODEL_DIAGNOSTIC_JOBS.get(job_id)
-                if job:
-                    job.update(stage=f"正在测试（{index}/{len(names)}）{name}", updated_at=time.time())
+                job = MODEL_DIAGNOSTIC_JOBS[job_id]
+                cancelled = job["cancel_requested"]
+                if not cancelled:
+                    job.update(stage=f"上游直连（{index + 1}/{len(names)}）{name}", updated_at=time.time())
+            if cancelled:
+                final_status = "cancelled"
+                skip_remaining(index, "用户取消，未发送请求", "cancelled")
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                final_status = "timed_out"
+                skip_remaining(index, "达到诊断总时长上限，未发送请求", "time_budget_exceeded")
+                break
             started_at = time.monotonic()
             try:
-                result = test_model_request(profile, name)
-            except Exception as exc:  # pragma: no cover - defensive background boundary
-                result = {"ok": False, "detail": str(exc)}
+                result = test_model_request(
+                    profile, name, timeout_seconds=max(1, min(20, int(remaining))), max_attempts=1
+                )
+            except Exception:  # pragma: no cover - defensive background boundary
+                result = {"ok": False, "detail": "诊断请求出现内部错误", "error_kind": "diagnostic_error"}
             elapsed_ms = round((time.monotonic() - started_at) * 1000)
             passed = bool(result.get("ok"))
             detail = (
-                f'第 {result.get("attempts", 1)} 次请求成功'
-                if passed
-                else str(result.get("detail") or "请求失败")
+                f'上游直连成功：{result.get("detail") or "已生成输出"}'
+                if passed else str(result.get("detail") or "请求失败")
             )
             result_kind = str(result.get("error_kind") or "")
             item = {
@@ -3303,47 +3341,90 @@ def start_model_diagnostics(request: ModelDiagnosticRequest) -> dict:
                 "retry_after": result.get("retry_after") or "",
             }
             with MODEL_DIAGNOSTIC_JOBS_LOCK:
-                job = MODEL_DIAGNOSTIC_JOBS.get(job_id)
-                if job:
-                    job["results"].append(item)
-                    job["completed"] = index
-                    job["passed"] += int(passed)
-                    job["failed"] += int(not passed and result_kind != "rate_limited")
-                    job["rate_limited"] += int(result_kind == "rate_limited")
-                    job["updated_at"] = time.time()
-                    rate_limited = result_kind == "rate_limited"
-            if rate_limited:
+                job = MODEL_DIAGNOSTIC_JOBS[job_id]
+                job["results"].append(item)
+                job["completed"] = index + 1
+                job["passed"] += int(passed)
+                job["failed"] += int(not passed and result_kind != "rate_limited")
+                job["rate_limited"] += int(result_kind == "rate_limited")
+                job["updated_at"] = time.time()
+                cancelled = job["cancel_requested"]
+            if result_kind == "rate_limited":
+                final_status = "rate_limited"
                 retry_hint = str(result.get("retry_after") or "").strip()
-                with MODEL_DIAGNOSTIC_JOBS_LOCK:
-                    job = MODEL_DIAGNOSTIC_JOBS.get(job_id)
-                    if job:
-                        for skipped_name in names[index:]:
-                            job["results"].append({
-                                "model": skipped_name,
-                                "status": "skipped",
-                                "http_status": 429,
-                                "elapsed_ms": 0,
-                                "detail": f"上游已限流，未继续请求。请稍后{retry_hint + ' 秒后' if retry_hint.isdigit() else ''}重试。",
-                                "error_kind": "skipped_after_rate_limit",
-                                "retry_after": retry_hint,
-                            })
-                            job["skipped"] += 1
-                        job["completed"] = len(names)
-                        job["updated_at"] = time.time()
+                skip_remaining(index + 1, f"上游已限流，未继续请求。请稍后{retry_hint + ' 秒后' if retry_hint.isdigit() else ''}重试。", "skipped_after_rate_limit")
                 break
+            if cancelled:
+                final_status = "cancelled"
+                skip_remaining(index + 1, "用户取消，未发送请求", "cancelled")
+                break
+
+        if final_status == "completed" and relay_eligible:
+            selected = str(profile.get("model") or "")
+            selected_passed = any(item["model"] == selected and item["status"] == "pass"
+                                  for item in MODEL_DIAGNOSTIC_JOBS[job_id]["results"])
+            if selected_passed and deadline - time.monotonic() > 1 and not MODEL_DIAGNOSTIC_JOBS[job_id]["cancel_requested"]:
+                if PROVIDER_SWITCH_LOCK.acquire(blocking=False):
+                    try:
+                        if relay_diagnostic_eligible(profile, names):
+                            with MODEL_DIAGNOSTIC_JOBS_LOCK:
+                                MODEL_DIAGNOSTIC_JOBS[job_id]["stage"] = "正在测试 Relay 转换链路（模拟 Codex 请求）"
+                            try:
+                                relay = test_model_request_via_relay(
+                                    profile, selected, timeout_seconds=max(1, min(20, int(deadline - time.monotonic())))
+                                )
+                            except Exception:  # pragma: no cover - defensive background boundary
+                                relay = {"ok": False, "detail": "Relay 诊断出现内部错误"}
+                            relay_result = {
+                                "status": "pass" if relay.get("ok") else "fail",
+                                "http_status": relay.get("status"),
+                                "detail": (relay.get("detail") or "已生成可验证输出" if relay.get("ok") else relay.get("detail") or "请求失败")[:300],
+                            }
+                        else:
+                            relay_result = {"status": "skipped", "detail": "活动供应商配置已变化，未测试 Relay"}
+                    finally:
+                        PROVIDER_SWITCH_LOCK.release()
+                else:
+                    relay_result = {"status": "skipped", "detail": "供应商正在切换，未测试 Relay"}
+            else:
+                relay_result = {"status": "skipped", "detail": "选中模型直连未通过、已取消或总时长不足"}
+        elif relay_eligible:
+            relay_result = {"status": "skipped", "detail": "批量诊断未完成，未测试 Relay"}
+        else:
+            relay_result = None
+
         with MODEL_DIAGNOSTIC_JOBS_LOCK:
-            job = MODEL_DIAGNOSTIC_JOBS.get(job_id)
-            if job:
-                stage = "上游限流，已停止后续诊断" if job["rate_limited"] else "全部模型诊断完成"
-                job.update(status="completed", stage=stage, updated_at=time.time())
-                audit(
-                    "provider_models_diagnosed",
-                    provider_id=profile.get("id") or None,
-                    passed=str(job["passed"]),
-                    failed=str(job["failed"]),
-                )
+            job = MODEL_DIAGNOSTIC_JOBS[job_id]
+            if job["cancel_requested"] and final_status == "completed":
+                final_status = "cancelled"
+            if relay_result is not None:
+                job["relay_result"] = relay_result
+            stages = {
+                "completed": "模型诊断完成",
+                "rate_limited": "上游限流，已停止后续诊断",
+                "cancelled": "模型诊断已取消",
+                "timed_out": "达到诊断总时长上限",
+            }
+            job.update(status=final_status, stage=stages[final_status], updated_at=time.time())
+            audit("provider_models_diagnosed", provider_id=profile.get("id") or None,
+                  passed=str(job["passed"]), failed=str(job["failed"]))
 
     threading.Thread(target=run, name=f"model-diagnostic-{job_id[:8]}", daemon=True).start()
+    return model_diagnostic_snapshot(job_id)
+
+
+@app.post("/api/model-diagnostics/{job_id}/cancel")
+def cancel_model_diagnostics(job_id: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise HTTPException(422, "无效的模型诊断任务标识")
+    with MODEL_DIAGNOSTIC_JOBS_LOCK:
+        job = MODEL_DIAGNOSTIC_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "模型诊断任务不存在或已过期")
+        if job["status"] == "running":
+            job["cancel_requested"] = True
+            job["stage"] = "正在取消，等待当前请求结束"
+            job["updated_at"] = time.time()
     return model_diagnostic_snapshot(job_id)
 
 
@@ -3577,11 +3658,12 @@ async function testCurrent(){const timer=showDoctorProgress();try{const [d]=awai
     model_diagnostics_script = r'''<script>
 document.head.insertAdjacentHTML('beforeend','<style>.model-diagnostic-panel{display:none;margin-top:12px;border:1px solid #d8dde2;border-radius:8px;padding:12px;background:#fafbfc}.model-diagnostic-panel.show{display:block}.model-diagnostic-title{font-weight:750}.model-diagnostic-copy{margin-top:4px;color:#656b73;font-size:12px;line-height:1.45}.model-diagnostic-track{height:7px;background:#e8ebee;border-radius:999px;overflow:hidden;margin:10px 0 7px}.model-diagnostic-track i{display:block;height:100%;width:0;background:#1683ff;transition:width .2s}.model-diagnostic-meta{color:#656b73;font-size:12px}.model-diagnostic-results{margin-top:10px;max-height:250px;overflow:auto}.model-diagnostic-result{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;border-top:1px solid #e6e9ed;padding:8px 0;font-size:13px}.model-diagnostic-result:first-child{border-top:0}.model-diagnostic-result b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.model-diagnostic-result small{grid-column:1 / -1;color:#6a7078;line-height:1.4;word-break:break-word}.model-diagnostic-status{font-weight:700}.model-diagnostic-status.pass{color:#14804a}.model-diagnostic-status.fail{color:#c23434}.model-diagnostic-status.rate_limited{color:#b06a00}.model-diagnostic-status.skipped{color:#7a828b}</style>');
 const modelDiagnosticList=$('#model-list');
-if(modelDiagnosticList&&!$('#diagnose-all-models-btn')){const modelTitle=modelDiagnosticList.previousElementSibling;const button=document.createElement('button');button.id='diagnose-all-models-btn';button.type='button';button.className='btn light small';button.textContent='诊断模型';button.onclick=diagnoseAllModels;let actions=modelTitle?.querySelector('.model-actions');if(!actions&&modelTitle){actions=document.createElement('div');actions.className='model-actions';modelTitle.append(actions)}actions?.append(button);modelDiagnosticList.insertAdjacentHTML('afterend','<section id="model-diagnostic-panel" class="model-diagnostic-panel"><div class="model-diagnostic-title">模型诊断</div><div class="model-diagnostic-copy">逐个发送最小真实请求；不会保存档案或切换供应商。</div><div class="model-diagnostic-track"><i id="model-diagnostic-fill"></i></div><div id="model-diagnostic-meta" class="model-diagnostic-meta"></div><div id="model-diagnostic-results" class="model-diagnostic-results"></div></section>')}
-let modelDiagnosticPoll=null;
-function renderModelDiagnostics(job){const panel=$('#model-diagnostic-panel'),button=$('#diagnose-all-models-btn');if(!panel)return;panel.classList.add('show');const total=Number(job.total)||0,completed=Number(job.completed)||0,pct=total?Math.round(completed*100/total):0;$('#model-diagnostic-fill').style.width=pct+'%';const limited=Number(job.rate_limited)||0,skipped=Number(job.skipped)||0;$('#model-diagnostic-meta').textContent=(job.stage||'正在诊断')+' · '+completed+'/'+total+'，成功 '+(job.passed||0)+'，失败 '+(job.failed||0)+'，限流 '+limited+'，跳过 '+skipped;const results=job.results||[];$('#model-diagnostic-results').innerHTML=results.map(item=>{const status=item.status||'fail',labels={pass:'通过',fail:'失败',rate_limited:'限流',skipped:'已跳过'},label=labels[status]||'失败',http=item.http_status?'HTTP '+item.http_status:'无 HTTP 响应',elapsed=typeof item.elapsed_ms==='number'?((item.elapsed_ms/1000).toFixed(2)+' 秒'):'';return '<div class="model-diagnostic-result"><b title="'+esc(item.model)+'">'+esc(item.model)+'</b><span class="model-diagnostic-status '+status+'">'+esc(label)+' · '+esc(http)+(elapsed?' · '+esc(elapsed):'')+'</span><small>'+esc(item.detail||'')+'</small></div>'}).join('');if(button){button.disabled=job.status==='running';button.textContent=job.status==='running'?'正在诊断…':'诊断模型'}}
-function setFullModelDiagnosticsVisibility(official){const button=$('#diagnose-all-models-btn'),panel=$('#model-diagnostic-panel');if(button)button.style.display=official?'none':'';if(panel&&official)panel.classList.remove('show')}
-async function diagnoseAllModels(){if(modelDiagnosticPoll)return;try{const profile=gather(),models=profile.models||[];if(profile.auth_mode!=='apikey')throw Error('模型诊断仅适用于纯 API 供应商。');if(!models.length)throw Error('请先从上游获取模型列表。');const confirmed=await panelDialog({title:'诊断模型',message:`将对 ${models.length} 个模型逐个发送最小真实请求。该操作可能产生 API 费用并受上游速率限制影响，不会保存档案或切换供应商。`,confirmLabel:'开始诊断'});if(!confirmed)return;const started=await api('/api/providers/diagnose-models-progress',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(profile)});renderModelDiagnostics(started);const poll=async()=>{try{const job=await api(`/api/model-diagnostics/${encodeURIComponent(started.id)}`);renderModelDiagnostics(job);if(job.status==='running'){modelDiagnosticPoll=setTimeout(poll,450);return}modelDiagnosticPoll=null}catch(error){modelDiagnosticPoll=null;renderModelDiagnostics({status:'completed',stage:'模型诊断失败',total:0,completed:0,passed:0,failed:0,results:[{model:'诊断任务',status:'fail',detail:error.message}]})}};modelDiagnosticPoll=setTimeout(poll,120)}catch(error){modelDiagnosticPoll=null;note(error.message)}}
+if(modelDiagnosticList&&!$('#diagnose-all-models-btn')){const modelTitle=modelDiagnosticList.previousElementSibling;const button=document.createElement('button');button.id='diagnose-all-models-btn';button.type='button';button.className='btn light small';button.textContent='诊断全部模型';button.onclick=()=>diagnoseAllModels(false);let actions=modelTitle?.querySelector('.model-actions');if(!actions&&modelTitle){actions=document.createElement('div');actions.className='model-actions';modelTitle.append(actions)}actions?.append(button);const selectedButton=document.createElement('button');selectedButton.id='diagnose-selected-model-btn';selectedButton.type='button';selectedButton.className='btn light small';selectedButton.textContent='诊断选中模型';selectedButton.onclick=()=>diagnoseAllModels(true);actions?.append(selectedButton);modelDiagnosticList.insertAdjacentHTML('afterend','<section id="model-diagnostic-panel" class="model-diagnostic-panel"><div class="model-diagnostic-title">模型诊断</div><div class="model-diagnostic-copy">直连诊断最多 30 个模型、总计最多 3 分钟；当前启用的选中模型还会测试 Relay。不会保存档案或切换供应商。</div><div class="model-diagnostic-track"><i id="model-diagnostic-fill"></i></div><div id="model-diagnostic-meta" class="model-diagnostic-meta"></div><div id="model-diagnostic-results" class="model-diagnostic-results"></div><div id="model-diagnostic-relay" class="model-diagnostic-meta"></div><button id="model-diagnostic-cancel" class="btn light small" type="button" onclick="cancelModelDiagnostics()">取消诊断</button></section>')}
+let modelDiagnosticPoll=null,modelDiagnosticJobId=null;
+async function cancelModelDiagnostics(){if(!modelDiagnosticJobId)return;try{const job=await api('/api/model-diagnostics/'+encodeURIComponent(modelDiagnosticJobId)+'/cancel',{method:'POST'});renderModelDiagnostics(job)}catch(error){note(error.message)}}
+function renderModelDiagnostics(job){const panel=$('#model-diagnostic-panel'),button=$('#diagnose-all-models-btn');if(!panel)return;panel.classList.add('show');const total=Number(job.total)||0,completed=Number(job.completed)||0,pct=total?Math.round(completed*100/total):0;$('#model-diagnostic-fill').style.width=pct+'%';const limited=Number(job.rate_limited)||0,skipped=Number(job.skipped)||0;$('#model-diagnostic-meta').textContent=(job.stage||'正在诊断')+' · '+completed+'/'+total+'，成功 '+(job.passed||0)+'，失败 '+(job.failed||0)+'，限流 '+limited+'，跳过 '+skipped;const results=job.results||[];$('#model-diagnostic-results').innerHTML=results.map(item=>{const status=item.status||'fail',labels={pass:'通过',fail:'失败',rate_limited:'限流',skipped:'已跳过'},label=labels[status]||'失败',http=item.http_status?'HTTP '+item.http_status:'无 HTTP 响应',elapsed=typeof item.elapsed_ms==='number'?((item.elapsed_ms/1000).toFixed(2)+' 秒'):'';return '<div class="model-diagnostic-result"><b title="'+esc(item.model)+'">'+esc(item.model)+'</b><span class="model-diagnostic-status '+status+'">'+esc(label)+' · '+esc(http)+(elapsed?' · '+esc(elapsed):'')+'</span><small>'+esc(item.detail||'')+'</small></div>'}).join('');const relay=job.relay_result||{};$('#model-diagnostic-relay').textContent='Relay 链路：'+({pass:'通过',fail:'失败',skipped:'未测试',pending:'等待中'}[relay.status]||'未测试')+(relay.detail?' · '+relay.detail:'');const cancel=$('#model-diagnostic-cancel');if(cancel)cancel.style.display=job.status==='running'?'':'none';if(button){button.disabled=job.status==='running';button.textContent=job.status==='running'?'正在诊断…':'诊断模型'}const selected=$('#diagnose-selected-model-btn');if(selected)selected.disabled=job.status==='running'}
+function setFullModelDiagnosticsVisibility(official){const button=$('#diagnose-all-models-btn'),selected=$('#diagnose-selected-model-btn'),panel=$('#model-diagnostic-panel');if(button)button.style.display=official?'none':'';if(selected)selected.style.display=official?'none':'';if(panel&&official)panel.classList.remove('show')}
+async function diagnoseAllModels(selectedOnly=false){if(modelDiagnosticPoll)return;try{const profile=gather(),models=selectedOnly?[{name:profile.model}]:profile.models||[];profile.models=models;if(selectedOnly&&!profile.model)throw Error('请先选择模型。');if(profile.auth_mode!=='apikey')throw Error('模型诊断仅适用于纯 API 供应商。');if(!models.length)throw Error('请先从上游获取模型列表。');if(models.length>30)throw Error('单次最多诊断 30 个模型，请选择一个模型或减少列表。');const confirmed=await panelDialog({title:'诊断模型',message:`将对 ${models.length} 个模型逐个发送最小真实请求。该操作可能产生 API 费用并受上游速率限制影响，不会保存档案或切换供应商。`,confirmLabel:'开始诊断'});if(!confirmed)return;const started=await api('/api/providers/diagnose-models-progress',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(profile)});modelDiagnosticJobId=started.id;renderModelDiagnostics(started);const poll=async()=>{try{const job=await api(`/api/model-diagnostics/${encodeURIComponent(started.id)}`);renderModelDiagnostics(job);if(job.status==='running'){modelDiagnosticPoll=setTimeout(poll,450);return}modelDiagnosticPoll=null;modelDiagnosticJobId=null}catch(error){modelDiagnosticPoll=null;modelDiagnosticJobId=null;renderModelDiagnostics({status:'completed',stage:'模型诊断失败',total:0,completed:0,passed:0,failed:0,results:[{model:'诊断任务',status:'fail',detail:error.message}]})}};modelDiagnosticPoll=setTimeout(poll,120)}catch(error){modelDiagnosticPoll=null;note(error.message)}}
 const baseModelDiagnosticAuthModeChanged=authModeChanged;authModeChanged=function(){baseModelDiagnosticAuthModeChanged();setFullModelDiagnosticsVisibility($('#p-auth').value==='chatgpt')};setFullModelDiagnosticsVisibility($('#p-auth').value==='chatgpt');
 let providerDiagnosticPoll=null;
 function renderProviderDiagnosticJob(job){const elapsed=typeof job.elapsed_ms==='number'?`已耗时 ${(job.elapsed_ms/1000).toFixed(1)} 秒`:'';$('#doctor-mask').classList.add('show');$('#doctor-summary').textContent=`${job.stage||'正在诊断供应商'}${elapsed?'，'+elapsed:''}`;$('#doctor-progress').style.width=`${Math.max(2,Math.min(100,Number(job.progress)||2))}%`;const stages=['正在检查配置完整性','正在获取上游模型列表'];const current=job.stage||'';if(current.startsWith('正在请求 '))stages.push(current);else stages.push('正在发送真实请求');$('#doctor-checks').innerHTML=stages.map(stage=>`<div class="doctor-check ${stage===current?'running':''}"><b>${esc(stage.replace(/^正在/,'').replace(/上游模型列表/,'模型列表').replace(/发送真实请求/,'真实请求'))}</b><small>${esc(stage===current?(elapsed||'正在进行'):'等待该步骤')}</small></div>`).join('');$('#doctor-advice').textContent='';$('#doctor-close').style.display='none'}

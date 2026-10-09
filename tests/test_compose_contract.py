@@ -25,7 +25,7 @@ class ComposeContractTests(unittest.TestCase):
 
     def test_both_images_receive_the_version_file(self):
         self.assertIn('COPY VERSION provider_domain.py relay_domain.py relay.py ./', self.dockerfile)
-        self.assertIn('COPY VERSION app.py provider_schemas.py host_ops.py storage_ops.py provider_domain.py relay_domain.py relay.py ./', self.dockerfile)
+        self.assertIn('COPY VERSION app.py provider_schemas.py model_diagnostic_domain.py host_ops.py storage_ops.py provider_domain.py relay_domain.py relay.py ./', self.dockerfile)
 
 
 @unittest.skipUnless(
