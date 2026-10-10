@@ -1169,6 +1169,36 @@ def upstream_endpoint(base_url: str, path: str) -> str:
     return f"{base}{path}" if base.endswith("/v1") else f"{base}/v1{path}"
 
 
+def upstream_endpoint_candidates(base_url: str, path: str) -> list[str]:
+    """Return compatible endpoint forms for providers with non-standard Responses paths."""
+    base = base_url.rstrip("/")
+    canonical = upstream_endpoint(base, path)
+    if path == "/responses" and not base.endswith("/v1"):
+        return list(dict.fromkeys([f"{base}/responses", canonical]))
+    return [canonical]
+
+
+def summarize_upstream_error(body_text: str, limit: int = 240) -> str:
+    """Keep useful provider error context without exposing a full upstream response."""
+    text = (body_text or "").strip()
+    if not text:
+        return "上游未返回错误内容"
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = error.get("message") or error.get("detail") or error.get("type")
+                if message:
+                    return str(message)[:limit]
+            for key in ("message", "detail", "error"):
+                if payload.get(key):
+                    return str(payload[key])[:limit]
+    except json.JSONDecodeError:
+        pass
+    return " ".join(text.split())[:limit]
+
+
 def test_profile(profile: dict) -> dict:
     endpoint = upstream_endpoint(profile["base_url"], "/models")
     headers = {"Accept": "application/json", "User-Agent": "CodexProviderConsole/1.0"}
@@ -1208,70 +1238,46 @@ def test_model_request(
     base = profile["base_url"].rstrip("/")
     wire_api = profile.get("wire_api", "responses")
     suffix = "/chat/completions" if wire_api == "chat" else "/responses"
-    endpoint = upstream_endpoint(base, suffix)
-    payload = (
-        {"model": test_model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 16}
-        if wire_api == "chat"
-        else {"model": test_model, "input": "hi", "max_output_tokens": 16}
-    )
+    endpoints = upstream_endpoint_candidates(base, suffix)
+    payload = ({"model": test_model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 16}
+               if wire_api == "chat" else {"model": test_model, "input": "hi", "max_output_tokens": 16})
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "CodexPlusPlus/RelayTest"}
     if profile.get("bearer_token"):
         headers["Authorization"] = f'Bearer {profile["bearer_token"]}'
-    request = urllib.request.Request(
-        endpoint,
-        data=body,
-        headers=headers,
-        method="POST",
-    )
-    for attempt in range(1, max_attempts + 1):
-        try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-                body_text = response.read().decode("utf-8", errors="replace")
-                shape_ok, shape_detail = validate_model_diagnostic_response(body_text, wire_api)
-                return {
-                    "ok": 200 <= response.status < 300 and shape_ok,
-                    "endpoint": endpoint,
-                    "status": response.status,
-                    "detail": shape_detail,
-                    "error_kind": "" if shape_ok else "invalid_response",
-                    "attempts": attempt,
-                }
-        except urllib.error.HTTPError as exc:
-            body_text = exc.read().decode("utf-8", errors="replace")
-            retry_after = (exc.headers.get("Retry-After") or "").strip()
-            kind = (
-                "rate_limited" if exc.code == 429
-                else "authentication_failed" if exc.code in {401, 403}
-                else "model_or_endpoint_not_found" if exc.code == 404
-                else "upstream_http_error"
-            )
-            detail = f"上游返回 HTTP {exc.code}"
-            if exc.code == 429:
-                detail = f"上游限流（HTTP 429），请稍后重试{f'；Retry-After: {retry_after} 秒' if retry_after.isdigit() else ''}。"
-            return {
-                "ok": False,
-                "endpoint": endpoint,
-                "status": exc.code,
-                "error_kind": kind,
-                "retry_after": retry_after,
-                "detail": detail,
-                "attempts": attempt,
-            }
-        except (TimeoutError, urllib.error.URLError) as exc:
-            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-            if not is_timeout_error(reason):
-                return {"ok": False, "endpoint": endpoint, "detail": str(reason), "attempts": attempt}
-            if attempt < max_attempts:
-                continue
-            return {
-                "ok": False,
-                "endpoint": endpoint,
-                "detail": f"上游在 {timeout_seconds} 秒内未返回响应（已尝试 {attempt} 次）；请确认该地址支持所选协议和测试模型。",
-                "attempts": attempt,
-            }
-
-    raise AssertionError("timeout retry loop did not return")  # pragma: no cover
+    last_result = None
+    for endpoint_index, endpoint in enumerate(endpoints):
+        request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                    body_text = response.read().decode("utf-8", errors="replace")
+                    shape_ok, shape_detail = validate_model_diagnostic_response(body_text, wire_api)
+                    return {"ok": 200 <= response.status < 300 and shape_ok, "endpoint": endpoint, "status": response.status, "detail": shape_detail, "error_kind": "" if shape_ok else "invalid_response", "attempts": attempt}
+            except urllib.error.HTTPError as exc:
+                body_text = exc.read().decode("utf-8", errors="replace")
+                retry_after = (exc.headers.get("Retry-After") or "").strip()
+                kind = ("rate_limited" if exc.code == 429 else "authentication_failed" if exc.code in {401, 403} else "model_or_endpoint_not_found" if exc.code == 404 else "upstream_gateway_error" if exc.code >= 500 else "upstream_http_error")
+                detail = f"上游返回 HTTP {exc.code}：{summarize_upstream_error(body_text)}"
+                if exc.code == 429:
+                    detail = f"上游限流（HTTP 429），请稍后重试{f'；Retry-After: {retry_after} 秒' if retry_after.isdigit() else ''}。"
+                last_result = {"ok": False, "endpoint": endpoint, "status": exc.code, "error_kind": kind, "retry_after": retry_after, "detail": detail, "attempts": attempt}
+                if endpoint_index + 1 < len(endpoints) and exc.code in {404, 502, 503, 504}:
+                    break
+                return last_result
+            except (TimeoutError, urllib.error.URLError) as exc:
+                reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+                if not is_timeout_error(reason):
+                    return {"ok": False, "endpoint": endpoint, "detail": str(reason), "attempts": attempt, "error_kind": "upstream_connection_error"}
+                if attempt < max_attempts:
+                    continue
+                last_result = {"ok": False, "endpoint": endpoint, "detail": f"上游在 {timeout_seconds} 秒内未返回响应（已尝试 {attempt} 次）", "error_kind": "upstream_timeout", "attempts": attempt}
+                if endpoint_index + 1 < len(endpoints):
+                    break
+                return last_result
+    if last_result is not None:
+        return last_result
+    raise AssertionError("diagnostic endpoint loop did not return")  # pragma: no cover
 
 
 def test_model_request_via_relay(
@@ -3333,6 +3339,7 @@ def start_model_diagnostics(request: ModelDiagnosticRequest) -> dict:
             result_kind = str(result.get("error_kind") or "")
             item = {
                 "model": name,
+                "endpoint": result.get("endpoint", ""),
                 "status": "pass" if passed else "rate_limited" if result_kind == "rate_limited" else "fail",
                 "http_status": result.get("status"),
                 "elapsed_ms": elapsed_ms,
