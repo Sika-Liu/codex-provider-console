@@ -127,7 +127,7 @@ if managed.returncode != 0:
             argv = shlex.split(command)
         except ValueError:
             continue
-        is_app_server = len(argv) >= 2 and Path(argv[0]).name == "codex" and "app-server" in argv and "proxy" not in argv and "pid-update-loop" not in argv
+        is_app_server = len(argv) >= 2 and Path(argv[0]).name == "codex" and "app-server" in argv and "pid-update-loop" not in argv
         if pid != own_pid and is_app_server:
             try:
                 os.kill(pid, signal.SIGTERM)
