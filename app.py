@@ -1253,7 +1253,7 @@ def test_model_request(
                 with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                     body_text = response.read().decode("utf-8", errors="replace")
                     shape_ok, shape_detail = validate_model_diagnostic_response(body_text, wire_api)
-                    return {"ok": 200 <= response.status < 300 and shape_ok, "endpoint": endpoint, "status": response.status, "detail": shape_detail, "error_kind": "" if shape_ok else "invalid_response", "attempts": attempt}
+                    return {"ok": 200 <= response.status < 300 and shape_ok, "endpoint": endpoint, "status": response.status, "detail": shape_detail, "body": body_text[:2000], "error_kind": "" if shape_ok else "invalid_response", "attempts": attempt}
             except urllib.error.HTTPError as exc:
                 body_text = exc.read().decode("utf-8", errors="replace")
                 retry_after = (exc.headers.get("Retry-After") or "").strip()
