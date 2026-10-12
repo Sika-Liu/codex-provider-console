@@ -116,7 +116,7 @@ async def create_response(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         raise HTTPException(422, "Responses request body must be a JSON object")
     profile = active_profile()
-    unsupported = unsupported_request_features(body)
+    unsupported = unsupported_request_features(body, profile["protocol"])
     if unsupported:
         raise HTTPException(422, {"type": "relay_unsupported_feature", "features": unsupported})
     if body.get("stream"):
