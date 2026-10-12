@@ -143,7 +143,7 @@ while time.monotonic() < deadline:
             argv = shlex.split(raw.strip())
         except ValueError:
             continue
-        if len(argv) >= 2 and Path(argv[0]).name == "codex" and "app-server" in argv and "proxy" not in argv:
+        if len(argv) >= 2 and Path(argv[0]).name == "codex" and "app-server" in argv and "proxy" not in argv and ("pid-update-loop" not in argv or managed.returncode != 0):
             remaining += 1
     if not remaining:
         break
