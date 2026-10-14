@@ -9,7 +9,7 @@ class SshHostVerificationTests(unittest.TestCase):
     def test_all_host_operations_use_the_shared_strict_ssh_builder(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
         host_ops = (ROOT / "host_ops.py").read_text(encoding="utf-8")
-        self.assertEqual(source.count("host_ssh_command(gateway),"), 4)
+        self.assertEqual(source.count("host_ssh_command(gateway),"), 5)
         self.assertIn('"StrictHostKeyChecking=yes"', host_ops)
         self.assertNotIn("StrictHostKeyChecking=accept-new", source + host_ops)
 

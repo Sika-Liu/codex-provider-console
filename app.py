@@ -2069,13 +2069,84 @@ def fetch_latest_cli_version() -> str:
         raise ValueError("官方版本信息格式无法识别")
     return version
 
+
+def inspect_host_app_server() -> tuple[str, str]:
+    """Check the managed host daemon without starting or stopping it."""
+    if not DEPLOYMENT_KEY_PATH.is_file():
+        return "warning", "缺少面板部署密钥，无法检查宿主机 App Server"
+    script = r'''
+import json
+import os
+import shutil
+import stat
+import subprocess
+from pathlib import Path
+
+codex = Path.home() / ".local" / "bin" / "codex"
+if not codex.is_file() or not os.access(codex, os.X_OK):
+    codex = Path(shutil.which("codex") or "")
+if not codex.is_file():
+    raise SystemExit("Codex CLI not found")
+result = subprocess.run(
+    [str(codex), "app-server", "daemon", "version"],
+    capture_output=True, text=True, timeout=5, check=False,
+)
+if result.returncode:
+    raise SystemExit((result.stderr or result.stdout or "daemon version failed").strip())
+payload = json.loads(result.stdout)
+socket_path = payload.get("socketPath")
+try:
+    socket_ready = bool(socket_path and stat.S_ISSOCK(Path(socket_path).stat().st_mode))
+except OSError:
+    socket_ready = False
+print(json.dumps({"status": payload.get("status"), "socket_ready": socket_ready,
+                  "version": payload.get("appServerVersion") or payload.get("managedCodexVersion")}))
+'''
+    try:
+        gateway = docker_host_gateway()
+        result = subprocess.run(
+            host_ssh_command(gateway), input=script, capture_output=True, text=True,
+            timeout=15, check=False, env=ssh_client_environment(),
+        )
+        if result.returncode:
+            detail = (result.stderr or result.stdout or "宿主机未提供失败原因").strip()
+            return "fail", f"无法读取 App Server 状态：{detail[-300:]}"
+        payload = json.loads(result.stdout)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        return "warning", f"无法检查宿主机 App Server：{str(exc)[-300:]}"
+    if payload.get("status") != "running" or not payload.get("socket_ready"):
+        return "fail", f"状态：{payload.get('status') or '未知'}；控制套接字{'就绪' if payload.get('socket_ready') else '不可用'}"
+    return "pass", f"运行中；控制套接字就绪；版本 {payload.get('version') or '未知'}"
+
+
+def inspect_session_storage() -> tuple[str, str]:
+    """Check that registered active threads still have rollout files."""
+    states = app_server_thread_states()
+    if states is None:
+        return "warning", "无法读取 App Server 会话数据库"
+    active_ids = {thread_id for thread_id, archived in states.items() if not archived}
+    try:
+        rollout_ids = {
+            thread_id
+            for path in SESSIONS_PATH.rglob("*.jsonl") if SESSIONS_PATH.is_dir()
+            if (thread_id := session_id_from_path(path))
+        }
+    except OSError as exc:
+        return "fail", f"无法读取会话文件：{exc}"
+    missing = active_ids - rollout_ids
+    if missing:
+        return "fail", f"{len(missing)} 个活动会话缺少历史文件（已登记 {len(active_ids)} 个）"
+    return "pass", f"{len(active_ids)} 个活动会话均有历史文件；这是存储检查，不包含客户端加载耗时"
+
 def health_check(on_check: Callable[[dict[str, str]], None] | None = None) -> dict:
     checks: list[dict[str, str]] = []
 
-    def add(name: str, status: str, detail: str, diagnostic_detail: str | None = None) -> None:
+    def add(name: str, status: str, detail: str, diagnostic_detail: str | None = None, action: str | None = None) -> None:
         item = {"name": name, "status": status, "detail": detail}
         if diagnostic_detail:
             item["diagnostic_detail"] = diagnostic_detail
+        if action:
+            item["action"] = action
         checks.append(item)
         if on_check:
             on_check(dict(item))
@@ -2122,6 +2193,10 @@ def health_check(on_check: Callable[[dict[str, str]], None] | None = None) -> di
 
     deployment_key_ready, deployment_key_detail = deployment_key_status()
     add("Codex Desktop 部署密钥", "pass" if deployment_key_ready else "warning", deployment_key_detail)
+    app_server_status, app_server_detail = inspect_host_app_server()
+    add("Codex App Server", app_server_status, app_server_detail)
+    session_status, session_detail = inspect_session_storage()
+    add("会话文件与索引", session_status, session_detail)
     add("目录写入权限", "pass" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "fail", "可写" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "控制台无法写入 Codex 数据目录")
 
     config = config_text()
@@ -2169,9 +2244,14 @@ def health_check(on_check: Callable[[dict[str, str]], None] | None = None) -> di
         add("当前供应商", "pass", f"{active.get('name', active_id)} ({active_id})")
         def add_supplier_check(item: dict[str, str]) -> None:
             name = "模型目录" if item["name"] == "上游模型目录" else item["name"]
-            add(f"供应商 · {name}", item["status"], item["detail"], item.get("diagnostic_detail"))
+            status = item["status"]
+            if name == "真实请求" and status == "warning" and item["detail"].startswith("测试「"):
+                status = "fail"
+            add(f"供应商 · {name}", status, item["detail"], item.get("diagnostic_detail"))
 
         diagnose_profile(active, on_check=add_supplier_check)
+        if normalize_profile(active)["mode"] == "official":
+            add("供应商 · 官方实时请求", "warning", "仅验证了登录快照格式；尚未发送官方模型请求")
 
     try:
         usage = shutil.disk_usage(CODEX_HOME)
@@ -2198,6 +2278,8 @@ def health_check_plan() -> list[dict[str, str]]:
         "Codex CLI",
         "Codex CLI 版本",
         "Codex Desktop 部署密钥",
+        "Codex App Server",
+        "会话文件与索引",
         "目录写入权限",
         "config.toml",
         "config.toml 语法",
@@ -2213,6 +2295,7 @@ def health_check_plan() -> list[dict[str, str]]:
         profile = normalize_profile(active)
         if profile["mode"] == "official":
             names.append("供应商 · 官方认证")
+            names.append("供应商 · 官方实时请求")
         else:
             names.extend([
                 "供应商 · Base URL",
