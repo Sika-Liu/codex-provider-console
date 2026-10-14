@@ -1381,7 +1381,7 @@ def diagnose_profile(
         snapshot = profile.get("auth_contents", "")
         try:
             validate_auth_snapshot(snapshot)
-            add("官方认证", "pass", "已捕获有效的官方登录快照")
+            add("官方认证", "pass", "官方登录快照格式有效")
         except HTTPException as exc:
             add("官方认证", "fail", str(exc.detail))
     else:
@@ -2250,8 +2250,6 @@ def health_check(on_check: Callable[[dict[str, str]], None] | None = None) -> di
             add(f"供应商 · {name}", status, item["detail"], item.get("diagnostic_detail"))
 
         diagnose_profile(active, on_check=add_supplier_check)
-        if normalize_profile(active)["mode"] == "official":
-            add("供应商 · 官方实时请求", "warning", "仅验证了登录快照格式；尚未发送官方模型请求")
 
     try:
         usage = shutil.disk_usage(CODEX_HOME)
@@ -2295,7 +2293,6 @@ def health_check_plan() -> list[dict[str, str]]:
         profile = normalize_profile(active)
         if profile["mode"] == "official":
             names.append("供应商 · 官方认证")
-            names.append("供应商 · 官方实时请求")
         else:
             names.extend([
                 "供应商 · Base URL",
