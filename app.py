@@ -2613,6 +2613,8 @@ def save_account_settings(request: AccountSecurityRequest) -> dict:
     global PANEL_USERNAME, PANEL_PASSWORD, SESSION_SECRET, COOKIE_SECURE
     if not request.new_password:
         raise HTTPException(400, "请输入新密码")
+    if current_password_matches(request.new_password):
+        raise HTTPException(400, "新密码不能与当前密码相同")
     settings = _read_auth_overrides()
     settings["panel_username"] = request.username
     settings["panel_cookie_secure"] = request.cookie_secure
