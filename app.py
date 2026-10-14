@@ -2557,10 +2557,8 @@ class PanelSettings(BaseModel):
     active_provider_id: str | None = Field(default=None, pattern=r"^(|[a-zA-Z0-9_-]{1,48})$")
 
 
-class AccountSecurityRequest(BaseModel):
-    username: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
-    new_password: str | None = Field(default=None, min_length=8, max_length=256)
-    cookie_secure: bool = False
+class AccountPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=8, max_length=256)
 
 
 class AccountUsernameRequest(BaseModel):
@@ -2613,31 +2611,24 @@ def get_account_settings() -> dict:
 
 
 @app.post("/api/account")
-def save_account_settings(request: AccountSecurityRequest) -> dict:
-    global PANEL_USERNAME, PANEL_PASSWORD, SESSION_SECRET, COOKIE_SECURE
-    if not request.new_password:
-        raise HTTPException(400, "请输入新密码")
+@app.post("/api/account/password")
+def save_account_password(request: AccountPasswordRequest) -> dict:
+    global PANEL_PASSWORD, SESSION_SECRET
     if current_password_matches(request.new_password):
         raise HTTPException(400, "新密码不能与当前密码相同")
     settings = _read_auth_overrides()
-    settings["panel_username"] = request.username
-    settings["panel_cookie_secure"] = request.cookie_secure
-    password_to_store = request.new_password
-    if request.new_password or not settings.get("panel_password_hash"):
-        salt = secrets.token_urlsafe(24)
-        settings["panel_password_salt"] = salt
-        settings["panel_password_hash"] = hashlib.pbkdf2_hmac(
-            "sha256", password_to_store.encode("utf-8"), salt.encode("utf-8"), 210_000
-        ).hex()
+    salt = secrets.token_urlsafe(24)
+    settings["panel_password_salt"] = salt
+    settings["panel_password_hash"] = hashlib.pbkdf2_hmac(
+        "sha256", request.new_password.encode("utf-8"), salt.encode("utf-8"), 210_000
+    ).hex()
     settings["panel_session_secret"] = secrets.token_urlsafe(32)
     write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
-    PANEL_USERNAME = request.username
     PANEL_PASSWORD = ""
     SESSION_SECRET = settings["panel_session_secret"]
-    COOKIE_SECURE = request.cookie_secure
     with LOGIN_FAILURES_LOCK:
         LOGIN_FAILURES.clear()
-    audit("account_security_settings_changed", username=request.username, cookie_secure=request.cookie_secure)
+    audit("account_password_changed", username=PANEL_USERNAME)
     return {"username": PANEL_USERNAME, "cookie_secure": COOKIE_SECURE, "sessions_invalidated": True}
 
 
@@ -3788,8 +3779,8 @@ document.querySelector('.console-sidebar')?.insertAdjacentHTML('afterbegin','<di
 document.body.insertAdjacentHTML('beforeend','<div id="account-password-mask" class="account-password-mask" role="dialog" aria-modal="true" aria-labelledby="account-password-title"><div class="panel-dialog account-password-dialog"><h3 id="account-password-title">修改密码</h3><p>设置新密码后，当前账号的其他登录会话将失效。</p><div class="account-password-field"><label for="account-new-password">新密码</label><div class="account-password-input"><input id="account-new-password" type="password" autocomplete="new-password" minlength="8"><button class="account-password-eye" type="button" data-password-target="account-new-password" aria-label="显示或隐藏新密码">◉</button></div></div><div class="account-password-field"><label for="account-confirm-password">确认新密码</label><div class="account-password-input"><input id="account-confirm-password" type="password" autocomplete="new-password" minlength="8"><button class="account-password-eye" type="button" data-password-target="account-confirm-password" aria-label="显示或隐藏确认密码">◉</button></div></div><div id="account-password-error" class="console-muted" style="min-height:20px;margin-top:10px;color:#b42318"></div><div class="panel-dialog-actions"><button id="account-password-cancel" class="btn light" type="button">取消</button><button id="account-password-confirm" class="btn" type="button">确认</button></div></div></div>');
 document.head.insertAdjacentHTML('beforeend','<style>#account-new-username{width:100%;box-sizing:border-box;padding:10px;border:1px solid #d2d6da;border-radius:7px;font:inherit}</style>');
 document.body.insertAdjacentHTML('beforeend','<div id="account-username-mask" class="account-password-mask" role="dialog" aria-modal="true" aria-labelledby="account-username-title"><div class="panel-dialog account-password-dialog"><h3 id="account-username-title">修改账号</h3><p>修改控制台登录账号后，所有登录会话将失效。密码保持不变。</p><div class="account-password-field"><label for="account-new-username">新账号</label><input id="account-new-username" type="text" autocomplete="username" maxlength="80" spellcheck="false"><small class="console-muted">仅支持英文字母、数字、下划线、点和连字符。</small></div><div id="account-username-error" class="console-muted" style="min-height:20px;margin-top:10px;color:#b42318"></div><div class="panel-dialog-actions"><button id="account-username-cancel" class="btn light" type="button">取消</button><button id="account-username-confirm" class="btn" type="button">确认</button></div></div></div>');
-let accountMenuUser='',accountCookieSecure=false;
-async function loadAccountMenu(){try{const account=await api('/api/account');accountMenuUser=account.username||'账户';accountCookieSecure=Boolean(account.cookie_secure);$('#account-menu-name').textContent=accountMenuUser;document.getElementById('account-menu').style.display='block'}catch{}}
+let accountMenuUser='';
+async function loadAccountMenu(){try{const account=await api('/api/account');accountMenuUser=account.username||'账户';$('#account-menu-name').textContent=accountMenuUser;document.getElementById('account-menu').style.display='block'}catch{}}
 function closeAccountMenu(){document.getElementById('account-menu')?.classList.remove('open')}
 function openPasswordDialog(){closeAccountMenu();$('#account-new-password').value='';$('#account-confirm-password').value='';$('#account-password-error').textContent='';$('#account-password-mask').classList.add('show');$('#account-new-password').focus()}
 function closePasswordDialog(){$('#account-password-mask').classList.remove('show')}
@@ -3797,7 +3788,7 @@ function openUsernameDialog(){closeAccountMenu();$('#account-new-username').valu
 function closeUsernameDialog(){$('#account-username-mask').classList.remove('show')}
 async function submitUsernameChange(){const username=$('#account-new-username').value.trim(),error=$('#account-username-error');if(!/^[A-Za-z0-9_.-]{1,80}$/.test(username)){error.textContent='账号只能使用 1–80 位英文字母、数字、下划线、点或连字符。';return}if(username===accountMenuUser){error.textContent='新账号不能与当前账号相同。';return}const button=$('#account-username-confirm');button.disabled=true;button.textContent='保存中…';try{await api('/api/account/username',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})});closeUsernameDialog();await panelDialog({title:'账号已修改',message:'账号修改成功，当前会话将失效，请使用新账号重新登录。',confirmLabel:'重新登录',showCancel:false});logoutConsole()}catch(e){error.textContent=e.message}finally{button.disabled=false;button.textContent='确认'}}
 function togglePasswordField(button){const input=document.getElementById(button.dataset.passwordTarget);if(!input)return;input.type=input.type==='password'?'text':'password';button.textContent=input.type==='password'?'◉':'◌'}
-async function submitPasswordChange(){const password=$('#account-new-password').value,confirm=$('#account-confirm-password').value,error=$('#account-password-error');if(password.length<8){error.textContent='新密码至少需要 8 位。';return}if(password!==confirm){error.textContent='两次输入的密码不一致。';return}const button=$('#account-password-confirm');button.disabled=true;button.textContent='保存中…';try{await api('/api/account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:accountMenuUser||'admin',new_password:password,cookie_secure:accountCookieSecure})});closePasswordDialog();await panelDialog({title:'密码已修改',message:'密码修改成功，当前会话将失效，请使用新密码重新登录。',confirmLabel:'重新登录',showCancel:false});logoutConsole()}catch(e){error.textContent=e.message}finally{button.disabled=false;button.textContent='确认'}}
+async function submitPasswordChange(){const password=$('#account-new-password').value,confirm=$('#account-confirm-password').value,error=$('#account-password-error');if(password.length<8){error.textContent='新密码至少需要 8 位。';return}if(password!==confirm){error.textContent='两次输入的密码不一致。';return}const button=$('#account-password-confirm');button.disabled=true;button.textContent='保存中…';try{await api('/api/account/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:password})});closePasswordDialog();await panelDialog({title:'密码已修改',message:'密码修改成功，当前会话将失效，请使用新密码重新登录。',confirmLabel:'重新登录',showCancel:false});logoutConsole()}catch(e){error.textContent=e.message}finally{button.disabled=false;button.textContent='确认'}}
 document.getElementById('account-menu-toggle')?.addEventListener('click',()=>document.getElementById('account-menu')?.classList.toggle('open'));
 document.getElementById('account-change-username')?.addEventListener('click',openUsernameDialog);document.getElementById('account-change-password')?.addEventListener('click',openPasswordDialog);document.getElementById('account-logout')?.addEventListener('click',logoutConsole);document.getElementById('account-username-cancel')?.addEventListener('click',closeUsernameDialog);document.getElementById('account-username-confirm')?.addEventListener('click',submitUsernameChange);document.getElementById('account-new-username')?.addEventListener('keydown',event=>{if(event.key==='Enter')submitUsernameChange()});document.getElementById('account-password-cancel')?.addEventListener('click',closePasswordDialog);document.getElementById('account-password-confirm')?.addEventListener('click',submitPasswordChange);document.querySelectorAll('.account-password-eye').forEach(button=>button.addEventListener('click',()=>togglePasswordField(button)));document.addEventListener('click',event=>{const menu=document.getElementById('account-menu');if(menu&&!menu.contains(event.target))closeAccountMenu()});loadAccountMenu();
  document.body.insertAdjacentHTML('beforeend', `<section id="console-health" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>健康检查</h2><p class="panel-note">检查 Codex 数据目录、配置文件、认证、当前供应商和磁盘空间，确认服务器是否满足使用条件。</p></div><button class="btn" onclick="runHealth()">立即检查</button></div><div id="health-summary" class="console-health-summary">尚未执行检查。</div><div id="health-checks"></div></div></section><section id="console-proxy" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>反向代理</h2><p class="panel-note">部署独立 Nginx 容器，自动校验证书并重载。证书和私钥仅用于本次部署，不会保存到面板设置。</p></div><span id="proxy-status" class="proxy-status">正在读取状态…</span></div><div id="proxy-success-view" class="proxy-success-view" hidden><div class="proxy-success-card"><div class="proxy-success-icon">✓</div><div><h3 id="proxy-success-title">HTTPS 反向代理已运行</h3><p id="proxy-success-copy">HTTPS 入口已就绪。</p></div></div><dl class="proxy-summary"><div><dt>访问地址</dt><dd><a id="proxy-public-url" target="_blank" rel="noopener"></a></dd></div><div><dt>上游服务</dt><dd id="proxy-success-upstream"></dd></div></dl><div class="console-form-actions"><button class="btn" type="button" id="proxy-enable-secure">启用安全模式</button><button class="btn" type="button" id="proxy-disable-secure">关闭安全模式</button><button class="btn" type="button" id="proxy-edit">修改配置</button><button class="btn light" type="button" id="proxy-disable">停用代理</button></div></div><div id="proxy-form-view"><div class="proxy-warning">部署后请在云防火墙中仅公开 80/443，并限制面板端口 8787 的直接访问。</div><div class="console-form"><div><label>域名</label><input id="proxy-domain" placeholder="console.example.com"></div><div><label>上游地址</label><input id="proxy-upstream" value="codex-provider-console:8787"></div><div class="wide"><label>TLS 证书（PEM）</label><textarea id="proxy-certificate" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea></div><div class="wide"><label>TLS 私钥（PEM）</label><textarea id="proxy-private-key" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----"></textarea></div><div class="wide"><label>Nginx 部署预览</label><pre id="proxy-config" class="console-code">填写域名后生成</pre></div></div><div class="console-form-actions"><button class="btn" type="button" id="proxy-apply">校验并部署</button><button class="btn light" type="button" id="proxy-cancel-edit" hidden>取消修改</button></div></div><div id="proxy-notice" class="notice"></div></div></section>`);
