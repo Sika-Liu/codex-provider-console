@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import secrets
+import smtplib
 import sqlite3
 import subprocess
 import tomllib
@@ -15,6 +16,7 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -238,8 +240,16 @@ COOKIE_SECURE = os.environ.get("PANEL_COOKIE_SECURE", "false").lower() in {"1", 
 PANEL_BIND = os.environ.get("PANEL_BIND", "127.0.0.1")
 SESSION_COOKIE = "codex_panel_session"
 SESSION_MAX_AGE = 12 * 60 * 60
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
-PANEL_RECOVERY_FROM_EMAIL = os.environ.get("PANEL_RECOVERY_FROM_EMAIL", "").strip()
+SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
+SMTP_FROM = os.environ.get("SMTP_FROM", "").strip()
+SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "Codex 控制台").strip()
+SMTP_USE_SSL = os.environ.get("SMTP_USE_SSL", "1").lower() in {"1", "true", "yes"}
+try:
+    SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+except ValueError:
+    SMTP_PORT = 0
 RECOVERY_CODE_LIFETIME = 10 * 60
 RECOVERY_GRANT_LIFETIME = 5 * 60
 RECOVERY_LOCK = threading.Lock()
@@ -285,7 +295,7 @@ def current_password_matches(password: str) -> bool:
 
 
 def recovery_email_ready() -> bool:
-    return bool(RESEND_API_KEY and PANEL_RECOVERY_FROM_EMAIL)
+    return bool(SMTP_HOST and 1 <= SMTP_PORT <= 65535 and SMTP_USERNAME and SMTP_PASSWORD and SMTP_FROM)
 
 
 def masked_recovery_email(email: str) -> str:
@@ -326,23 +336,19 @@ def recovery_send_allowed(action: str, client_key: str) -> bool:
 def send_recovery_email(recipient: str, subject: str, body: str) -> None:
     if not recovery_email_ready():
         raise HTTPException(503, "邮件找回尚未配置，请通过服务器 SSH 恢复")
-    payload = json.dumps({
-        "from": PANEL_RECOVERY_FROM_EMAIL,
-        "to": [recipient],
-        "subject": subject,
-        "text": body,
-    }).encode("utf-8")
-    request = urllib.request.Request(
-        "https://api.resend.com/emails",
-        data=payload,
-        headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
-        method="POST",
-    )
+    message = EmailMessage()
+    message["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM}>" if SMTP_FROM_NAME else SMTP_FROM
+    message["To"] = recipient
+    message["Subject"] = subject
+    message.set_content(body)
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            if response.status not in {200, 201, 202}:
-                raise HTTPException(502, "邮件发送失败，请稍后重试")
-    except (urllib.error.URLError, TimeoutError) as error:
+        client = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=10) if SMTP_USE_SSL else smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
+        with client:
+            if not SMTP_USE_SSL:
+                client.starttls()
+            client.login(SMTP_USERNAME, SMTP_PASSWORD)
+            client.send_message(message)
+    except (OSError, smtplib.SMTPException) as error:
         raise HTTPException(502, "邮件发送失败，请稍后重试") from error
 
 
@@ -4019,7 +4025,7 @@ function closePasswordDialog(){$('#account-password-mask').classList.remove('sho
 function openUsernameDialog(){closeAccountMenu();$('#account-new-username').value=accountMenuUser;$('#account-username-error').textContent='';$('#account-username-mask').classList.add('show');$('#account-new-username').focus();$('#account-new-username').select()}
 function closeUsernameDialog(){$('#account-username-mask').classList.remove('show')}
 async function submitUsernameChange(){const username=$('#account-new-username').value.trim(),error=$('#account-username-error');if(!/^[A-Za-z0-9_.-]{1,80}$/.test(username)){error.textContent='账号只能使用 1–80 位英文字母、数字、下划线、点或连字符。';return}if(username===accountMenuUser){error.textContent='新账号不能与当前账号相同。';return}const button=$('#account-username-confirm');button.disabled=true;button.textContent='保存中…';try{await api('/api/account/username',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})});closeUsernameDialog();await panelDialog({title:'账号已修改',message:'账号修改成功，当前会话将失效，请使用新账号重新登录。',confirmLabel:'重新登录',showCancel:false});logoutConsole()}catch(e){error.textContent=e.message}finally{button.disabled=false;button.textContent='确认'}}
-async function openRecoveryEmailDialog(){closeAccountMenu();$('#account-recovery-start').hidden=false;$('#account-recovery-verify').hidden=true;$('#account-recovery-email-input').value='';$('#account-recovery-code').value='';$('#account-recovery-error').textContent='';$('#account-recovery-confirm').textContent='发送验证码';$('#account-recovery-mask').classList.add('show');try{const status=await api('/api/account/recovery-email');$('#account-recovery-title').textContent=status.bound?'更换恢复邮箱':'绑定恢复邮箱';$('#account-recovery-description').textContent=status.configured?(status.bound?'当前恢复邮箱：'+status.email+'。更换时将向新邮箱发送验证码。':'绑定后可在登录页通过邮件验证码重置密码。'):'邮件服务尚未配置，请先在服务器设置 Resend API Key 和发件地址。';$('#account-recovery-confirm').disabled=!status.configured;if(status.configured)$('#account-recovery-email-input').focus()}catch(e){$('#account-recovery-error').textContent=e.message}}
+async function openRecoveryEmailDialog(){closeAccountMenu();$('#account-recovery-start').hidden=false;$('#account-recovery-verify').hidden=true;$('#account-recovery-email-input').value='';$('#account-recovery-code').value='';$('#account-recovery-error').textContent='';$('#account-recovery-confirm').textContent='发送验证码';$('#account-recovery-mask').classList.add('show');try{const status=await api('/api/account/recovery-email');$('#account-recovery-title').textContent=status.bound?'更换恢复邮箱':'绑定恢复邮箱';$('#account-recovery-description').textContent=status.configured?(status.bound?'当前恢复邮箱：'+status.email+'。更换时将向新邮箱发送验证码。':'绑定后可在登录页通过邮件验证码重置密码。'):'邮件发送服务尚未就绪，请联系管理员。';$('#account-recovery-confirm').disabled=!status.configured;if(status.configured)$('#account-recovery-email-input').focus()}catch(e){$('#account-recovery-error').textContent=e.message}}
 function closeRecoveryEmailDialog(){$('#account-recovery-mask').classList.remove('show')}
 async function submitRecoveryEmail(){const button=$('#account-recovery-confirm'),error=$('#account-recovery-error');error.textContent='';button.disabled=true;button.textContent='处理中…';try{if($('#account-recovery-verify').hidden){const email=$('#account-recovery-email-input').value.trim();if(!email)throw Error('请输入恢复邮箱。');await api('/api/account/recovery-email/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});$('#account-recovery-start').hidden=true;$('#account-recovery-verify').hidden=false;button.textContent='验证并绑定';$('#account-recovery-code').focus()}else{const code=$('#account-recovery-code').value.trim();if(!/^[0-9]{8}$/.test(code))throw Error('请输入 8 位邮箱验证码。');await api('/api/account/recovery-email/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});closeRecoveryEmailDialog();await panelDialog({title:'恢复邮箱已验证',message:'现在可以在登录页使用“忘记密码”通过该邮箱重置密码。',confirmLabel:'知道了',showCancel:false})}}catch(e){error.textContent=e.message}finally{button.disabled=false;if($('#account-recovery-verify').hidden)button.textContent='发送验证码';else button.textContent='验证并绑定'}}
 function togglePasswordField(button){const input=document.getElementById(button.dataset.passwordTarget);if(!input)return;input.type=input.type==='password'?'text':'password';button.textContent=input.type==='password'?'◉':'◌'}
