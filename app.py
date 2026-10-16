@@ -238,6 +238,13 @@ COOKIE_SECURE = os.environ.get("PANEL_COOKIE_SECURE", "false").lower() in {"1", 
 PANEL_BIND = os.environ.get("PANEL_BIND", "127.0.0.1")
 SESSION_COOKIE = "codex_panel_session"
 SESSION_MAX_AGE = 12 * 60 * 60
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
+PANEL_RECOVERY_FROM_EMAIL = os.environ.get("PANEL_RECOVERY_FROM_EMAIL", "").strip()
+RECOVERY_CODE_LIFETIME = 10 * 60
+RECOVERY_GRANT_LIFETIME = 5 * 60
+RECOVERY_LOCK = threading.Lock()
+RECOVERY_PENDING: dict[str, dict] = {}
+RECOVERY_SEND_EVENTS: dict[str, list[float]] = {}
 LOGIN_TIMEOUT_SECONDS = 10
 LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
 try:
@@ -275,6 +282,68 @@ def current_password_matches(password: str) -> bool:
         candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 210_000).hex()
         return hmac.compare_digest(candidate, stored_hash)
     return bool(PANEL_PASSWORD) and hmac.compare_digest(password, PANEL_PASSWORD)
+
+
+def recovery_email_ready() -> bool:
+    return bool(RESEND_API_KEY and PANEL_RECOVERY_FROM_EMAIL)
+
+
+def masked_recovery_email(email: str) -> str:
+    if not email or "@" not in email:
+        return ""
+    name, domain = email.rsplit("@", 1)
+    return name[:1] + "***@" + domain
+
+
+def recovery_code_digest(code: str, salt: str) -> str:
+    return hashlib.sha256(f"{salt}:{code}".encode("utf-8")).hexdigest()
+
+
+def new_recovery_code() -> tuple[str, dict]:
+    code = f"{secrets.randbelow(100_000_000):08d}"
+    salt = secrets.token_urlsafe(24)
+    return code, {
+        "salt": salt,
+        "digest": recovery_code_digest(code, salt),
+        "expires": time.time() + RECOVERY_CODE_LIFETIME,
+        "attempts": 0,
+    }
+
+
+def recovery_send_allowed(action: str, client_key: str) -> bool:
+    now = time.monotonic()
+    with RECOVERY_LOCK:
+        for key, limit in ((f"{action}:global", 5), (f"{action}:client:{client_key}", 3)):
+            recent = [sent for sent in RECOVERY_SEND_EVENTS.get(key, []) if now - sent < 15 * 60]
+            RECOVERY_SEND_EVENTS[key] = recent
+            if len(recent) >= limit:
+                return False
+        for key in (f"{action}:global", f"{action}:client:{client_key}"):
+            RECOVERY_SEND_EVENTS[key].append(now)
+    return True
+
+
+def send_recovery_email(recipient: str, subject: str, body: str) -> None:
+    if not recovery_email_ready():
+        raise HTTPException(503, "邮件找回尚未配置，请通过服务器 SSH 恢复")
+    payload = json.dumps({
+        "from": PANEL_RECOVERY_FROM_EMAIL,
+        "to": [recipient],
+        "subject": subject,
+        "text": body,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            if response.status not in {200, 201, 202}:
+                raise HTTPException(502, "邮件发送失败，请稍后重试")
+    except (urllib.error.URLError, TimeoutError) as error:
+        raise HTTPException(502, "邮件发送失败，请稍后重试") from error
 
 
 class DeviceLoginSession:
@@ -467,12 +536,24 @@ def clear_failed_logins(client_key: str) -> None:
         LOGIN_FAILURES.pop(client_key, None)
 
 
-LOGIN_HTML = '''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录 · Codex 控制台</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f6f8;color:#202124;font:14px Arial,"Microsoft YaHei",sans-serif}.login{width:min(380px,calc(100vw - 36px));background:#fff;border:1px solid #dde1e6;border-radius:8px;padding:28px;box-sizing:border-box;box-shadow:0 12px 32px #0000000d}h1{margin:0;font-size:22px}p{color:#687078;line-height:1.5}label{display:block;font-weight:700;margin:17px 0 7px}input{box-sizing:border-box;width:100%;border:1px solid #cfd5da;border-radius:6px;padding:10px 11px;font:inherit}button{width:100%;border:0;border-radius:6px;background:#202124;color:#fff;padding:11px;margin-top:20px;font:inherit;font-weight:700;cursor:pointer}#message{min-height:20px;color:#bd3131;margin-top:12px}</style></head><body><main class="login"><h1>Codex 控制台</h1><p>请输入管理员账号和密码。</p><form id="login"><label>用户名<input id="username" autocomplete="username" required autofocus></label><label>密码<input id="password" type="password" autocomplete="current-password" required></label><button>登录</button><div id="message"></div></form></main><script>document.querySelector('#login').addEventListener('submit',async e=>{e.preventDefault();const r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:username.value,password:password.value})});if(r.ok)location.href='/';else{const d=await r.json().catch(()=>({}));message.textContent=d.detail||'登录失败。'}})</script></body></html>'''
+LOGIN_HTML = '''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录 · Codex 控制台</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f6f8;color:#202124;font:14px Arial,"Microsoft YaHei",sans-serif}.login{width:min(380px,calc(100vw - 36px));background:#fff;border:1px solid #dde1e6;border-radius:8px;padding:28px;box-sizing:border-box;box-shadow:0 12px 32px #0000000d}h1{margin:0;font-size:22px}p{color:#687078;line-height:1.5}label{display:block;font-weight:700;margin:17px 0 7px}input{box-sizing:border-box;width:100%;border:1px solid #cfd5da;border-radius:6px;padding:10px 11px;font:inherit}button{width:100%;border:0;border-radius:6px;background:#202124;color:#fff;padding:11px;margin-top:20px;font:inherit;font-weight:700;cursor:pointer}button:disabled{opacity:.6;cursor:wait}button.link{background:none;color:#365d80;padding:5px;margin-top:14px;text-align:left;font-weight:400}button.link:hover{text-decoration:underline}.message{min-height:20px;color:#bd3131;margin-top:12px;line-height:1.5}[hidden]{display:none!important}</style></head><body><main class="login"><div id="login-view"><h1>Codex 控制台</h1><p>请输入管理员账号和密码。</p><form id="login"><label>用户名<input id="username" autocomplete="username" required autofocus></label><label>密码<input id="password" type="password" autocomplete="current-password" required></label><button>登录</button><div id="message" class="message"></div></form><button id="forgot-link" class="link" type="button">忘记密码？</button></div><div id="recovery-view" hidden><h1>找回密码</h1><p>验证码只发送至已绑定并验证的恢复邮箱。</p><div id="recovery-request"><button id="recovery-send" type="button">发送验证码</button></div><form id="recovery-code-form" hidden><label>邮箱验证码<input id="recovery-code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" pattern="[0-9]{8}" required></label><button>验证验证码</button></form><form id="recovery-password-form" hidden><label>新密码<input id="recovery-new-password" type="password" autocomplete="new-password" minlength="8" required></label><label>确认新密码<input id="recovery-confirm-password" type="password" autocomplete="new-password" minlength="8" required></label><button>设置新密码</button></form><div id="recovery-message" class="message"></div><button id="recovery-back" class="link" type="button">返回登录</button></div></main><script>
+const byId=id=>document.getElementById(id);let resetToken='';
+async function recoveryPost(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json().catch(()=>({}));if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'请求失败，请稍后重试');return data}
+byId('login').addEventListener('submit',async event=>{event.preventDefault();try{await recoveryPost('/login',{username:byId('username').value,password:byId('password').value});location.href='/'}catch(error){byId('message').textContent=error.message}});
+byId('forgot-link').addEventListener('click',()=>{byId('login-view').hidden=true;byId('recovery-view').hidden=false;byId('recovery-message').textContent=''});
+byId('recovery-back').addEventListener('click',()=>{byId('recovery-view').hidden=true;byId('login-view').hidden=false;resetToken='';byId('message').textContent=''});
+byId('recovery-send').addEventListener('click',async()=>{const button=byId('recovery-send');button.disabled=true;byId('recovery-message').textContent='';try{const result=await recoveryPost('/api/password-reset/request',{});byId('recovery-code-form').hidden=false;byId('recovery-message').textContent=result.message||'验证码已发送。';byId('recovery-code').focus()}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
+byId('recovery-code-form').addEventListener('submit',async event=>{event.preventDefault();const button=event.currentTarget.querySelector('button');button.disabled=true;byId('recovery-message').textContent='';try{const result=await recoveryPost('/api/password-reset/verify',{code:byId('recovery-code').value.trim()});resetToken=result.reset_token;byId('recovery-code-form').hidden=true;byId('recovery-request').hidden=true;byId('recovery-password-form').hidden=false;byId('recovery-message').textContent='验证成功，请设置新密码。';byId('recovery-new-password').focus()}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
+byId('recovery-password-form').addEventListener('submit',async event=>{event.preventDefault();const password=byId('recovery-new-password').value;if(password!==byId('recovery-confirm-password').value){byId('recovery-message').textContent='两次输入的密码不一致。';return}const button=event.currentTarget.querySelector('button');button.disabled=true;byId('recovery-message').textContent='';try{await recoveryPost('/api/password-reset/complete',{reset_token:resetToken,new_password:password});resetToken='';byId('recovery-view').hidden=true;byId('login-view').hidden=false;byId('password').value='';byId('message').textContent='密码重置成功，请使用新密码登录。'}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
+</script></body></html>'''
 
 
 @app.middleware("http")
 async def authentication(request: Request, call_next):
-    if not AUTH_ENABLED or request.url.path in {"/login", "/logout"}:
+    if not AUTH_ENABLED or request.url.path in {
+        "/login", "/logout", "/api/password-reset/request",
+        "/api/password-reset/verify", "/api/password-reset/complete",
+    }:
         return await call_next(request)
     if not auth_configured():
         detail = "Panel authentication is enabled but not configured. Run bash install.sh --force."
@@ -2565,6 +2646,20 @@ class AccountUsernameRequest(BaseModel):
     username: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
 
 
+class RecoveryEmailRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    current_password: str = Field(min_length=1, max_length=256)
+
+
+class RecoveryCodeRequest(BaseModel):
+    code: str = Field(pattern=r"^[0-9]{8}$")
+
+
+class ResetPasswordRequest(BaseModel):
+    reset_token: str = Field(min_length=32, max_length=128)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
 class ReverseProxyApplyRequest(BaseModel):
     domain: str = Field(min_length=1, max_length=253)
     upstream: str = Field(min_length=1, max_length=255)
@@ -2647,6 +2742,144 @@ def save_account_username(request: AccountUsernameRequest) -> dict:
         LOGIN_FAILURES.clear()
     audit("account_username_changed", username=request.username)
     return {"username": PANEL_USERNAME, "sessions_invalidated": True}
+
+
+@app.get("/api/account/recovery-email")
+def get_recovery_email() -> dict:
+    email = str(_read_auth_overrides().get("panel_recovery_email") or "")
+    return {"configured": recovery_email_ready(), "email": masked_recovery_email(email), "bound": bool(email)}
+
+
+@app.post("/api/account/recovery-email/request")
+def request_recovery_email_binding(details: RecoveryEmailRequest, request: Request) -> dict:
+    if not recovery_email_ready():
+        raise HTTPException(503, "邮件服务尚未配置")
+    if not current_password_matches(details.current_password):
+        raise HTTPException(401, "当前密码不正确")
+    email = details.email.strip().lower()
+    if email == _read_auth_overrides().get("panel_recovery_email"):
+        raise HTTPException(400, "该邮箱已经绑定")
+    if not recovery_send_allowed("bind", login_client_key(request)):
+        raise HTTPException(429, "验证码发送过于频繁，请稍后重试")
+    code, pending = new_recovery_code()
+    pending.update({"email": email, "session_secret": SESSION_SECRET})
+    with RECOVERY_LOCK:
+        RECOVERY_PENDING["bind"] = pending
+    try:
+        send_recovery_email(email, "验证 Codex 控制台恢复邮箱", f"邮箱绑定验证码：{code}。10 分钟内有效；如非本人操作，请忽略。")
+    except HTTPException:
+        with RECOVERY_LOCK:
+            if RECOVERY_PENDING.get("bind") is pending:
+                RECOVERY_PENDING.pop("bind", None)
+        raise
+    return {"sent": True, "expires_in": RECOVERY_CODE_LIFETIME}
+
+
+@app.post("/api/account/recovery-email/verify")
+def verify_recovery_email_binding(details: RecoveryCodeRequest) -> dict:
+    with RECOVERY_LOCK:
+        pending = RECOVERY_PENDING.get("bind")
+        if not pending or pending["expires"] < time.time() or pending["session_secret"] != SESSION_SECRET:
+            RECOVERY_PENDING.pop("bind", None)
+            raise HTTPException(400, "验证码无效或已过期")
+        pending["attempts"] += 1
+        if pending["attempts"] > 5:
+            RECOVERY_PENDING.pop("bind", None)
+            raise HTTPException(400, "验证码尝试次数过多，请重新发送")
+        if not hmac.compare_digest(recovery_code_digest(details.code, pending["salt"]), pending["digest"]):
+            raise HTTPException(400, "验证码不正确")
+        email = pending["email"]
+        settings = _read_auth_overrides()
+        old_email = str(settings.get("panel_recovery_email") or "")
+        settings["panel_recovery_email"] = email
+        write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+        RECOVERY_PENDING.pop("bind", None)
+        RECOVERY_PENDING.pop("reset", None)
+        RECOVERY_PENDING.pop("grant", None)
+    if old_email and old_email != email:
+        try:
+            send_recovery_email(old_email, "Codex 控制台恢复邮箱已更换", "控制台恢复邮箱已更换。如非本人操作，请通过服务器 SSH 立即重置管理员密码。")
+        except HTTPException:
+            audit("recovery_email_change_notice_failed")
+    audit("recovery_email_bound")
+    return {"bound": True, "email": masked_recovery_email(email)}
+
+
+@app.post("/api/password-reset/request")
+def request_password_reset(request: Request) -> dict:
+    if not recovery_email_ready():
+        raise HTTPException(503, "邮件找回尚未配置，请通过服务器 SSH 恢复")
+    if not recovery_send_allowed("reset", login_client_key(request)):
+        raise HTTPException(429, "请求过于频繁，请稍后重试")
+    email = str(_read_auth_overrides().get("panel_recovery_email") or "")
+    if email:
+        code, pending = new_recovery_code()
+        pending.update({"email": email, "session_secret": SESSION_SECRET})
+        with RECOVERY_LOCK:
+            RECOVERY_PENDING["reset"] = pending
+            RECOVERY_PENDING.pop("grant", None)
+        try:
+            send_recovery_email(email, "重置 Codex 控制台密码", f"密码重置验证码：{code}。10 分钟内有效；如非本人操作，请忽略。")
+        except HTTPException:
+            with RECOVERY_LOCK:
+                if RECOVERY_PENDING.get("reset") is pending:
+                    RECOVERY_PENDING.pop("reset", None)
+            raise
+    return {"sent": True, "message": "若已绑定恢复邮箱，验证码已发送。"}
+
+
+@app.post("/api/password-reset/verify")
+def verify_password_reset(details: RecoveryCodeRequest) -> dict:
+    with RECOVERY_LOCK:
+        pending = RECOVERY_PENDING.get("reset")
+        email = str(_read_auth_overrides().get("panel_recovery_email") or "")
+        if not pending or pending["expires"] < time.time() or pending["session_secret"] != SESSION_SECRET or pending["email"] != email:
+            RECOVERY_PENDING.pop("reset", None)
+            raise HTTPException(400, "验证码无效或已过期")
+        pending["attempts"] += 1
+        if pending["attempts"] > 5:
+            RECOVERY_PENDING.pop("reset", None)
+            raise HTTPException(400, "验证码尝试次数过多，请重新发送")
+        if not hmac.compare_digest(recovery_code_digest(details.code, pending["salt"]), pending["digest"]):
+            raise HTTPException(400, "验证码不正确")
+        token = secrets.token_urlsafe(32)
+        RECOVERY_PENDING["grant"] = {
+            "digest": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            "expires": time.time() + RECOVERY_GRANT_LIFETIME,
+            "session_secret": SESSION_SECRET,
+            "email": email,
+        }
+        RECOVERY_PENDING.pop("reset", None)
+    return {"reset_token": token, "expires_in": RECOVERY_GRANT_LIFETIME}
+
+
+@app.post("/api/password-reset/complete")
+def complete_password_reset(details: ResetPasswordRequest) -> dict:
+    global PANEL_PASSWORD, SESSION_SECRET
+    with RECOVERY_LOCK:
+        grant = RECOVERY_PENDING.get("grant")
+        email = str(_read_auth_overrides().get("panel_recovery_email") or "")
+        token_digest = hashlib.sha256(details.reset_token.encode("utf-8")).hexdigest()
+        if not grant or grant["expires"] < time.time() or grant["session_secret"] != SESSION_SECRET or grant["email"] != email or not hmac.compare_digest(token_digest, grant["digest"]):
+            raise HTTPException(400, "重置凭证无效或已过期")
+        if current_password_matches(details.new_password):
+            raise HTTPException(400, "新密码不能与当前密码相同")
+        settings = _read_auth_overrides()
+        salt = secrets.token_urlsafe(24)
+        settings["panel_password_salt"] = salt
+        settings["panel_password_hash"] = hashlib.pbkdf2_hmac(
+            "sha256", details.new_password.encode("utf-8"), salt.encode("utf-8"), 210_000
+        ).hex()
+        settings["panel_session_secret"] = secrets.token_urlsafe(32)
+        write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+        PANEL_PASSWORD = ""
+        SESSION_SECRET = settings["panel_session_secret"]
+        RECOVERY_PENDING.pop("grant", None)
+        RECOVERY_PENDING.pop("bind", None)
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.clear()
+    audit("account_password_reset")
+    return {"reset": True, "sessions_invalidated": True}
 
 
 @app.get("/api/common-config")
@@ -3775,10 +4008,12 @@ async function testCurrent(){if(providerDiagnosticPoll)return;try{renderProvider
  document.body.insertAdjacentHTML('afterbegin', `<aside class="console-sidebar"><div class="console-brand">Codex 控制台<small>通用服务器管理</small></div><nav class="console-nav"><button data-section="providers" onclick="openConsoleSection('providers')">供应商配置</button><button data-section="health" onclick="openConsoleSection('health')">健康检查</button><button data-section="proxy" onclick="openConsoleSection('proxy')">反向代理</button></nav></aside>`);
  document.querySelector('.top')?.classList.add('console-content');document.querySelectorAll('.page,.detail-top,.detail-main').forEach(e=>e.classList.add('console-content'));
 document.head.insertAdjacentHTML('beforeend','<style>.account-menu{display:none;position:relative;order:3;margin-top:auto;width:100%}.account-menu-toggle{display:flex;align-items:center;justify-content:space-between;width:100%;box-sizing:border-box;gap:7px;border:1px solid #41464d;border-radius:8px;background:#2a2d31;color:#f7f8fa;padding:10px 12px;font:inherit;cursor:pointer;text-align:left;transition:background .15s,border-color .15s}.account-menu-toggle:hover{background:#34373b;border-color:#555c64}.account-menu-chevron{font-size:11px;color:#aeb4bb}.account-menu-list{display:none;position:absolute;left:0;right:auto;bottom:calc(100% + 8px);top:auto;z-index:80;min-width:184px;padding:6px;border:1px solid #41464d;border-radius:8px;background:#2a2d31;box-shadow:none}.account-menu.open .account-menu-list{display:grid}.account-menu-list button{border:0;border-radius:6px;background:transparent;color:#e7eaee;padding:9px 10px;text-align:left;font:inherit;cursor:pointer;transition:background .15s,color .15s}.account-menu-list button:hover{background:#3a3f45;color:#fff}.account-menu-list button:last-child{color:#f1a3a3}.account-menu-list button:last-child:hover{background:#4a3033;color:#ffc4c4}.account-password-mask{display:none;position:fixed;inset:0;z-index:1250;background:#11182773;align-items:center;justify-content:center;padding:20px}.account-password-mask.show{display:flex}.account-password-dialog{width:min(430px,100%)}.account-password-field{margin-top:14px}.account-password-field label{display:block;margin-bottom:6px;color:#4d5560;font-size:12px}.account-password-input{position:relative}.account-password-input input{width:100%;box-sizing:border-box;padding:10px 42px 10px 10px;border:1px solid #d2d6da;border-radius:7px;font:inherit}.account-password-eye{position:absolute;right:5px;top:4px;width:34px;height:34px;border:0;border-radius:5px;background:transparent;color:#69717b;cursor:pointer}.account-password-eye:hover{background:#f1f4f6}</style>');
-document.querySelector('.console-sidebar')?.insertAdjacentHTML('afterbegin','<div id="account-menu" class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" type="button"><span id="account-menu-name">账户</span><span class="account-menu-chevron">▾</span></button><div class="account-menu-list"><button id="account-change-username" type="button">修改账号</button><button id="account-change-password" type="button">修改密码</button><button id="account-logout" type="button">退出登录</button></div></div>');
+document.querySelector('.console-sidebar')?.insertAdjacentHTML('afterbegin','<div id="account-menu" class="account-menu"><button id="account-menu-toggle" class="account-menu-toggle" type="button"><span id="account-menu-name">账户</span><span class="account-menu-chevron">▾</span></button><div class="account-menu-list"><button id="account-change-username" type="button">修改账号</button><button id="account-change-password" type="button">修改密码</button><button id="account-recovery-email" type="button">绑定恢复邮箱</button><button id="account-logout" type="button">退出登录</button></div></div>');
 document.body.insertAdjacentHTML('beforeend','<div id="account-password-mask" class="account-password-mask" role="dialog" aria-modal="true" aria-labelledby="account-password-title"><div class="panel-dialog account-password-dialog"><h3 id="account-password-title">修改密码</h3><p>设置新密码后，当前账号的其他登录会话将失效。</p><div class="account-password-field"><label for="account-new-password">新密码</label><div class="account-password-input"><input id="account-new-password" type="password" autocomplete="new-password" minlength="8"><button class="account-password-eye" type="button" data-password-target="account-new-password" aria-label="显示或隐藏新密码">◉</button></div></div><div class="account-password-field"><label for="account-confirm-password">确认新密码</label><div class="account-password-input"><input id="account-confirm-password" type="password" autocomplete="new-password" minlength="8"><button class="account-password-eye" type="button" data-password-target="account-confirm-password" aria-label="显示或隐藏确认密码">◉</button></div></div><div id="account-password-error" class="console-muted" style="min-height:20px;margin-top:10px;color:#b42318"></div><div class="panel-dialog-actions"><button id="account-password-cancel" class="btn light" type="button">取消</button><button id="account-password-confirm" class="btn" type="button">确认</button></div></div></div>');
 document.head.insertAdjacentHTML('beforeend','<style>#account-new-username{width:100%;box-sizing:border-box;padding:10px;border:1px solid #d2d6da;border-radius:7px;font:inherit}</style>');
 document.body.insertAdjacentHTML('beforeend','<div id="account-username-mask" class="account-password-mask" role="dialog" aria-modal="true" aria-labelledby="account-username-title"><div class="panel-dialog account-password-dialog"><h3 id="account-username-title">修改账号</h3><p>修改控制台登录账号后，所有登录会话将失效。密码保持不变。</p><div class="account-password-field"><label for="account-new-username">新账号</label><input id="account-new-username" type="text" autocomplete="username" maxlength="80" spellcheck="false"><small class="console-muted">仅支持英文字母、数字、下划线、点和连字符。</small></div><div id="account-username-error" class="console-muted" style="min-height:20px;margin-top:10px;color:#b42318"></div><div class="panel-dialog-actions"><button id="account-username-cancel" class="btn light" type="button">取消</button><button id="account-username-confirm" class="btn" type="button">确认</button></div></div></div>');
+document.head.insertAdjacentHTML('beforeend','<style>#account-recovery-mask input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #d2d6da;border-radius:7px;font:inherit}#account-recovery-mask .console-muted{display:block;margin-top:6px}</style>');
+document.body.insertAdjacentHTML('beforeend','<div id="account-recovery-mask" class="account-password-mask" role="dialog" aria-modal="true" aria-labelledby="account-recovery-title"><div class="panel-dialog account-password-dialog"><h3 id="account-recovery-title">绑定恢复邮箱</h3><p id="account-recovery-description">绑定后可在登录页通过邮件验证码重置密码。</p><div id="account-recovery-start"><div class="account-password-field"><label for="account-recovery-email-input">恢复邮箱</label><input id="account-recovery-email-input" type="email" autocomplete="email" maxlength="254"></div><div class="account-password-field"><label for="account-recovery-password">当前密码</label><input id="account-recovery-password" type="password" autocomplete="current-password"></div></div><div id="account-recovery-verify" hidden><div class="account-password-field"><label for="account-recovery-code">邮箱验证码</label><input id="account-recovery-code" inputmode="numeric" autocomplete="one-time-code" maxlength="8"><small class="console-muted">验证码发送至新邮箱，10 分钟内有效。</small></div></div><div id="account-recovery-error" class="console-muted" style="min-height:20px;margin-top:10px;color:#b42318"></div><div class="panel-dialog-actions"><button id="account-recovery-cancel" class="btn light" type="button">取消</button><button id="account-recovery-confirm" class="btn" type="button">发送验证码</button></div></div></div>');
 let accountMenuUser='';
 async function loadAccountMenu(){try{const account=await api('/api/account');accountMenuUser=account.username||'账户';$('#account-menu-name').textContent=accountMenuUser;document.getElementById('account-menu').style.display='block'}catch{}}
 function closeAccountMenu(){document.getElementById('account-menu')?.classList.remove('open')}
@@ -3787,10 +4022,13 @@ function closePasswordDialog(){$('#account-password-mask').classList.remove('sho
 function openUsernameDialog(){closeAccountMenu();$('#account-new-username').value=accountMenuUser;$('#account-username-error').textContent='';$('#account-username-mask').classList.add('show');$('#account-new-username').focus();$('#account-new-username').select()}
 function closeUsernameDialog(){$('#account-username-mask').classList.remove('show')}
 async function submitUsernameChange(){const username=$('#account-new-username').value.trim(),error=$('#account-username-error');if(!/^[A-Za-z0-9_.-]{1,80}$/.test(username)){error.textContent='账号只能使用 1–80 位英文字母、数字、下划线、点或连字符。';return}if(username===accountMenuUser){error.textContent='新账号不能与当前账号相同。';return}const button=$('#account-username-confirm');button.disabled=true;button.textContent='保存中…';try{await api('/api/account/username',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})});closeUsernameDialog();await panelDialog({title:'账号已修改',message:'账号修改成功，当前会话将失效，请使用新账号重新登录。',confirmLabel:'重新登录',showCancel:false});logoutConsole()}catch(e){error.textContent=e.message}finally{button.disabled=false;button.textContent='确认'}}
+async function openRecoveryEmailDialog(){closeAccountMenu();$('#account-recovery-start').hidden=false;$('#account-recovery-verify').hidden=true;$('#account-recovery-email-input').value='';$('#account-recovery-password').value='';$('#account-recovery-code').value='';$('#account-recovery-error').textContent='';$('#account-recovery-confirm').textContent='发送验证码';$('#account-recovery-mask').classList.add('show');try{const status=await api('/api/account/recovery-email');$('#account-recovery-title').textContent=status.bound?'更换恢复邮箱':'绑定恢复邮箱';$('#account-recovery-description').textContent=status.configured?(status.bound?'当前恢复邮箱：'+status.email+'。更换时将向新邮箱发送验证码。':'绑定后可在登录页通过邮件验证码重置密码。'):'邮件服务尚未配置，请先在服务器设置 Resend API Key 和发件地址。';$('#account-recovery-confirm').disabled=!status.configured;if(status.configured)$('#account-recovery-email-input').focus()}catch(e){$('#account-recovery-error').textContent=e.message}}
+function closeRecoveryEmailDialog(){$('#account-recovery-mask').classList.remove('show')}
+async function submitRecoveryEmail(){const button=$('#account-recovery-confirm'),error=$('#account-recovery-error');error.textContent='';button.disabled=true;button.textContent='处理中…';try{if($('#account-recovery-verify').hidden){const email=$('#account-recovery-email-input').value.trim(),current_password=$('#account-recovery-password').value;if(!email||!current_password)throw Error('请输入恢复邮箱和当前密码。');await api('/api/account/recovery-email/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,current_password})});$('#account-recovery-password').value='';$('#account-recovery-start').hidden=true;$('#account-recovery-verify').hidden=false;button.textContent='验证并绑定';$('#account-recovery-code').focus()}else{const code=$('#account-recovery-code').value.trim();if(!/^[0-9]{8}$/.test(code))throw Error('请输入 8 位邮箱验证码。');await api('/api/account/recovery-email/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});closeRecoveryEmailDialog();await panelDialog({title:'恢复邮箱已验证',message:'现在可以在登录页使用“忘记密码”通过该邮箱重置密码。',confirmLabel:'知道了',showCancel:false})}}catch(e){error.textContent=e.message}finally{button.disabled=false;if($('#account-recovery-verify').hidden)button.textContent='发送验证码';else button.textContent='验证并绑定'}}
 function togglePasswordField(button){const input=document.getElementById(button.dataset.passwordTarget);if(!input)return;input.type=input.type==='password'?'text':'password';button.textContent=input.type==='password'?'◉':'◌'}
 async function submitPasswordChange(){const password=$('#account-new-password').value,confirm=$('#account-confirm-password').value,error=$('#account-password-error');if(password.length<8){error.textContent='新密码至少需要 8 位。';return}if(password!==confirm){error.textContent='两次输入的密码不一致。';return}const button=$('#account-password-confirm');button.disabled=true;button.textContent='保存中…';try{await api('/api/account/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:password})});closePasswordDialog();await panelDialog({title:'密码已修改',message:'密码修改成功，当前会话将失效，请使用新密码重新登录。',confirmLabel:'重新登录',showCancel:false});logoutConsole()}catch(e){error.textContent=e.message}finally{button.disabled=false;button.textContent='确认'}}
 document.getElementById('account-menu-toggle')?.addEventListener('click',()=>document.getElementById('account-menu')?.classList.toggle('open'));
-document.getElementById('account-change-username')?.addEventListener('click',openUsernameDialog);document.getElementById('account-change-password')?.addEventListener('click',openPasswordDialog);document.getElementById('account-logout')?.addEventListener('click',logoutConsole);document.getElementById('account-username-cancel')?.addEventListener('click',closeUsernameDialog);document.getElementById('account-username-confirm')?.addEventListener('click',submitUsernameChange);document.getElementById('account-new-username')?.addEventListener('keydown',event=>{if(event.key==='Enter')submitUsernameChange()});document.getElementById('account-password-cancel')?.addEventListener('click',closePasswordDialog);document.getElementById('account-password-confirm')?.addEventListener('click',submitPasswordChange);document.querySelectorAll('.account-password-eye').forEach(button=>button.addEventListener('click',()=>togglePasswordField(button)));document.addEventListener('click',event=>{const menu=document.getElementById('account-menu');if(menu&&!menu.contains(event.target))closeAccountMenu()});loadAccountMenu();
+document.getElementById('account-change-username')?.addEventListener('click',openUsernameDialog);document.getElementById('account-change-password')?.addEventListener('click',openPasswordDialog);document.getElementById('account-recovery-email')?.addEventListener('click',openRecoveryEmailDialog);document.getElementById('account-logout')?.addEventListener('click',logoutConsole);document.getElementById('account-recovery-cancel')?.addEventListener('click',closeRecoveryEmailDialog);document.getElementById('account-recovery-confirm')?.addEventListener('click',submitRecoveryEmail);document.getElementById('account-username-cancel')?.addEventListener('click',closeUsernameDialog);document.getElementById('account-username-confirm')?.addEventListener('click',submitUsernameChange);document.getElementById('account-new-username')?.addEventListener('keydown',event=>{if(event.key==='Enter')submitUsernameChange()});document.getElementById('account-password-cancel')?.addEventListener('click',closePasswordDialog);document.getElementById('account-password-confirm')?.addEventListener('click',submitPasswordChange);document.querySelectorAll('.account-password-eye').forEach(button=>button.addEventListener('click',()=>togglePasswordField(button)));document.addEventListener('click',event=>{const menu=document.getElementById('account-menu');if(menu&&!menu.contains(event.target))closeAccountMenu()});loadAccountMenu();
  document.body.insertAdjacentHTML('beforeend', `<section id="console-health" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>健康检查</h2><p class="panel-note">检查 Codex 数据目录、配置文件、认证、当前供应商和磁盘空间，确认服务器是否满足使用条件。</p></div><button class="btn" onclick="runHealth()">立即检查</button></div><div id="health-summary" class="console-health-summary">尚未执行检查。</div><div id="health-checks"></div></div></section><section id="console-proxy" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>反向代理</h2><p class="panel-note">部署独立 Nginx 容器，自动校验证书并重载。证书和私钥仅用于本次部署，不会保存到面板设置。</p></div><span id="proxy-status" class="proxy-status">正在读取状态…</span></div><div id="proxy-success-view" class="proxy-success-view" hidden><div class="proxy-success-card"><div class="proxy-success-icon">✓</div><div><h3 id="proxy-success-title">HTTPS 反向代理已运行</h3><p id="proxy-success-copy">HTTPS 入口已就绪。</p></div></div><dl class="proxy-summary"><div><dt>访问地址</dt><dd><a id="proxy-public-url" target="_blank" rel="noopener"></a></dd></div><div><dt>上游服务</dt><dd id="proxy-success-upstream"></dd></div></dl><div class="console-form-actions"><button class="btn" type="button" id="proxy-enable-secure">启用安全模式</button><button class="btn" type="button" id="proxy-disable-secure">关闭安全模式</button><button class="btn" type="button" id="proxy-edit">修改配置</button><button class="btn light" type="button" id="proxy-disable">停用代理</button></div></div><div id="proxy-form-view"><div class="proxy-warning">部署后请在云防火墙中仅公开 80/443，并限制面板端口 8787 的直接访问。</div><div class="console-form"><div><label>域名</label><input id="proxy-domain" placeholder="console.example.com"></div><div><label>上游地址</label><input id="proxy-upstream" value="codex-provider-console:8787"></div><div class="wide"><label>TLS 证书（PEM）</label><textarea id="proxy-certificate" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea></div><div class="wide"><label>TLS 私钥（PEM）</label><textarea id="proxy-private-key" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----"></textarea></div><div class="wide"><label>Nginx 部署预览</label><pre id="proxy-config" class="console-code">填写域名后生成</pre></div></div><div class="console-form-actions"><button class="btn" type="button" id="proxy-apply">校验并部署</button><button class="btn light" type="button" id="proxy-cancel-edit" hidden>取消修改</button></div></div><div id="proxy-notice" class="notice"></div></div></section>`);
 
  document.head.insertAdjacentHTML('beforeend','<style>.proxy-status{padding:5px 9px;border:1px solid #d8dde2;border-radius:999px;color:#59616c;background:#f7f8fa;font-size:12px;white-space:nowrap}.proxy-status.running{border-color:#9bd7b3;color:#167143;background:#effaf3}.proxy-warning{margin:12px 0;padding:10px 12px;border-left:3px solid #d69620;border-radius:4px;background:#fff8e8;color:#725114;font-size:12px;line-height:1.5}.proxy-pem{min-height:150px;font:12px/1.45 Consolas,monospace;resize:vertical}.proxy-success-view{margin-top:16px}.proxy-success-card{display:flex;align-items:center;gap:13px;padding:17px;border:1px solid #a9ddbc;border-radius:8px;background:#f1fbf4}.proxy-success-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#198754;color:#fff;font-weight:800}.proxy-success-card h3{margin:0;color:#176b40;font-size:16px}.proxy-success-card p{margin:4px 0 0;color:#3f6d51;font-size:13px}.proxy-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}.proxy-summary div{padding:12px;border:1px solid #e0e6e2;border-radius:7px;background:#fafcfb}.proxy-summary dt{font-size:12px;color:#68736c}.proxy-summary dd{margin:5px 0 0;font:13px Consolas,monospace;color:#202b24;overflow-wrap:anywhere}.proxy-summary a{color:#1769aa;text-decoration:none}@media(max-width:650px){.proxy-summary{grid-template-columns:1fr}}</style>');
