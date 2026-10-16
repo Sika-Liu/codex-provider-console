@@ -55,14 +55,19 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 
 ### 恢复邮箱与忘记密码
 
-邮件找回默认关闭。先在 [Resend](https://resend.com/) 验证专用发信域名，并创建仅有发信权限的 API Key，然后在服务器的 `.env` 中配置：
+邮件找回通过 SMTP 发送验证码。部署管理员需在服务器的 `.env` 中配置可发信的邮箱服务器和客户端专用密码；面板用户只需输入要绑定的恢复邮箱：
 
 ```text
-RESEND_API_KEY=你的发信密钥
-PANEL_RECOVERY_FROM_EMAIL=security@notify.example.com
+SMTP_HOST=smtp.example.com
+SMTP_PORT=465
+SMTP_USERNAME=sender@example.com
+SMTP_PASSWORD=邮箱客户端专用密码
+SMTP_FROM=sender@example.com
+SMTP_FROM_NAME=Codex 控制台
+SMTP_USE_SSL=1
 ```
 
-重新创建面板容器后，已登录管理员可在用户名菜单中点击“绑定恢复邮箱”，通过新邮箱收到的 8 位验证码完成验证。登录页的“忘记密码”只向已验证的恢复邮箱发送验证码；验证后可以设置新密码。验证码 10 分钟内有效、最多尝试 5 次；重置成功会使旧登录会话失效。若邮箱不可用，仍可通过服务器 SSH 恢复面板密码。不要把 API Key 写入 Git 或发送给他人。
+重新创建面板容器后，已登录管理员可在用户名菜单中点击“绑定恢复邮箱”，通过新邮箱收到的 8 位验证码完成验证。登录页的“忘记密码”只向已验证的恢复邮箱发送验证码；验证后可以设置新密码。验证码 10 分钟内有效、最多尝试 5 次；重置成功会使旧登录会话失效。若邮箱不可用，仍可通过服务器 SSH 恢复面板密码。不要把邮箱客户端专用密码写入 Git 或发送给他人。
 
 ### 模型诊断
 
