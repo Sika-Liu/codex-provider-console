@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import secrets
+import socket
 import smtplib
 import sqlite3
 import subprocess
@@ -95,6 +96,8 @@ PROVIDER_DIAGNOSTIC_JOBS_LOCK = threading.Lock()
 HEALTH_CHECK_JOBS: dict[str, dict] = {}
 HEALTH_CHECK_JOBS_LOCK = threading.Lock()
 REVERSE_PROXY_LOCK = threading.Lock()
+REVERSE_PROXY_JOBS: dict[str, dict] = {}
+REVERSE_PROXY_JOBS_LOCK = threading.Lock()
 HOST_APP_SERVER_STOP_SCRIPT = r'''
 import os
 import shlex
@@ -1762,11 +1765,41 @@ def validate_reverse_proxy_input(domain: str, upstream: str, certificate_pem: st
     return domain, upstream, certificate_pem, private_key_pem
 
 
-def reverse_proxy_apply_script(domain: str, upstream: str, certificate_pem: str, private_key_pem: str) -> str:
+def check_reverse_proxy_upstream(upstream: str) -> None:
+    host, separator, port = upstream.rpartition(":")
+    if not separator:
+        host, port = upstream, "80"
+    try:
+        with socket.create_connection((host, int(port)), timeout=5):
+            pass
+    except (OSError, ValueError) as exc:
+        raise HTTPException(422, f"无法连接上游服务 {upstream}：{exc}") from exc
+
+
+def reverse_proxy_certificate_preflight_script(domain: str, certificate_pem: str) -> str:
+    payload = json.dumps({"domain": domain, "certificate": base64.b64encode(certificate_pem.encode()).decode()})
+    return f'''import base64, json, subprocess, tempfile
+from pathlib import Path
+data = json.loads({payload!r})
+with tempfile.TemporaryDirectory(prefix="proxy-cert-check-") as directory:
+    certificate = Path(directory) / "certificate.pem"
+    certificate.write_bytes(base64.b64decode(data["certificate"]))
+    hostname = subprocess.run(["openssl", "x509", "-in", str(certificate), "-noout", "-checkhost", data["domain"]], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if hostname.returncode != 0 or "does match certificate" not in hostname.stdout.lower():
+        raise SystemExit("证书不包含输入的域名：" + hostname.stdout.strip()[-300:])
+    expiration = subprocess.run(["openssl", "x509", "-in", str(certificate), "-noout", "-checkend", "0"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if expiration.returncode != 0:
+        raise SystemExit("证书已过期：" + expiration.stdout.strip()[-300:])
+print("certificate_valid")
+'''
+
+
+def reverse_proxy_apply_script(domain: str, upstream: str, certificate_pem: str, private_key_pem: str, *, validate_only: bool = False) -> str:
     payload = json.dumps({
         "project": host_panel_project_path(), "domain": domain, "upstream": upstream,
         "certificate": base64.b64encode(certificate_pem.encode()).decode(),
         "private_key": base64.b64encode(private_key_pem.encode()).decode(),
+        "validate_only": validate_only,
     })
     return f'''import base64, json, os, shutil, subprocess, sys, uuid
 from pathlib import Path
@@ -1825,6 +1858,9 @@ server {{
     ], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if validation.returncode != 0:
         raise SystemExit("Nginx 配置或证书校验失败：" + validation.stdout[-1200:])
+    if data["validate_only"]:
+        print(json.dumps({{"validated": True}}))
+        sys.exit(0)
     if previous.exists():
         shutil.rmtree(previous)
     if root.exists():
@@ -3128,6 +3164,101 @@ def apply_reverse_proxy(request: ReverseProxyApplyRequest) -> dict:
     }
 
 
+def reverse_proxy_job_snapshot(job_id: str) -> dict:
+    with REVERSE_PROXY_JOBS_LOCK:
+        job = REVERSE_PROXY_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "反向代理部署任务不存在或已过期")
+        return dict(job)
+
+
+@app.post("/api/reverse-proxy/apply-progress")
+def start_reverse_proxy_apply_progress(request: ReverseProxyApplyRequest) -> dict:
+    job_id = uuid.uuid4().hex
+    with REVERSE_PROXY_JOBS_LOCK:
+        if any(job["status"] == "running" for job in REVERSE_PROXY_JOBS.values()):
+            raise HTTPException(409, "已有反向代理部署任务正在运行")
+        REVERSE_PROXY_JOBS[job_id] = {
+            "id": job_id, "status": "running", "progress": 2, "step": 0,
+            "stage": "准备校验输入", "detail": "", "warning": "", "result": None,
+            "updated_at": time.time(),
+        }
+        finished = [key for key, job in REVERSE_PROXY_JOBS.items() if job["status"] != "running"]
+        for key in finished[:-20]:
+            del REVERSE_PROXY_JOBS[key]
+
+    def report(progress: int, step: int, stage: str) -> None:
+        with REVERSE_PROXY_JOBS_LOCK:
+            REVERSE_PROXY_JOBS[job_id].update(progress=progress, step=step, stage=stage, updated_at=time.time())
+
+    def run() -> None:
+        try:
+            with REVERSE_PROXY_LOCK:
+                report(5, 0, "正在校验输入")
+                domain, upstream, certificate, private_key = validate_reverse_proxy_input(
+                    request.domain, request.upstream, request.certificate_pem, request.private_key_pem
+                )
+                report(20, 1, "正在检查上游连接")
+                check_reverse_proxy_upstream(upstream)
+                report(36, 2, "正在校验证书域名与有效期")
+                run_host_reverse_proxy_script(
+                    reverse_proxy_certificate_preflight_script(domain, certificate), "证书预检查", timeout=30
+                )
+                report(52, 3, "正在校验 Nginx 配置")
+                run_host_reverse_proxy_script(
+                    reverse_proxy_apply_script(domain, upstream, certificate, private_key, validate_only=True),
+                    "配置预检查", timeout=120,
+                )
+                report(70, 4, "正在部署反向代理")
+                deployed = json.loads(run_host_reverse_proxy_script(
+                    reverse_proxy_apply_script(domain, upstream, certificate, private_key), "部署", timeout=120
+                ))
+                settings = _read_auth_overrides()
+                settings["reverse_proxy"] = {"domain": domain, "upstream": upstream}
+                write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+                audit("reverse_proxy_applied", domain=domain, upstream=upstream)
+                report(88, 5, "正在验证 HTTPS 访问")
+                try:
+                    verified = json.loads(run_host_reverse_proxy_script(
+                        reverse_proxy_status_script(domain), "HTTPS 验证", timeout=30
+                    ))
+                    warning = "" if verified.get("https_verified") else str(
+                        verified.get("https_error") or "HTTPS 访问尚未通过验证"
+                    )
+                except (RuntimeError, json.JSONDecodeError) as exc:
+                    warning = f"HTTPS 状态暂无法确认：{exc}"
+                result = {
+                    "configured": True, "running": bool(deployed.get("running")),
+                    "domain": domain, "upstream": upstream, "https_verified": not bool(warning),
+                }
+            with REVERSE_PROXY_JOBS_LOCK:
+                REVERSE_PROXY_JOBS[job_id].update(
+                    status="completed", progress=100, step=5, stage="反向代理部署完成",
+                    detail="部署已完成；HTTPS 验证未通过。" if warning else "部署与 HTTPS 验证已完成。",
+                    warning=warning, result=result, updated_at=time.time(),
+                )
+        except HTTPException as exc:
+            with REVERSE_PROXY_JOBS_LOCK:
+                REVERSE_PROXY_JOBS[job_id].update(
+                    status="failed", detail=str(exc.detail), updated_at=time.time()
+                )
+        except Exception as exc:  # pragma: no cover - keep failed jobs visible to the polling client
+            with REVERSE_PROXY_JOBS_LOCK:
+                REVERSE_PROXY_JOBS[job_id].update(
+                    status="failed", detail=str(exc), updated_at=time.time()
+                )
+
+    threading.Thread(target=run, name=f"reverse-proxy-{job_id[:8]}", daemon=True).start()
+    return reverse_proxy_job_snapshot(job_id)
+
+
+@app.get("/api/reverse-proxy/jobs/{job_id}")
+def get_reverse_proxy_job(job_id: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise HTTPException(422, "无效的反向代理部署任务标识")
+    return reverse_proxy_job_snapshot(job_id)
+
+
 def delete_reverse_proxy_after_response() -> None:
     """Remove the proxy only after its own HTTP response has been delivered."""
     with REVERSE_PROXY_LOCK:
@@ -4222,7 +4353,10 @@ document.getElementById('account-unbind-cancel')?.addEventListener('click',close
  async function refreshReverseProxyStatus(){const status=$('#proxy-status');if(!status)return;status.textContent='正在读取状态…';status.classList.remove('running');try{const result=await api('/api/reverse-proxy/status');proxyConfigured=Boolean(result.configured);if(result.domain)$('#proxy-domain').value=result.domain;if(result.upstream)$('#proxy-upstream').value=result.upstream;updateProxyConfig();status.textContent=result.running?(result.https_verified?'运行中 · HTTPS 已验证 · ':'运行中 · HTTPS 验证失败 · ')+(result.domain||'已部署'):result.configured?'已配置，当前已停用':'尚未部署';status.classList.toggle('running',result.running);if(result.configured&&!proxyEditing)showProxySuccess(result);else if(!result.configured)showProxyForm()}catch(error){status.textContent='状态读取失败';showProxyForm()}}
  async function loadConsoleSettings(){try{const s=await api('/api/settings'),proxy=s.reverse_proxy||{};for(const [id,key] of [['proxy-domain','domain'],['proxy-upstream','upstream']])if(proxy[key]!=null)$('#'+id).value=proxy[key];updateProxyConfig()}catch{}}
   async function refreshConsoleAccount(){try{const [account,email]=await Promise.all([api('/api/account'),api('/api/account/recovery-email')]);accountMenuUser=account.username||'账户';$('#account-menu-name').textContent=accountMenuUser;$('#console-account-name').textContent=accountMenuUser;$('#console-recovery-status').textContent=email.bound?email.email:'尚未绑定';const button=$('#console-recovery-email');button.dataset.bound=String(email.bound);button.textContent=email.bound?'解除绑定':'添加邮箱';button.disabled=false}catch(error){$('#console-recovery-status').textContent='读取失败：'+error.message;$('#console-recovery-email').disabled=true}}
- async function applyReverseProxy(){const domain=$('#proxy-domain').value.trim(),upstream=$('#proxy-upstream').value.trim()||'codex-provider-console:8787',certificate_pem=$('#proxy-certificate').value,private_key_pem=$('#proxy-private-key').value;if(!await panelDialog({title:'部署反向代理',message:'将校验证书与 Nginx 配置，并在服务器启动或更新 HTTPS 代理。证书和私钥不会写入面板设置。',confirmLabel:'校验并部署'}))return;const button=$('#proxy-apply');button.disabled=true;button.textContent='正在校验并部署…';try{const result=await api('/api/reverse-proxy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain,upstream,certificate_pem,private_key_pem})});$('#proxy-certificate').value='';$('#proxy-private-key').value='';proxyEditing=false;note(result.detail,'proxy-notice');await refreshReverseProxyStatus()}catch(error){note(error.message,'proxy-notice')}finally{button.disabled=false;button.textContent='校验并部署'}}
+ let proxyDeployPoll=null;
+ function ensureProxyDeployProgress(){if($('#proxy-progress-mask'))return;document.head.insertAdjacentHTML('beforeend','<style>.switch-progress-step.warning{color:#9a6500}.switch-progress-step.warning:before{content:"!";border-color:#ead19b;background:#fff8e8;color:#9a6500}</style>');document.body.insertAdjacentHTML('beforeend','<div id="proxy-progress-mask" class="switch-progress-mask" role="dialog" aria-modal="true" aria-labelledby="proxy-progress-title"><section class="switch-progress-card"><h3 id="proxy-progress-title">反向代理校验与部署</h3><div id="proxy-progress-stage" class="switch-progress-stage">准备校验输入</div><ol id="proxy-progress-steps" class="switch-progress-steps"></ol><div class="switch-progress-track"><div id="proxy-progress-fill" class="switch-progress-fill"></div></div><div class="switch-progress-meta"><span id="proxy-progress-percent">0%</span><span>请勿关闭此页面</span></div><div id="proxy-progress-detail" class="switch-progress-error"></div><button id="proxy-progress-close" class="btn light switch-progress-close" type="button">关闭</button></section></div>');$('#proxy-progress-close').addEventListener('click',()=>{if(!proxyDeployPoll)$('#proxy-progress-mask').classList.remove('show')})}
+ function renderProxyDeployProgress(job){const labels=['校验输入','检查上游连接','校验证书域名与有效期','校验 Nginx 配置','部署反向代理','验证 HTTPS 访问'],step=Math.max(0,Math.min(5,Number(job.step)||0)),progress=Math.max(0,Math.min(100,Number(job.progress)||0));$('#proxy-progress-stage').textContent=job.stage||'准备校验输入';$('#proxy-progress-fill').style.width=progress+'%';$('#proxy-progress-percent').textContent=progress+'%';$('#proxy-progress-steps').innerHTML=labels.map((label,index)=>'<li class="switch-progress-step '+(job.status==='failed'&&index===step?'failed':job.status==='completed'&&index===5&&job.warning?'warning':index<step||job.status==='completed'?'done':index===step?'active':'')+'">'+label+'</li>').join('');const detail=$('#proxy-progress-detail');detail.textContent=job.status==='failed'?(job.detail||'校验或部署失败。'):job.warning?(job.detail+' '+job.warning):'';detail.style.display=detail.textContent?'block':'none';detail.style.color=job.warning?'#9a6500':'#b42318';$('#proxy-progress-close').style.display=job.status==='running'?'none':'block'}
+ async function applyReverseProxy(){if(proxyDeployPoll)return;const domain=$('#proxy-domain').value.trim(),upstream=$('#proxy-upstream').value.trim()||'codex-provider-console:8787',certificate_pem=$('#proxy-certificate').value,private_key_pem=$('#proxy-private-key').value;if(!await panelDialog({title:'部署反向代理',message:'将依次校验上游连接、证书域名、Nginx 配置及 HTTPS 访问。证书和私钥不会写入面板设置。',confirmLabel:'校验并部署'}))return;ensureProxyDeployProgress();$('#proxy-progress-mask').classList.add('show');proxyDeployPoll=true;renderProxyDeployProgress({status:'running',progress:2,step:0,stage:'准备校验输入'});const button=$('#proxy-apply');button.disabled=true;button.textContent='正在校验并部署…';try{const started=await api('/api/reverse-proxy/apply-progress',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain,upstream,certificate_pem,private_key_pem})});const poll=async()=>{try{const job=await api('/api/reverse-proxy/jobs/'+encodeURIComponent(started.id));renderProxyDeployProgress(job);if(job.status==='running'){proxyDeployPoll=setTimeout(poll,500);return}proxyDeployPoll=null;button.disabled=false;button.textContent='校验并部署';if(job.status==='completed'){$('#proxy-certificate').value='';$('#proxy-private-key').value='';proxyEditing=false;await refreshReverseProxyStatus();note(job.warning?'代理已部署，但 HTTPS 验证未通过：'+job.warning:'反向代理部署成功。','proxy-notice')}else note(job.detail||'反向代理部署失败。','proxy-notice')}catch(error){proxyDeployPoll=null;button.disabled=false;button.textContent='校验并部署';renderProxyDeployProgress({status:'failed',step:0,stage:'状态读取失败',detail:error.message});note(error.message,'proxy-notice')}};proxyDeployPoll=setTimeout(poll,150)}catch(error){proxyDeployPoll=null;button.disabled=false;button.textContent='校验并部署';renderProxyDeployProgress({status:'failed',step:0,stage:'任务未启动',detail:error.message});note(error.message,'proxy-notice')}}
  async function enableProxySecureMode(){setProxyOperationAction('启用');const domain=$('#proxy-domain').value.trim().toLowerCase();if(location.protocol!=='https:'||location.hostname.toLowerCase()!==domain){note('请先通过 https://'+domain+' 访问控制台，再启用安全模式。','proxy-notice');return}if(!await panelDialog({title:'确认启用安全模式',message:'开启后，控制台只允许通过反向代理中配置的域名地址访问，安全性更高。原来的 IP 地址加端口访问方式将不能使用。确认开启吗？',confirmLabel:'确认启用',cancelLabel:'取消'}))return;const button=$('#proxy-enable-secure');button.disabled=true;button.textContent='正在启用…';showProxyOperation('正在连接服务器');await new Promise(resolve=>setTimeout(resolve,80));try{showProxyOperation('正在修改安全设置');const result=await api('/api/reverse-proxy/enable-secure-mode',{method:'POST'});showProxyOperation('正在重启面板','正在等待面板恢复…');const state=await waitForProxyMode(true);showProxyOperation('正在确认最终状态','安全模式已确认启用。',false,true);showProxySuccess(state);note('开启安全模式成功','proxy-notice');setTimeout(()=>location.reload(),1200)}catch(error){showProxyOperation('正在确认最终状态',error.message,true);button.disabled=false;button.textContent='启用安全模式';note(error.message,'proxy-notice')}}
  async function disableProxySecureMode(){setProxyOperationAction('关闭');if(!await panelDialog({title:'确认关闭安全模式',message:'关闭后，控制台将重新允许通过 IP 地址和端口访问，整体安全性会降低一些；之前配置的 HTTPS 域名仍可继续使用。确定要关闭吗？',confirmLabel:'确认关闭',cancelLabel:'取消'}))return;const button=$('#proxy-disable-secure');button.disabled=true;button.textContent='正在关闭…';showProxyOperation('正在连接服务器');await new Promise(resolve=>setTimeout(resolve,80));try{showProxyOperation('正在修改安全设置');const result=await api('/api/reverse-proxy/disable-secure-mode',{method:'POST'});showProxyOperation('正在重启面板','正在等待面板恢复…');const state=await waitForProxyMode(false);showProxyOperation('正在确认最终状态','安全模式已确认关闭。',false,true);showProxySuccess(state);note('关闭安全模式成功','proxy-notice');setTimeout(()=>location.reload(),1200)}catch(error){showProxyOperation('正在确认最终状态',error.message,true);button.disabled=false;button.textContent='关闭安全模式';note(error.message,'proxy-notice')}}
  async function waitForProxyDeletion(){const deadline=Date.now()+20000;let disconnected=0;while(Date.now()<deadline){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),3000);try{const state=await api('/api/reverse-proxy/status',{signal:controller.signal});if(!state.configured&&!state.running)return;disconnected=0}catch(error){disconnected++;if(location.protocol==='https:'&&disconnected>=2)throw Error('HTTPS 入口已断开，请通过服务器 IP 的 8787 端口确认删除结果。')}finally{clearTimeout(timer)}await new Promise(resolve=>setTimeout(resolve,800))}throw Error('暂未确认反向代理已删除，请稍后刷新状态。')}
