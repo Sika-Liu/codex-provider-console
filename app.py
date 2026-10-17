@@ -542,16 +542,82 @@ def clear_failed_logins(client_key: str) -> None:
         LOGIN_FAILURES.pop(client_key, None)
 
 
-LOGIN_HTML = '''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录 · Codex 控制台</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f6f8;color:#202124;font:14px Arial,"Microsoft YaHei",sans-serif}.login{width:min(380px,calc(100vw - 36px));background:#fff;border:1px solid #dde1e6;border-radius:8px;padding:28px;box-sizing:border-box;box-shadow:0 12px 32px #0000000d}h1{margin:0;font-size:22px}p{color:#687078;line-height:1.5}label{display:block;font-weight:700;margin:17px 0 7px}input{box-sizing:border-box;width:100%;border:1px solid #cfd5da;border-radius:6px;padding:10px 11px;font:inherit}button{width:100%;border:0;border-radius:6px;background:#202124;color:#fff;padding:11px;margin-top:20px;font:inherit;font-weight:700;cursor:pointer}button:disabled{opacity:.6;cursor:wait}button.link{background:none;color:#365d80;padding:5px;margin-top:14px;text-align:left;font-weight:400}button.link:hover{text-decoration:underline}.message{min-height:20px;color:#bd3131;margin-top:12px;line-height:1.5}[hidden]{display:none!important}</style></head><body><main class="login"><div id="login-view"><h1>Codex 控制台</h1><p>请输入管理员账号和密码。</p><form id="login"><label>用户名<input id="username" autocomplete="username" required autofocus></label><label>密码<input id="password" type="password" autocomplete="current-password" required></label><button>登录</button><div id="message" class="message"></div></form><button id="forgot-link" class="link" type="button">忘记密码？</button></div><div id="recovery-view" hidden><h1>找回密码</h1><p>验证码只发送至已绑定并验证的辅助邮箱。</p><div id="recovery-request"><button id="recovery-send" type="button">发送验证码</button></div><form id="recovery-code-form" hidden><label>邮箱验证码<input id="recovery-code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" pattern="[0-9]{8}" required></label><button>验证验证码</button></form><form id="recovery-password-form" hidden><label>新密码<input id="recovery-new-password" type="password" autocomplete="new-password" minlength="8" required></label><label>确认新密码<input id="recovery-confirm-password" type="password" autocomplete="new-password" minlength="8" required></label><button>设置新密码</button></form><div id="recovery-message" class="message"></div><button id="recovery-back" class="link" type="button">返回登录</button></div></main><script>
-const byId=id=>document.getElementById(id);let resetToken='';
-async function recoveryPost(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json().catch(()=>({}));if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'请求失败，请稍后重试');return data}
-byId('login').addEventListener('submit',async event=>{event.preventDefault();try{await recoveryPost('/login',{username:byId('username').value,password:byId('password').value});location.href='/'}catch(error){byId('message').textContent=error.message}});
-byId('forgot-link').addEventListener('click',()=>{byId('login-view').hidden=true;byId('recovery-view').hidden=false;byId('recovery-message').textContent=''});
-byId('recovery-back').addEventListener('click',()=>{byId('recovery-view').hidden=true;byId('login-view').hidden=false;resetToken='';byId('message').textContent=''});
-byId('recovery-send').addEventListener('click',async()=>{const button=byId('recovery-send');button.disabled=true;byId('recovery-message').textContent='';try{const result=await recoveryPost('/api/password-reset/request',{});byId('recovery-code-form').hidden=false;byId('recovery-message').textContent=result.message||'验证码已发送。';byId('recovery-code').focus()}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
-byId('recovery-code-form').addEventListener('submit',async event=>{event.preventDefault();const button=event.currentTarget.querySelector('button');button.disabled=true;byId('recovery-message').textContent='';try{const result=await recoveryPost('/api/password-reset/verify',{code:byId('recovery-code').value.trim()});resetToken=result.reset_token;byId('recovery-code-form').hidden=true;byId('recovery-request').hidden=true;byId('recovery-password-form').hidden=false;byId('recovery-message').textContent='验证成功，请设置新密码。';byId('recovery-new-password').focus()}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
-byId('recovery-password-form').addEventListener('submit',async event=>{event.preventDefault();const password=byId('recovery-new-password').value;if(password!==byId('recovery-confirm-password').value){byId('recovery-message').textContent='两次输入的密码不一致。';return}const button=event.currentTarget.querySelector('button');button.disabled=true;byId('recovery-message').textContent='';try{await recoveryPost('/api/password-reset/complete',{reset_token:resetToken,new_password:password});resetToken='';byId('recovery-view').hidden=true;byId('login-view').hidden=false;byId('password').value='';byId('message').textContent='密码重置成功，请使用新密码登录。'}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
-</script></body></html>'''
+LOGIN_HTML = '''<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>登录 · Codex 控制台</title>
+  <style>
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f6f8;color:#202124;font:14px Arial,"Microsoft YaHei",sans-serif}
+    .login,.recovery-dialog{width:min(380px,calc(100vw - 36px));box-sizing:border-box;background:#fff;border:1px solid #dde1e6;border-radius:8px;padding:28px;box-shadow:0 12px 32px #0000000d}
+    h1{margin:0;font-size:22px}h2{margin:0;font-size:20px}p{color:#687078;line-height:1.5}label{display:block;font-weight:700;margin:17px 0 7px}
+    input{box-sizing:border-box;width:100%;border:1px solid #cfd5da;border-radius:6px;padding:10px 11px;font:inherit}
+    button{width:100%;border:0;border-radius:6px;background:#202124;color:#fff;padding:11px;margin-top:20px;font:inherit;font-weight:700;cursor:pointer}
+    button:disabled{opacity:.6;cursor:wait}button.link{background:none;color:#365d80;padding:5px;margin-top:14px;text-align:left;font-weight:400}button.link:hover{text-decoration:underline}
+    .message{min-height:20px;color:#bd3131;margin-top:12px;line-height:1.5}[hidden]{display:none!important}
+    .recovery-mask{position:fixed;inset:0;z-index:100;display:grid;place-items:center;padding:18px;background:#11182780}
+    .recovery-dialog{position:relative;width:min(430px,100%);box-shadow:0 20px 60px #0002}
+    .recovery-close{position:absolute;right:16px;top:12px;width:32px;height:32px;margin:0;padding:0;background:transparent;color:#687078;font-size:24px;font-weight:400;line-height:1}
+    .recovery-close:hover{background:#f1f3f5}.recovery-step{font-size:12px;color:#687078;margin:10px 0 0}.recovery-description{margin:8px 0 0}
+    .recovery-actions{display:flex;gap:10px;margin-top:18px}.recovery-actions button{margin:0}.recovery-actions .secondary{background:#eef0f2;color:#30343a}
+  </style>
+</head>
+<body>
+  <main class="login">
+    <h1>Codex 控制台</h1>
+    <p>请输入管理员账号和密码。</p>
+    <form id="login">
+      <label>用户名<input id="username" autocomplete="username" required autofocus></label>
+      <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
+      <button>登录</button>
+      <div id="message" class="message" role="alert"></div>
+    </form>
+    <button id="forgot-link" class="link" type="button">忘记密码？</button>
+  </main>
+  <div id="recovery-mask" class="recovery-mask" hidden>
+    <section class="recovery-dialog" role="dialog" aria-modal="true" aria-labelledby="recovery-title">
+      <button id="recovery-close" class="recovery-close" type="button" aria-label="关闭">×</button>
+      <h2 id="recovery-title">找回密码</h2>
+      <p id="recovery-step" class="recovery-step">第 1 步，共 3 步</p>
+      <p id="recovery-description" class="recovery-description">请输入已绑定的辅助邮箱。</p>
+      <form id="recovery-email-form">
+        <label for="recovery-email">辅助邮箱</label>
+        <input id="recovery-email" type="email" inputmode="email" autocomplete="email" maxlength="254" required>
+        <div class="recovery-actions"><button class="secondary" type="button" data-recovery-cancel>取消</button><button type="submit">验证并发送验证码</button></div>
+      </form>
+      <form id="recovery-code-form" hidden>
+        <label for="recovery-code">邮箱验证码</label>
+        <input id="recovery-code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" pattern="[0-9]{8}" required>
+        <div class="recovery-actions"><button class="secondary" type="button" data-recovery-cancel>取消</button><button type="submit">验证验证码</button></div>
+      </form>
+      <form id="recovery-password-form" hidden>
+        <label for="recovery-new-password">新密码</label>
+        <input id="recovery-new-password" type="password" autocomplete="new-password" minlength="8" required>
+        <label for="recovery-confirm-password">确认新密码</label>
+        <input id="recovery-confirm-password" type="password" autocomplete="new-password" minlength="8" required>
+        <div class="recovery-actions"><button class="secondary" type="button" data-recovery-cancel>取消</button><button type="submit">设置新密码</button></div>
+      </form>
+      <div id="recovery-message" class="message" role="alert" aria-live="polite"></div>
+    </section>
+  </div>
+  <script>
+    const byId=id=>document.getElementById(id);let resetToken='';
+    async function recoveryPost(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json().catch(()=>({}));if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'请求失败，请稍后重试');return data}
+    function showRecoveryStep(step){for(const [number,id] of [[1,'recovery-email-form'],[2,'recovery-code-form'],[3,'recovery-password-form']])byId(id).hidden=number!==step;byId('recovery-step').textContent=`第 ${step} 步，共 3 步`;byId('recovery-description').textContent=step===1?'请输入已绑定的辅助邮箱。':step===2?'验证码已发送至辅助邮箱，请输入 8 位验证码。':'验证成功，请设置新密码。';byId('recovery-message').textContent='';byId(step===1?'recovery-email':step===2?'recovery-code':'recovery-new-password').focus()}
+    function closeRecovery(){byId('recovery-mask').hidden=true;resetToken='';byId('recovery-email-form').reset();byId('recovery-code-form').reset();byId('recovery-password-form').reset();byId('forgot-link').focus()}
+    byId('login').addEventListener('submit',async event=>{event.preventDefault();try{await recoveryPost('/login',{username:byId('username').value,password:byId('password').value});location.href='/'}catch(error){byId('message').textContent=error.message}});
+    byId('forgot-link').addEventListener('click',()=>{byId('recovery-mask').hidden=false;showRecoveryStep(1)});
+    byId('recovery-close').addEventListener('click',closeRecovery);
+    document.querySelectorAll('[data-recovery-cancel]').forEach(button=>button.addEventListener('click',closeRecovery));
+    byId('recovery-mask').addEventListener('click',event=>{if(event.target===byId('recovery-mask'))closeRecovery()});
+    document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!byId('recovery-mask').hidden)closeRecovery()});
+    byId('recovery-email-form').addEventListener('submit',async event=>{event.preventDefault();const button=event.currentTarget.querySelector('[type="submit"]');button.disabled=true;byId('recovery-message').textContent='';try{const email=byId('recovery-email').value.trim().toLowerCase();await recoveryPost('/api/password-reset/request',{email});showRecoveryStep(2)}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
+    byId('recovery-code-form').addEventListener('submit',async event=>{event.preventDefault();const button=event.currentTarget.querySelector('[type="submit"]');button.disabled=true;byId('recovery-message').textContent='';try{const result=await recoveryPost('/api/password-reset/verify',{code:byId('recovery-code').value.trim()});resetToken=result.reset_token;showRecoveryStep(3)}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
+    byId('recovery-password-form').addEventListener('submit',async event=>{event.preventDefault();const password=byId('recovery-new-password').value;if(password!==byId('recovery-confirm-password').value){byId('recovery-message').textContent='两次输入的密码不一致。';return}const button=event.currentTarget.querySelector('[type="submit"]');button.disabled=true;byId('recovery-message').textContent='';try{await recoveryPost('/api/password-reset/complete',{reset_token:resetToken,new_password:password});closeRecovery();byId('password').value='';byId('message').textContent='密码重置成功，请使用新密码登录。'}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
+  </script>
+</body>
+</html>'''
 
 
 @app.middleware("http")
@@ -2824,7 +2890,7 @@ def verify_recovery_email_binding(details: RecoveryCodeRequest) -> dict:
 
 
 @app.post("/api/password-reset/request")
-def request_password_reset(request: Request) -> dict:
+def request_password_reset(details: RecoveryEmailRequest, request: Request) -> dict:
     email = str(_read_auth_overrides().get("panel_recovery_email") or "")
     if not email:
         raise HTTPException(400, "未添加辅助邮箱，无法进行下一步，请通过服务器 SSH 重置密码。")
@@ -2832,6 +2898,8 @@ def request_password_reset(request: Request) -> dict:
         raise HTTPException(503, "邮件找回尚未配置，请通过服务器 SSH 重置密码")
     if not recovery_send_allowed("reset", login_client_key(request)):
         raise HTTPException(429, "请求过于频繁，请稍后重试")
+    if not hmac.compare_digest(details.email.strip().lower(), email.lower()):
+        raise HTTPException(400, "辅助邮箱不匹配")
     code, pending = new_recovery_code()
     pending.update({"email": email, "session_secret": SESSION_SECRET})
     with RECOVERY_LOCK:
