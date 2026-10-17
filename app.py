@@ -2810,25 +2810,26 @@ def verify_recovery_email_binding(details: RecoveryCodeRequest) -> dict:
 
 @app.post("/api/password-reset/request")
 def request_password_reset(request: Request) -> dict:
+    email = str(_read_auth_overrides().get("panel_recovery_email") or "")
+    if not email:
+        raise HTTPException(400, "未添加辅助邮箱，无法进行下一步，请通过服务器 SSH 重置密码。")
     if not recovery_email_ready():
-        raise HTTPException(503, "邮件找回尚未配置，请通过服务器 SSH 恢复")
+        raise HTTPException(503, "邮件找回尚未配置，请通过服务器 SSH 重置密码")
     if not recovery_send_allowed("reset", login_client_key(request)):
         raise HTTPException(429, "请求过于频繁，请稍后重试")
-    email = str(_read_auth_overrides().get("panel_recovery_email") or "")
-    if email:
-        code, pending = new_recovery_code()
-        pending.update({"email": email, "session_secret": SESSION_SECRET})
+    code, pending = new_recovery_code()
+    pending.update({"email": email, "session_secret": SESSION_SECRET})
+    with RECOVERY_LOCK:
+        RECOVERY_PENDING["reset"] = pending
+        RECOVERY_PENDING.pop("grant", None)
+    try:
+        send_recovery_email(email, "重置 Codex 控制台密码", f"密码重置验证码：{code}。10 分钟内有效；如非本人操作，请忽略。")
+    except HTTPException:
         with RECOVERY_LOCK:
-            RECOVERY_PENDING["reset"] = pending
-            RECOVERY_PENDING.pop("grant", None)
-        try:
-            send_recovery_email(email, "重置 Codex 控制台密码", f"密码重置验证码：{code}。10 分钟内有效；如非本人操作，请忽略。")
-        except HTTPException:
-            with RECOVERY_LOCK:
-                if RECOVERY_PENDING.get("reset") is pending:
-                    RECOVERY_PENDING.pop("reset", None)
-            raise
-    return {"sent": True, "message": "若已绑定辅助邮箱，验证码已发送。"}
+            if RECOVERY_PENDING.get("reset") is pending:
+                RECOVERY_PENDING.pop("reset", None)
+        raise
+    return {"sent": True, "message": "验证码已发送至辅助邮箱。"}
 
 
 @app.post("/api/password-reset/verify")
