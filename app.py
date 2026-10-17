@@ -559,8 +559,8 @@ LOGIN_HTML = '''<!doctype html>
     .recovery-mask{position:fixed;inset:0;z-index:100;display:grid;place-items:center;padding:18px;background:#11182780}
     .recovery-dialog{position:relative;width:min(430px,100%);box-shadow:0 20px 60px #0002}
     .recovery-close{position:absolute;right:16px;top:12px;width:32px;height:32px;margin:0;padding:0;background:transparent;color:#687078;font-size:24px;font-weight:400;line-height:1}
-    .recovery-close:hover{background:#f1f3f5}.recovery-step{font-size:12px;color:#687078;margin:10px 0 0}.recovery-description{margin:8px 0 0}
-    .recovery-actions{display:flex;gap:10px;margin-top:18px}.recovery-actions button{margin:0}.recovery-actions .secondary{background:#eef0f2;color:#30343a}
+    .recovery-close:hover{background:#f1f3f5}.recovery-description{margin:8px 0 0}
+    #recovery-email{margin-top:18px}.recovery-actions{display:flex;gap:10px;margin-top:18px}.recovery-actions button{margin:0}.recovery-actions .secondary{background:#eef0f2;color:#30343a}
   </style>
 </head>
 <body>
@@ -579,11 +579,9 @@ LOGIN_HTML = '''<!doctype html>
     <section class="recovery-dialog" role="dialog" aria-modal="true" aria-labelledby="recovery-title">
       <button id="recovery-close" class="recovery-close" type="button" aria-label="关闭">×</button>
       <h2 id="recovery-title">找回密码</h2>
-      <p id="recovery-step" class="recovery-step">第 1 步，共 3 步</p>
-      <p id="recovery-description" class="recovery-description">请输入已绑定的辅助邮箱。</p>
+      <p id="recovery-description" class="recovery-description">请输入邮箱。</p>
       <form id="recovery-email-form">
-        <label for="recovery-email">辅助邮箱</label>
-        <input id="recovery-email" type="email" inputmode="email" autocomplete="email" maxlength="254" required>
+        <input id="recovery-email" type="email" inputmode="email" autocomplete="email" aria-label="邮箱" maxlength="254" required>
         <div class="recovery-actions"><button class="secondary" type="button" data-recovery-cancel>取消</button><button type="submit">验证并发送验证码</button></div>
       </form>
       <form id="recovery-code-form" hidden>
@@ -604,7 +602,7 @@ LOGIN_HTML = '''<!doctype html>
   <script>
     const byId=id=>document.getElementById(id);let resetToken='';
     async function recoveryPost(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json().catch(()=>({}));if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'请求失败，请稍后重试');return data}
-    function showRecoveryStep(step){for(const [number,id] of [[1,'recovery-email-form'],[2,'recovery-code-form'],[3,'recovery-password-form']])byId(id).hidden=number!==step;byId('recovery-step').textContent=`第 ${step} 步，共 3 步`;byId('recovery-description').textContent=step===1?'请输入已绑定的辅助邮箱。':step===2?'验证码已发送至辅助邮箱，请输入 8 位验证码。':'验证成功，请设置新密码。';byId('recovery-message').textContent='';byId(step===1?'recovery-email':step===2?'recovery-code':'recovery-new-password').focus()}
+    function showRecoveryStep(step){for(const [number,id] of [[1,'recovery-email-form'],[2,'recovery-code-form'],[3,'recovery-password-form']])byId(id).hidden=number!==step;byId('recovery-description').textContent=step===1?'请输入邮箱。':step===2?'验证码已发送至辅助邮箱，请输入 8 位验证码。':'验证成功，请设置新密码。';byId('recovery-message').textContent='';byId(step===1?'recovery-email':step===2?'recovery-code':'recovery-new-password').focus()}
     function closeRecovery(){byId('recovery-mask').hidden=true;resetToken='';byId('recovery-email-form').reset();byId('recovery-code-form').reset();byId('recovery-password-form').reset();byId('forgot-link').focus()}
     byId('login').addEventListener('submit',async event=>{event.preventDefault();try{await recoveryPost('/login',{username:byId('username').value,password:byId('password').value});location.href='/'}catch(error){byId('message').textContent=error.message}});
     byId('forgot-link').addEventListener('click',()=>{byId('recovery-mask').hidden=false;showRecoveryStep(1)});
