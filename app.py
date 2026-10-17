@@ -2891,7 +2891,7 @@ def verify_recovery_email_binding(details: RecoveryCodeRequest) -> dict:
 def request_password_reset(details: RecoveryEmailRequest, request: Request) -> dict:
     email = str(_read_auth_overrides().get("panel_recovery_email") or "")
     if not email:
-        raise HTTPException(400, "未添加辅助邮箱，无法进行下一步，请通过服务器 SSH 重置密码。")
+        raise HTTPException(400, "未添加辅助邮箱，请通过服务器 SSH 重置密码。")
     if not recovery_email_ready():
         raise HTTPException(503, "邮件找回尚未配置，请通过服务器 SSH 重置密码")
     if not recovery_send_allowed("reset", login_client_key(request)):
