@@ -580,7 +580,7 @@ LOGIN_HTML = '''<!doctype html>
       <button id="recovery-close" class="recovery-close" type="button" aria-label="关闭">×</button>
       <h2 id="recovery-title">找回密码</h2>
       <p id="recovery-description" class="recovery-description">请输入邮箱。</p>
-      <form id="recovery-email-form">
+      <form id="recovery-email-form" novalidate>
         <input id="recovery-email" type="email" inputmode="email" autocomplete="email" aria-label="邮箱" maxlength="254" required>
         <div class="recovery-actions"><button class="secondary" type="button" data-recovery-cancel>取消</button><button type="submit">验证并发送验证码</button></div>
       </form>
@@ -610,7 +610,8 @@ LOGIN_HTML = '''<!doctype html>
     document.querySelectorAll('[data-recovery-cancel]').forEach(button=>button.addEventListener('click',closeRecovery));
     byId('recovery-mask').addEventListener('click',event=>{if(event.target===byId('recovery-mask'))closeRecovery()});
     document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!byId('recovery-mask').hidden)closeRecovery()});
-    byId('recovery-email-form').addEventListener('submit',async event=>{event.preventDefault();const button=event.currentTarget.querySelector('[type="submit"]');button.disabled=true;byId('recovery-message').textContent='';try{const email=byId('recovery-email').value.trim().toLowerCase();await recoveryPost('/api/password-reset/request',{email});showRecoveryStep(2)}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
+    byId('recovery-email').addEventListener('input',()=>{byId('recovery-message').textContent=''});
+    byId('recovery-email-form').addEventListener('submit',async event=>{event.preventDefault();const input=byId('recovery-email'),email=input.value.trim().toLowerCase(),at=email.indexOf('@'),dot=email.lastIndexOf('.');if(!email||!input.checkValidity()||at<1||dot<=at+1||dot===email.length-1){byId('recovery-message').textContent='请输入完整邮箱';return}const button=event.currentTarget.querySelector('[type="submit"]');button.disabled=true;byId('recovery-message').textContent='';try{await recoveryPost('/api/password-reset/request',{email});showRecoveryStep(2)}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
     byId('recovery-code-form').addEventListener('submit',async event=>{event.preventDefault();const button=event.currentTarget.querySelector('[type="submit"]');button.disabled=true;byId('recovery-message').textContent='';try{const result=await recoveryPost('/api/password-reset/verify',{code:byId('recovery-code').value.trim()});resetToken=result.reset_token;showRecoveryStep(3)}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
     byId('recovery-password-form').addEventListener('submit',async event=>{event.preventDefault();const password=byId('recovery-new-password').value;if(password!==byId('recovery-confirm-password').value){byId('recovery-message').textContent='两次输入的密码不一致。';return}const button=event.currentTarget.querySelector('[type="submit"]');button.disabled=true;byId('recovery-message').textContent='';try{await recoveryPost('/api/password-reset/complete',{reset_token:resetToken,new_password:password});closeRecovery();byId('password').value='';byId('message').textContent='密码重置成功，请使用新密码登录。'}catch(error){byId('recovery-message').textContent=error.message}finally{button.disabled=false}});
   </script>
