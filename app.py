@@ -2820,18 +2820,53 @@ def get_recovery_email() -> dict:
     return {"configured": recovery_email_ready(), "email": masked_recovery_email(email), "bound": bool(email)}
 
 
-@app.delete("/api/account/recovery-email")
-def delete_recovery_email() -> dict:
+@app.post("/api/account/recovery-email/unbind/request")
+def request_recovery_email_unbind(request: Request) -> dict:
+    email = str(_read_auth_overrides().get("panel_recovery_email") or "")
+    if not email:
+        raise HTTPException(400, "尚未绑定辅助邮箱")
+    if not recovery_email_ready():
+        raise HTTPException(503, "邮件服务尚未就绪，请联系管理员。")
+    if not recovery_send_allowed("unbind", login_client_key(request)):
+        raise HTTPException(429, "验证码发送过于频繁，请稍后重试")
+    code, pending = new_recovery_code()
+    pending.update({"email": email, "session_secret": SESSION_SECRET})
     with RECOVERY_LOCK:
+        RECOVERY_PENDING["unbind"] = pending
+    try:
+        send_recovery_email(email, "解除 Codex 控制台辅助邮箱绑定", f"邮箱解绑验证码：{code}。10 分钟内有效；如非本人操作，请忽略。")
+    except HTTPException:
+        with RECOVERY_LOCK:
+            if RECOVERY_PENDING.get("unbind") is pending:
+                RECOVERY_PENDING.pop("unbind", None)
+        raise
+    return {"sent": True, "email": masked_recovery_email(email), "expires_in": RECOVERY_CODE_LIFETIME}
+
+
+@app.delete("/api/account/recovery-email")
+def delete_recovery_email(details: RecoveryCodeRequest) -> dict:
+    with RECOVERY_LOCK:
+        pending = RECOVERY_PENDING.get("unbind")
         settings = _read_auth_overrides()
-        if not settings.get("panel_recovery_email"):
+        email = str(settings.get("panel_recovery_email") or "")
+        if not email:
             raise HTTPException(400, "尚未绑定辅助邮箱")
+        if not pending or pending["expires"] < time.time() or pending["session_secret"] != SESSION_SECRET or pending["email"] != email:
+            RECOVERY_PENDING.pop("unbind", None)
+            raise HTTPException(400, "验证码无效或已过期")
+        pending["attempts"] += 1
+        if pending["attempts"] > 5:
+            RECOVERY_PENDING.pop("unbind", None)
+            raise HTTPException(400, "验证码尝试次数过多，请重新发送")
+        if not hmac.compare_digest(recovery_code_digest(details.code, pending["salt"]), pending["digest"]):
+            raise HTTPException(400, "验证码不正确")
         settings.pop("panel_recovery_email", None)
         write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
         RECOVERY_PENDING.pop("bind", None)
         RECOVERY_PENDING.pop("reset", None)
         RECOVERY_PENDING.pop("grant", None)
-    audit("recovery_email_deleted")
+        RECOVERY_PENDING.pop("unbind", None)
+    audit("recovery_email_unbound")
     return {"bound": False}
 
 
@@ -2879,6 +2914,7 @@ def verify_recovery_email_binding(details: RecoveryCodeRequest) -> dict:
         RECOVERY_PENDING.pop("bind", None)
         RECOVERY_PENDING.pop("reset", None)
         RECOVERY_PENDING.pop("grant", None)
+        RECOVERY_PENDING.pop("unbind", None)
     if old_email and old_email != email:
         try:
             send_recovery_email(old_email, "Codex 控制台辅助邮箱已更换", "控制台辅助邮箱已更换。如非本人操作，请通过服务器 SSH 立即重置管理员密码。")
@@ -2962,6 +2998,7 @@ def complete_password_reset(details: ResetPasswordRequest) -> dict:
         SESSION_SECRET = settings["panel_session_secret"]
         RECOVERY_PENDING.pop("grant", None)
         RECOVERY_PENDING.pop("bind", None)
+        RECOVERY_PENDING.pop("unbind", None)
     with LOGIN_FAILURES_LOCK:
         LOGIN_FAILURES.clear()
     audit("account_password_reset")
@@ -4100,6 +4137,7 @@ document.head.insertAdjacentHTML('beforeend','<style>#account-new-username{width
 document.body.insertAdjacentHTML('beforeend','<div id="account-username-mask" class="account-password-mask" role="dialog" aria-modal="true" aria-labelledby="account-username-title"><div class="panel-dialog account-password-dialog"><h3 id="account-username-title">修改账号</h3><p>修改控制台登录账号后，所有登录会话将失效。密码保持不变。</p><div class="account-password-field"><label for="account-new-username">新账号</label><input id="account-new-username" type="text" autocomplete="username" maxlength="80" spellcheck="false"><small class="console-muted">仅支持英文字母、数字、下划线、点和连字符。</small></div><div id="account-username-error" class="console-muted" style="min-height:20px;margin-top:10px;color:#b42318"></div><div class="panel-dialog-actions"><button id="account-username-cancel" class="btn light" type="button">取消</button><button id="account-username-confirm" class="btn" type="button">确认</button></div></div></div>');
 document.head.insertAdjacentHTML('beforeend','<style>#account-recovery-mask input,#account-recovery-mask select{box-sizing:border-box;padding:10px;border:1px solid #d2d6da;border-radius:7px;font:inherit}#account-recovery-mask input{width:100%}#account-recovery-mask .account-recovery-address{display:grid;grid-template-columns:minmax(0,1fr) 142px;gap:8px}#account-recovery-mask .account-recovery-address select{width:100%;background:#fff}#account-recovery-mask .console-muted{display:block;margin-top:6px}#account-recovery-error{color:#b42318}#account-recovery-error:empty{display:none}#account-recovery-mask .panel-dialog-actions{margin-top:14px}@media(max-width:420px){#account-recovery-mask .account-recovery-address{grid-template-columns:1fr}}</style>');
 document.body.insertAdjacentHTML('beforeend','<div id="account-recovery-mask" class="account-password-mask" role="dialog" aria-modal="true" aria-labelledby="account-recovery-title"><div class="panel-dialog account-password-dialog"><h3 id="account-recovery-title">添加邮箱</h3><div id="account-recovery-start"><div class="account-password-field"><div class="account-recovery-address"><input id="account-recovery-email-input" aria-label="辅助邮箱账号" type="text" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="64"><select id="account-recovery-domain" aria-label="邮箱后缀"><option value="qq.com">@qq.com</option><option value="163.com">@163.com</option><option value="126.com">@126.com</option><option value="sina.com">@sina.com</option><option value="gmail.com">@gmail.com</option><option value="yahoo.com">@yahoo.com</option><option value="outlook.com">@outlook.com</option></select></div></div></div><div id="account-recovery-verify" hidden><div class="account-password-field"><label for="account-recovery-code">邮箱验证码</label><input id="account-recovery-code" inputmode="numeric" autocomplete="one-time-code" maxlength="8"><small class="console-muted">验证码发送至新邮箱，10 分钟内有效。</small></div></div><div id="account-recovery-error" class="console-muted" role="alert"></div><div class="panel-dialog-actions"><button id="account-recovery-cancel" class="btn light" type="button">取消</button><button id="account-recovery-confirm" class="btn" type="button">发送验证码</button></div></div></div>');
+document.body.insertAdjacentHTML('beforeend','<div id="account-unbind-mask" class="account-password-mask" role="dialog" aria-modal="true" aria-labelledby="account-unbind-title"><div class="panel-dialog account-password-dialog"><h3 id="account-unbind-title">验证辅助邮箱</h3><p id="account-unbind-description">验证码已发送至辅助邮箱，10 分钟内有效。</p><div class="account-password-field"><label for="account-unbind-code">邮箱验证码</label><div class="account-password-input"><input id="account-unbind-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="8"></div></div><div id="account-unbind-error" class="console-muted" role="alert" style="min-height:20px;margin-top:10px;color:#b42318"></div><div class="panel-dialog-actions"><button id="account-unbind-cancel" class="btn light" type="button">取消</button><button id="account-unbind-confirm" class="btn" type="button">验证并解除绑定</button></div></div></div>');
 let accountMenuUser='';
 async function loadAccountMenu(){try{const account=await api('/api/account');accountMenuUser=account.username||'账户';$('#account-menu-name').textContent=accountMenuUser;document.getElementById('account-menu').style.display='block'}catch{}}
 function closeAccountMenu(){document.getElementById('account-menu')?.classList.remove('open')}
@@ -4111,13 +4149,17 @@ async function submitUsernameChange(){const username=$('#account-new-username').
 function splitPastedRecoveryEmail(){const input=$('#account-recovery-email-input'),value=input.value.trim(),at=value.lastIndexOf('@');if(at<1||at===value.length-1)return;const domain=value.slice(at+1).toLowerCase();const select=$('#account-recovery-domain');if(!Array.from(select.options).some(option=>option.value===domain))return;input.value=value.slice(0,at);select.value=domain}
 function recoveryEmailAddress(){const local=$('#account-recovery-email-input').value.trim(),domain=$('#account-recovery-domain').value.trim().toLowerCase();if(!local||!domain)throw Error('请输入邮箱账号和后缀。');if(/[@\s]/.test(local)||!/^[^@\s]+\.[^@\s]+$/.test(domain))throw Error('请输入有效的邮箱地址。');return local+'@'+domain}
 async function openRecoveryEmailDialog(){closeAccountMenu();$('#account-recovery-start').hidden=false;$('#account-recovery-verify').hidden=true;$('#account-recovery-email-input').value='';$('#account-recovery-domain').value='qq.com';$('#account-recovery-code').value='';$('#account-recovery-error').textContent='';$('#account-recovery-confirm').textContent='发送验证码';$('#account-recovery-mask').classList.add('show');try{const status=await api('/api/account/recovery-email');$('#account-recovery-title').textContent='添加邮箱';if(!status.configured)$('#account-recovery-error').textContent='邮件发送服务尚未就绪，请联系管理员。';$('#account-recovery-confirm').disabled=!status.configured;if(status.configured)$('#account-recovery-email-input').focus()}catch(e){$('#account-recovery-error').textContent=e.message}}
-async function handleRecoveryEmailAction(){const button=$('#console-recovery-email');if(button.dataset.bound!=='true'){openRecoveryEmailDialog();return}if(!await panelDialog({title:'解除辅助邮箱绑定',message:'解除绑定后将无法通过邮箱找回密码。确定解除绑定吗？',confirmLabel:'解除绑定'}))return;button.disabled=true;try{await api('/api/account/recovery-email',{method:'DELETE'});await refreshConsoleAccount();note('已解除绑定')}catch(error){await panelDialog({title:'解除绑定失败',message:error.message,confirmLabel:'知道了',showCancel:false})}finally{button.disabled=false}}
+function openUnbindEmailDialog(email){$('#account-unbind-code').value='';$('#account-unbind-error').textContent='';$('#account-unbind-description').textContent='验证码已发送至 '+(email||'辅助邮箱')+'，10 分钟内有效。';$('#account-unbind-mask').classList.add('show');$('#account-unbind-code').focus()}
+function closeUnbindEmailDialog(){$('#account-unbind-mask').classList.remove('show')}
+async function handleRecoveryEmailAction(){const button=$('#console-recovery-email');if(button.dataset.bound!=='true'){openRecoveryEmailDialog();return}if(!await panelDialog({title:'解除辅助邮箱绑定',message:'解除绑定后将无法通过邮箱找回密码。确定解除绑定吗？',confirmLabel:'发送验证码'}))return;button.disabled=true;try{const result=await api('/api/account/recovery-email/unbind/request',{method:'POST'});openUnbindEmailDialog(result.email)}catch(error){await panelDialog({title:'发送验证码失败',message:error.message,confirmLabel:'知道了',showCancel:false})}finally{button.disabled=false}}
+async function submitUnbindEmail(){const code=$('#account-unbind-code').value.trim(),error=$('#account-unbind-error'),button=$('#account-unbind-confirm');if(!/^[0-9]{8}$/.test(code)){error.textContent='请输入 8 位邮箱验证码。';return}error.textContent='';button.disabled=true;button.textContent='验证中…';try{await api('/api/account/recovery-email',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});closeUnbindEmailDialog();await refreshConsoleAccount();note('已解除绑定')}catch(e){error.textContent=e.message}finally{button.disabled=false;button.textContent='验证并解除绑定'}}
 function closeRecoveryEmailDialog(){$('#account-recovery-mask').classList.remove('show')}
 async function submitRecoveryEmail(){const button=$('#account-recovery-confirm'),error=$('#account-recovery-error');error.textContent='';button.disabled=true;button.textContent='处理中…';try{if($('#account-recovery-verify').hidden){const email=recoveryEmailAddress();await api('/api/account/recovery-email/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});$('#account-recovery-start').hidden=true;$('#account-recovery-verify').hidden=false;button.textContent='验证并绑定';$('#account-recovery-code').focus()}else{const code=$('#account-recovery-code').value.trim();if(!/^[0-9]{8}$/.test(code))throw Error('请输入 8 位邮箱验证码。');await api('/api/account/recovery-email/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});closeRecoveryEmailDialog();await refreshConsoleAccount();note('添加成功')}}catch(e){error.textContent=e.message}finally{button.disabled=false;if($('#account-recovery-verify').hidden)button.textContent='发送验证码';else button.textContent='验证并绑定'}}
 function togglePasswordField(button){const input=document.getElementById(button.dataset.passwordTarget);if(!input)return;input.type=input.type==='password'?'text':'password';button.textContent=input.type==='password'?'◉':'◌'}
 async function submitPasswordChange(){const password=$('#account-new-password').value,confirm=$('#account-confirm-password').value,error=$('#account-password-error');if(password.length<8){error.textContent='新密码至少需要 8 位。';return}if(password!==confirm){error.textContent='两次输入的密码不一致。';return}const button=$('#account-password-confirm');button.disabled=true;button.textContent='保存中…';try{await api('/api/account/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:password})});closePasswordDialog();await panelDialog({title:'密码已修改',message:'密码修改成功，当前会话将失效，请使用新密码重新登录。',confirmLabel:'重新登录',showCancel:false});logoutConsole()}catch(e){error.textContent=e.message}finally{button.disabled=false;button.textContent='确认'}}
 document.getElementById('account-menu-toggle')?.addEventListener('click',()=>document.getElementById('account-menu')?.classList.toggle('open'));
 document.getElementById('account-logout')?.addEventListener('click',logoutConsole);document.getElementById('account-recovery-cancel')?.addEventListener('click',closeRecoveryEmailDialog);document.getElementById('account-recovery-confirm')?.addEventListener('click',submitRecoveryEmail);document.getElementById('account-recovery-email-input')?.addEventListener('input',splitPastedRecoveryEmail);document.getElementById('account-username-cancel')?.addEventListener('click',closeUsernameDialog);document.getElementById('account-username-confirm')?.addEventListener('click',submitUsernameChange);document.getElementById('account-new-username')?.addEventListener('keydown',event=>{if(event.key==='Enter')submitUsernameChange()});document.getElementById('account-password-cancel')?.addEventListener('click',closePasswordDialog);document.getElementById('account-password-confirm')?.addEventListener('click',submitPasswordChange);document.querySelectorAll('.account-password-eye').forEach(button=>button.addEventListener('click',()=>togglePasswordField(button)));document.addEventListener('click',event=>{const menu=document.getElementById('account-menu');if(menu&&!menu.contains(event.target))closeAccountMenu()});loadAccountMenu();
+document.getElementById('account-unbind-cancel')?.addEventListener('click',closeUnbindEmailDialog);document.getElementById('account-unbind-confirm')?.addEventListener('click',submitUnbindEmail);document.getElementById('account-unbind-code')?.addEventListener('keydown',event=>{if(event.key==='Enter')submitUnbindEmail()});
  document.body.insertAdjacentHTML('beforeend', `<section id="console-health" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>健康检查</h2><p class="panel-note">检查 Codex 数据目录、配置文件、认证、当前供应商和磁盘空间，确认服务器是否满足使用条件。</p></div><button class="btn" onclick="runHealth()">立即检查</button></div><div id="health-summary" class="console-health-summary">尚未执行检查。</div><div id="health-checks"></div></div></section><section id="console-proxy" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><div class="row-between"><div><h2>反向代理</h2><p class="panel-note">部署独立 Nginx 容器，自动校验证书并重载。证书和私钥仅用于本次部署，不会保存到面板设置。</p></div><span id="proxy-status" class="proxy-status">正在读取状态…</span></div><div id="proxy-success-view" class="proxy-success-view" hidden><div class="proxy-success-card"><div class="proxy-success-icon">✓</div><div><h3 id="proxy-success-title">HTTPS 反向代理已运行</h3><p id="proxy-success-copy">HTTPS 入口已就绪。</p></div></div><dl class="proxy-summary"><div><dt>访问地址</dt><dd><a id="proxy-public-url" target="_blank" rel="noopener"></a></dd></div><div><dt>上游服务</dt><dd id="proxy-success-upstream"></dd></div></dl><div class="console-form-actions"><button class="btn" type="button" id="proxy-enable-secure">启用安全模式</button><button class="btn" type="button" id="proxy-disable-secure">关闭安全模式</button><button class="btn" type="button" id="proxy-edit">修改配置</button><button class="btn light" type="button" id="proxy-disable">停用代理</button></div></div><div id="proxy-form-view"><div class="proxy-warning">部署后请在云防火墙中仅公开 80/443，并限制面板端口 8787 的直接访问。</div><div class="console-form"><div><label>域名</label><input id="proxy-domain" placeholder="console.example.com"></div><div><label>上游地址</label><input id="proxy-upstream" value="codex-provider-console:8787"></div><div class="wide"><label>TLS 证书（PEM）</label><textarea id="proxy-certificate" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea></div><div class="wide"><label>TLS 私钥（PEM）</label><textarea id="proxy-private-key" class="config-area proxy-pem" rows="8" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----"></textarea></div><div class="wide"><label>Nginx 部署预览</label><pre id="proxy-config" class="console-code">填写域名后生成</pre></div></div><div class="console-form-actions"><button class="btn" type="button" id="proxy-apply">校验并部署</button><button class="btn light" type="button" id="proxy-cancel-edit" hidden>取消修改</button></div></div><div id="proxy-notice" class="notice"></div></div></section>`);
 
  document.body.insertAdjacentHTML('beforeend', `<section id="console-console" class="console-panel console-nav-panel" style="display:none"><div class="list-shell"><h2>账号与安全</h2><p class="panel-note">管理控制台登录账号和辅助邮箱。</p><div class="console-account-actions"><div><strong>登录账号</strong><span id="console-account-name" class="console-muted">正在读取…</span><button class="btn light" type="button" id="console-change-username">修改账号</button></div><div><strong>登录密码</strong><span class="console-muted">更新后使用新密码重新登录。</span><button class="btn light" type="button" id="console-change-password">修改密码</button></div><div><strong>辅助邮箱</strong><span id="console-recovery-status" class="console-muted">正在读取…</span><button class="btn light" type="button" id="console-recovery-email">添加邮箱</button></div></div></div></section>`);
