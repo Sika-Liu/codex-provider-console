@@ -37,8 +37,7 @@ from provider_domain import (
 )
 from host_ops import host_ssh_command as build_host_ssh_command, nss_environment, ssh_host_key_options as verify_ssh_host_key
 from storage_ops import resolve_backup_directory, write_private as atomic_write_private
-from security.auth_service import AuthService
-from application.provider_store import ProviderStore
+from api.compat import AuthService, ProviderStore
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 APP_VERSION = (Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip() if Path(__file__).with_name("VERSION").is_file() else "0.1.0")
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")

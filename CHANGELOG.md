@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Added `api.compat` as a stable compatibility entrypoint for incremental route migration.
 - Extracted password/session authentication and login rate limiting into `security/auth_service.py`; existing HTTP routes keep compatibility wrappers.
 
 ## 0.1.0 - 2026-09-26
