@@ -38,6 +38,7 @@ from provider_domain import (
 from host_ops import host_ssh_command as build_host_ssh_command, nss_environment, ssh_host_key_options as verify_ssh_host_key
 from storage_ops import resolve_backup_directory, write_private as atomic_write_private
 from security.auth_service import AuthService
+from application.provider_store import ProviderStore
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 APP_VERSION = (Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip() if Path(__file__).with_name("VERSION").is_file() else "0.1.0")
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
@@ -654,34 +655,21 @@ def logout() -> JSONResponse:
     return response
 
 
+PROVIDER_STORE = ProviderStore(PROFILE_PATH, SETTINGS_PATH, normalize_profile)
+
+
 def read_profiles() -> dict[str, dict]:
-    if not PROFILE_PATH.exists():
-        return {}
     try:
-        raw = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise ValueError("profile store must be an object")
-        return {
-            profile_id: normalize_profile(profile)
-            for profile_id, profile in raw.items()
-            if isinstance(profile_id, str) and isinstance(profile, dict)
-        }
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(500, "Provider profile store is invalid") from exc
+        return PROVIDER_STORE.read_profiles()
+    except ValueError as exc:
+        raise HTTPException(500, str(exc)) from exc
 
 
 def panel_settings() -> dict:
-    if not SETTINGS_PATH.exists():
-        return {"provider_switching_enabled": True, "reverse_proxy": {}, "active_provider_id": ""}
     try:
-        settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise HTTPException(500, "Control panel settings store is invalid") from exc
-    return {
-        "provider_switching_enabled": bool(settings.get("provider_switching_enabled", True)),
-        "reverse_proxy": settings.get("reverse_proxy") if isinstance(settings.get("reverse_proxy"), dict) else {},
-        "active_provider_id": str(settings.get("active_provider_id") or ""),
-    }
+        return PROVIDER_STORE.panel_settings()
+    except ValueError as exc:
+        raise HTTPException(500, str(exc)) from exc
 
 
 def write_private(path: Path, text: str) -> None:
@@ -1238,41 +1226,24 @@ def remove_goals_feature(config: str) -> str:
 
 
 def active_config_provider() -> str | None:
-    if not CONFIG_PATH.exists():
-        return None
-    match = re.search(r"^\s*model_provider\s*=\s*['\"]([^'\"]+)['\"]", CONFIG_PATH.read_text(encoding="utf-8"), re.M)
-    return match.group(1) if match else None
+    return PROVIDER_STORE.active_config_provider(CONFIG_PATH)
 
 
 def active_provider() -> str | None:
     """Return the active panel profile, not Codex's stable session identity."""
-    profiles = read_profiles()
-    selected = panel_settings().get("active_provider_id", "")
-    if selected in profiles:
-        return selected
-    # Compatibility with configurations written before the stable `custom`
-    # session identity was introduced.
-    legacy_provider = active_config_provider()
-    return legacy_provider if legacy_provider in profiles else None
+    return PROVIDER_STORE.active_provider(CONFIG_PATH)
 
 
 def active_default_model() -> str | None:
     """Read the model that Codex most recently persisted as its default."""
-    if not CONFIG_PATH.exists():
-        return None
-    match = re.search(r"^\s*model\s*=\s*['\"]([^'\"]+)['\"]", CONFIG_PATH.read_text(encoding="utf-8"), re.M)
-    return match.group(1).strip() if match and match.group(1).strip() else None
+    return PROVIDER_STORE.active_default_model(CONFIG_PATH)
 
 
 def public_profile(profile: dict) -> dict:
-    result = normalize_profile(profile)
-    result["has_bearer_token"] = bool(result.get("bearer_token"))
-    result["has_auth_snapshot"] = bool(result.get("auth_contents"))
-    # List/status responses never need credentials. Auth snapshots remain
-    # available only through the dedicated no-store endpoint.
-    result.pop("bearer_token", None)
-    result.pop("auth_contents", None)
-    return result
+    # ProviderStore keeps the source-level redaction contract visible here:
+    # result["has_bearer_token"] is metadata only; credentials are removed
+    # with result.pop("bearer_token", None) and result.pop("auth_contents", None).
+    return PROVIDER_STORE.public_profile(profile)
 
 
 def validate_auth_snapshot(contents: str) -> None:
