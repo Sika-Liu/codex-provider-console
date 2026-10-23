@@ -29,7 +29,7 @@ class BackupRecoveryTests(unittest.TestCase):
 
     def test_ui_requires_confirmation_before_restoring(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertIn("备份恢复", source)
+        self.assertIn("title:'恢复备份'", source)
         self.assertIn("恢复前会自动备份当前状态", source)
         self.assertIn("restoreBackup", source)
 
