@@ -37,6 +37,7 @@ from provider_domain import (
 )
 from host_ops import host_ssh_command as build_host_ssh_command, nss_environment, ssh_host_key_options as verify_ssh_host_key
 from storage_ops import resolve_backup_directory, write_private as atomic_write_private
+from security.auth_service import AuthService
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 APP_VERSION = (Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip() if Path(__file__).with_name("VERSION").is_file() else "0.1.0")
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
@@ -289,15 +290,19 @@ if "panel_cookie_secure" in _AUTH_OVERRIDES:
     COOKIE_SECURE = bool(_AUTH_OVERRIDES["panel_cookie_secure"])
 
 
-def current_password_matches(password: str) -> bool:
-    overrides = _read_auth_overrides()
-    stored_hash = str(overrides.get("panel_password_hash") or "")
-    if stored_hash:
-        salt = str(overrides.get("panel_password_salt") or "")
-        candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 210_000).hex()
-        return hmac.compare_digest(candidate, stored_hash)
-    return bool(PANEL_PASSWORD) and hmac.compare_digest(password, PANEL_PASSWORD)
+AUTH_SERVICE = AuthService(
+    username=PANEL_USERNAME,
+    password=PANEL_PASSWORD,
+    session_secret=SESSION_SECRET,
+    settings_path=SETTINGS_PATH,
+    session_max_age=SESSION_MAX_AGE,
+    failure_window_seconds=LOGIN_FAILURE_WINDOW_SECONDS,
+    max_failures=LOGIN_MAX_FAILURES,
+)
 
+
+def current_password_matches(password: str) -> bool:
+    return AUTH_SERVICE.current_password_matches(password)
 
 def recovery_email_ready() -> bool:
     return bool(SMTP_HOST and 1 <= SMTP_PORT <= 65535 and SMTP_USERNAME and SMTP_PASSWORD and SMTP_FROM)
@@ -491,60 +496,32 @@ from model_diagnostic_domain import validate_model_diagnostic_response
 
 
 def auth_configured() -> bool:
-    overrides = _read_auth_overrides()
-    return bool(PANEL_USERNAME and (PANEL_PASSWORD or overrides.get("panel_password_hash")) and SESSION_SECRET)
+    return AUTH_SERVICE.auth_configured()
 
 
 def session_token(username: str) -> str:
-    payload = f"{int(time.time())}:{username}".encode("utf-8")
-    signature = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).hexdigest().encode("ascii")
-    return base64.urlsafe_b64encode(payload + b":" + signature).decode("ascii").rstrip("=")
+    return AUTH_SERVICE.session_token(username)
 
 
 def valid_session(token: str | None) -> bool:
-    if not token or not auth_configured():
-        return False
-    try:
-        padded = token + "=" * (-len(token) % 4)
-        payload, signature = base64.urlsafe_b64decode(padded.encode("ascii")).rsplit(b":", 1)
-        expected = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).hexdigest().encode("ascii")
-        timestamp, username = payload.decode("utf-8").split(":", 1)
-        return (
-            hmac.compare_digest(signature, expected)
-            and hmac.compare_digest(username, PANEL_USERNAME)
-            and int(timestamp) + SESSION_MAX_AGE >= int(time.time())
-        )
-    except (ValueError, UnicodeDecodeError):
-        return False
+    return AUTH_SERVICE.valid_session(token)
 
 
 def login_client_key(request: Request) -> str:
     """Return a best-effort client key without trusting forwarded headers."""
-    return request.client.host if request.client else "unknown"
+    return AUTH_SERVICE.client_key(request.client.host if request.client else None)
 
 
 def login_is_rate_limited(client_key: str, now: float | None = None) -> bool:
-    now = time.monotonic() if now is None else now
-    with LOGIN_FAILURES_LOCK:
-        failures = [occurred for occurred in LOGIN_FAILURES.get(client_key, []) if now - occurred < LOGIN_FAILURE_WINDOW_SECONDS]
-        if failures:
-            LOGIN_FAILURES[client_key] = failures
-        else:
-            LOGIN_FAILURES.pop(client_key, None)
-        return len(failures) >= LOGIN_MAX_FAILURES
+    return AUTH_SERVICE.login_is_rate_limited(client_key, now)
 
 
 def record_failed_login(client_key: str, now: float | None = None) -> None:
-    now = time.monotonic() if now is None else now
-    with LOGIN_FAILURES_LOCK:
-        failures = [occurred for occurred in LOGIN_FAILURES.get(client_key, []) if now - occurred < LOGIN_FAILURE_WINDOW_SECONDS]
-        failures.append(now)
-        LOGIN_FAILURES[client_key] = failures
+    AUTH_SERVICE.record_failed_login(client_key, now)
 
 
 def clear_failed_logins(client_key: str) -> None:
-    with LOGIN_FAILURES_LOCK:
-        LOGIN_FAILURES.pop(client_key, None)
+    AUTH_SERVICE.clear_failed_logins(client_key)
 
 
 LOGIN_HTML = '''<!doctype html>

@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- Extracted password/session authentication and login rate limiting into `security/auth_service.py`; existing HTTP routes keep compatibility wrappers.
+
 ## 0.1.0 - 2026-09-26
 
 Initial personal self-hosted optimization release.

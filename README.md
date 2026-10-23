@@ -88,6 +88,7 @@ SMTP_USE_SSL=1
 
 - 默认监听公网地址；请自行通过云安全组、HTTPS 和管理员密码保护面板；
 - 长期公网使用建议配置 HTTPS 反向代理；
+- 面板数据保存在用户自己的服务器上；项目不会上传或向第三方披露管理员密码、API Key、`auth.json`、SSH 私钥或备份文件；
 - 使用 HTTPS 反向代理时，将 `.env` 中的 `PANEL_COOKIE_SECURE` 改为 `true`，然后执行 `codex-panel restart`；
 - 不要将管理员密码、`.env`、`auth.json` 或备份文件分享给他人。
 
