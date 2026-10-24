@@ -5,7 +5,9 @@ from pathlib import Path
 class ReverseProxySecureModeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = (Path(__file__).parents[1] / "app.py").read_text(encoding="utf-8")
+        root = Path(__file__).parents[1]
+        cls.source = (root / "app.py").read_text(encoding="utf-8")
+        cls.gateway = (root / "infrastructure" / "reverse_proxy_gateway.py").read_text(encoding="utf-8")
 
     def test_endpoint_requires_https_proxy_identity(self):
         self.assertIn("/api/reverse-proxy/enable-secure-mode", self.source)
@@ -16,13 +18,13 @@ class ReverseProxySecureModeTests(unittest.TestCase):
         self.assertIn("https_error", self.source)
 
     def test_secure_mode_updates_host_environment_and_recreates_panel(self):
-        self.assertIn('PANEL_BIND", "127.0.0.1"', self.source)
-        self.assertIn('PANEL_COOKIE_SECURE", "true"', self.source)
-        self.assertIn('settings["panel_cookie_secure"] = True', self.source)
-        self.assertIn('settings["panel_cookie_secure"] = False', self.source)
-        self.assertIn('"docker", "compose", "up"', self.source)
-        self.assertNotIn("sleep 8; exec docker compose", self.source)
-        self.assertIn("import json, os, re, shutil, subprocess, uuid", self.source)
+        self.assertIn('PANEL_BIND", "127.0.0.1"', self.gateway)
+        self.assertIn('PANEL_COOKIE_SECURE", "true"', self.gateway)
+        self.assertIn('settings["panel_cookie_secure"] = True', self.gateway)
+        self.assertIn('settings["panel_cookie_secure"] = False', self.gateway)
+        self.assertIn('"docker", "compose", "up"', self.gateway)
+        self.assertNotIn("sleep 8; exec docker compose", self.gateway)
+        self.assertIn("import json, os, re, shutil, subprocess, uuid", self.gateway)
 
     def test_ui_exposes_explicit_secure_mode_action(self):
         self.assertIn('id="proxy-enable-secure"', self.source)
