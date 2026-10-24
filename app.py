@@ -39,6 +39,7 @@ from host_ops import host_ssh_command as build_host_ssh_command, nss_environment
 from storage_ops import write_private as atomic_write_private
 from api.compat import AuthService, ProviderStore
 from application.backup_service import BackupService
+from application.provider_service import ProviderService
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 APP_VERSION = (Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip() if Path(__file__).with_name("VERSION").is_file() else "0.1.0")
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
@@ -725,6 +726,14 @@ def restore_backup_state(backup_dir: Path) -> list[str]:
     return restored
 
 
+PROVIDER_SERVICE = ProviderService(
+    store=PROVIDER_STORE,
+    profile_path=PROFILE_PATH,
+    write_private=write_private,
+    create_backup=backup_state,
+)
+
+
 def audit(action: str, **details: str | bool | None) -> None:
     payload = {"timestamp": datetime.now(timezone.utc).isoformat(), "action": action, **details}
     with AUDIT_PATH.open("a", encoding="utf-8") as handle:
@@ -1129,17 +1138,6 @@ def validate_auth_snapshot(contents: str) -> None:
         raise HTTPException(422, "The current auth.json is not a ChatGPT login session")
 
 
-def api_key_from_auth_contents(contents: str) -> str | None:
-    if not contents.strip():
-        return None
-    try:
-        parsed = json.loads(contents)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(422, "auth.json must contain valid JSON") from exc
-    if not isinstance(parsed, dict):
-        raise HTTPException(422, "auth.json must contain a JSON object")
-    key = parsed.get("OPENAI_API_KEY")
-    return key if isinstance(key, str) and key else None
 
 
 def config_text() -> str:
@@ -3109,33 +3107,12 @@ def delete_reverse_proxy(background_tasks: BackgroundTasks) -> dict:
 
 @app.post("/api/providers")
 def save_provider(provider: Provider) -> dict:
-    profiles = read_profiles()
-    data = normalize_profile(provider.model_dump())
-    available_models = {entry["name"] for entry in data["models"]}
-    if data["mode"] == "pure_api" and data["model"] and data["model"] not in available_models:
-        raise HTTPException(422, "配置模型必须从上游获取的模型列表中选择")
-    existing = profiles.get(provider.id, {})
-    if data["mode"] == "pure_api":
-        entered_key = data["bearer_token"]
-        key_from_auth = api_key_from_auth_contents(data["auth_contents"])
-        if key_from_auth:
-            data["bearer_token"] = key_from_auth
-        elif not entered_key:
-            data["bearer_token"] = existing.get("bearer_token")
-            if existing.get("auth_contents"):
-                data["auth_contents"] = existing["auth_contents"]
-        elif not data["auth_contents"] and existing.get("auth_contents"):
-            data["auth_contents"] = existing["auth_contents"]
-    elif not data["auth_contents"] and existing.get("auth_contents"):
-        data["auth_contents"] = existing["auth_contents"]
-    if not data["bearer_token"] and provider.id in profiles:
-        data["bearer_token"] = profiles[provider.id].get("bearer_token")
-    data["requires_openai_auth"] = data["mode"] == "official"
-    backup_state(reason="provider_save")
-    profiles[provider.id] = data
-    write_private(PROFILE_PATH, json.dumps({key: storage_profile(value) for key, value in profiles.items()}, ensure_ascii=False, indent=2) + "\n")
+    try:
+        result = PROVIDER_SERVICE.save(provider.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     audit("provider_saved", provider_id=provider.id)
-    return public_profile(data)
+    return result
 
 
 @app.get("/api/providers/{provider_id}/auth")
@@ -3259,14 +3236,12 @@ def get_provider_activation(job_id: str) -> dict:
 
 @app.delete("/api/providers/{provider_id}")
 def delete_provider(provider_id: str) -> dict:
-    if active_provider() == provider_id:
-        raise HTTPException(409, "Switch away from the active provider before deleting it")
-    profiles = read_profiles()
-    if provider_id not in profiles:
-        raise HTTPException(404, "Provider profile not found")
-    backup_state(reason="provider_delete")
-    del profiles[provider_id]
-    write_private(PROFILE_PATH, json.dumps({key: storage_profile(value) for key, value in profiles.items()}, ensure_ascii=False, indent=2) + "\n")
+    try:
+        PROVIDER_SERVICE.delete(provider_id, active_provider_id=active_provider())
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
     audit("provider_deleted", provider_id=provider_id)
     return {"deleted": provider_id}
 
