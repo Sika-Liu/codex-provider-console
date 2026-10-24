@@ -7,8 +7,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 class AccountSettingsTests(unittest.TestCase):
     def test_account_api_remains_available_without_settings_page(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertIn('@app.get("/api/account")', source)
-        self.assertIn('@app.post("/api/account")', source)
+        self.assertIn('@ACCOUNT_ROUTER.get("/api/account")', source)
+        self.assertIn('@ACCOUNT_ROUTER.post("/api/account")', source)
         self.assertIn("panel_password_hash", source)
         self.assertNotIn('id="console-settings"', source)
         self.assertNotIn("saveAccountSettings", source)

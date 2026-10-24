@@ -21,7 +21,7 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Callable, Literal
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -106,6 +106,13 @@ SESSION_PROVIDER_ID = "custom"
 ARCHIVED_SESSIONS_PATH = CODEX_HOME / "archived_sessions"
 APP_SERVER_LOCK = threading.Lock()
 SESSION_MUTATION_LOCK = threading.Lock()
+SESSIONS_ROUTER = APIRouter()
+BACKUPS_ROUTER = APIRouter()
+PROXY_ROUTER = APIRouter()
+ACCOUNT_ROUTER = APIRouter()
+PROVIDERS_ROUTER = APIRouter()
+DIAGNOSTICS_ROUTER = APIRouter()
+OPERATIONS_ROUTER = APIRouter()
 PROVIDER_SWITCH_LOCK = threading.Lock()
 ACTIVATION_JOBS: dict[str, dict] = {}
 ACTIVATION_JOBS_LOCK = threading.Lock()
@@ -1296,7 +1303,7 @@ def switch_provider(
         PROVIDER_SWITCH_LOCK.release()
 
 
-@app.get("/api/status")
+@OPERATIONS_ROUTER.get("/api/status")
 def status() -> dict:
     model = None
     if CONFIG_PATH.exists():
@@ -1349,12 +1356,12 @@ class SessionMigrationRequest(BaseModel):
     apply: bool = False
 
 
-@app.get("/api/settings")
+@ACCOUNT_ROUTER.get("/api/settings")
 def get_settings() -> dict:
     return panel_settings()
 
 
-@app.post("/api/settings")
+@ACCOUNT_ROUTER.post("/api/settings")
 def save_settings(request: PanelSettings) -> dict:
     settings = _read_auth_overrides()
     settings["provider_switching_enabled"] = request.provider_switching_enabled
@@ -1366,7 +1373,7 @@ def save_settings(request: PanelSettings) -> dict:
     return settings
 
 
-@app.get("/api/account")
+@ACCOUNT_ROUTER.get("/api/account")
 def get_account_settings() -> dict:
     return {
         "username": PANEL_USERNAME,
@@ -1377,8 +1384,8 @@ def get_account_settings() -> dict:
     }
 
 
-@app.post("/api/account")
-@app.post("/api/account/password")
+@ACCOUNT_ROUTER.post("/api/account")
+@ACCOUNT_ROUTER.post("/api/account/password")
 def save_account_password(request: AccountPasswordRequest) -> dict:
     global PANEL_PASSWORD, SESSION_SECRET
     if current_password_matches(request.new_password):
@@ -1400,7 +1407,7 @@ def save_account_password(request: AccountPasswordRequest) -> dict:
     return {"username": PANEL_USERNAME, "cookie_secure": COOKIE_SECURE, "sessions_invalidated": True}
 
 
-@app.post("/api/account/username")
+@ACCOUNT_ROUTER.post("/api/account/username")
 def save_account_username(request: AccountUsernameRequest) -> dict:
     global PANEL_USERNAME, SESSION_SECRET
     if request.username == PANEL_USERNAME:
@@ -1458,53 +1465,53 @@ def recovery_result(operation):
         raise HTTPException(exc.status, str(exc)) from exc
 
 
-@app.get("/api/account/recovery-email")
+@ACCOUNT_ROUTER.get("/api/account/recovery-email")
 def get_recovery_email() -> dict:
     return RECOVERY_SERVICE.status()
 
 
-@app.post("/api/account/recovery-email/unbind/request")
+@ACCOUNT_ROUTER.post("/api/account/recovery-email/unbind/request")
 def request_recovery_email_unbind(request: Request) -> dict:
     return recovery_result(lambda: RECOVERY_SERVICE.request_unbind(login_client_key(request)))
 
 
-@app.delete("/api/account/recovery-email")
+@ACCOUNT_ROUTER.delete("/api/account/recovery-email")
 def delete_recovery_email(details: RecoveryCodeRequest) -> dict:
     return recovery_result(lambda: RECOVERY_SERVICE.unbind(details.code))
 
 
-@app.post("/api/account/recovery-email/request")
+@ACCOUNT_ROUTER.post("/api/account/recovery-email/request")
 def request_recovery_email_binding(details: RecoveryEmailRequest, request: Request) -> dict:
     return recovery_result(lambda: RECOVERY_SERVICE.request_binding(details.email, login_client_key(request)))
 
 
-@app.post("/api/account/recovery-email/verify")
+@ACCOUNT_ROUTER.post("/api/account/recovery-email/verify")
 def verify_recovery_email_binding(details: RecoveryCodeRequest) -> dict:
     return recovery_result(lambda: RECOVERY_SERVICE.verify_binding(details.code))
 
 
-@app.post("/api/password-reset/request")
+@ACCOUNT_ROUTER.post("/api/password-reset/request")
 def request_password_reset(details: RecoveryEmailRequest, request: Request) -> dict:
     return recovery_result(lambda: RECOVERY_SERVICE.request_reset(details.email, login_client_key(request)))
 
 
-@app.post("/api/password-reset/verify")
+@ACCOUNT_ROUTER.post("/api/password-reset/verify")
 def verify_password_reset(details: RecoveryCodeRequest) -> dict:
     return recovery_result(lambda: RECOVERY_SERVICE.verify_reset(details.code))
 
 
-@app.post("/api/password-reset/complete")
+@ACCOUNT_ROUTER.post("/api/password-reset/complete")
 def complete_password_reset(details: ResetPasswordRequest) -> dict:
     return recovery_result(lambda: RECOVERY_SERVICE.complete_reset(details.reset_token, details.new_password))
 
 
-@app.get("/api/common-config")
+@ACCOUNT_ROUTER.get("/api/common-config")
 def get_common_config() -> dict:
     contents = COMMON_CONFIG_PATH.read_text(encoding="utf-8") if COMMON_CONFIG_PATH.exists() else remove_provider_sections(config_text())
     return {"contents": contents}
 
 
-@app.post("/api/common-config/extract")
+@ACCOUNT_ROUTER.post("/api/common-config/extract")
 def extract_common_config() -> dict:
     contents = remove_provider_sections(config_text())
     write_private(COMMON_CONFIG_PATH, contents + ("\n" if contents else ""))
@@ -1512,7 +1519,7 @@ def extract_common_config() -> dict:
     return {"contents": contents}
 
 
-@app.post("/api/common-config")
+@ACCOUNT_ROUTER.post("/api/common-config")
 def save_common_config(request: CommonConfigRequest) -> dict:
     contents = canonicalize_base_config(request.contents.strip())
     try:
@@ -1524,7 +1531,7 @@ def save_common_config(request: CommonConfigRequest) -> dict:
     return {"contents": contents}
 
 
-@app.get("/api/reverse-proxy/status")
+@PROXY_ROUTER.get("/api/reverse-proxy/status")
 def reverse_proxy_status() -> dict:
     """Return deployment state without ever exposing certificate material."""
     try:
@@ -1549,7 +1556,7 @@ def reverse_proxy_status() -> dict:
     }
 
 
-@app.post("/api/reverse-proxy/enable-secure-mode")
+@PROXY_ROUTER.post("/api/reverse-proxy/enable-secure-mode")
 def enable_reverse_proxy_secure_mode(request: Request) -> dict:
     saved = panel_settings().get("reverse_proxy", {})
     domain = str(saved.get("domain", "")).strip().lower()
@@ -1569,7 +1576,7 @@ def enable_reverse_proxy_secure_mode(request: Request) -> dict:
     return {"secure_mode": bool(result.get("secure_mode")), "detail": "HTTPS 已验证，面板已切换为本机监听并启用 Secure Cookie。请刷新页面。"}
 
 
-@app.post("/api/reverse-proxy/disable-secure-mode")
+@PROXY_ROUTER.post("/api/reverse-proxy/disable-secure-mode")
 def disable_reverse_proxy_secure_mode(request: Request) -> dict:
     saved = panel_settings().get("reverse_proxy", {})
     domain = str(saved.get("domain", "")).strip().lower()
@@ -1589,7 +1596,7 @@ def disable_reverse_proxy_secure_mode(request: Request) -> dict:
     return {"secure_mode": bool(result.get("secure_mode")), "detail": "安全模式已关闭，面板将恢复 8787 公网监听。请刷新页面。"} 
 
 
-@app.post("/api/reverse-proxy/apply")
+@PROXY_ROUTER.post("/api/reverse-proxy/apply")
 def apply_reverse_proxy(request: ReverseProxyApplyRequest) -> dict:
     domain, upstream, certificate_pem, private_key_pem = validate_reverse_proxy_input(
         request.domain, request.certificate_pem, request.private_key_pem
@@ -1626,7 +1633,7 @@ def reverse_proxy_job_snapshot(job_id: str) -> dict:
         return dict(job)
 
 
-@app.post("/api/reverse-proxy/apply-progress")
+@PROXY_ROUTER.post("/api/reverse-proxy/apply-progress")
 def start_reverse_proxy_apply_progress(request: ReverseProxyApplyRequest) -> dict:
     job_id = uuid.uuid4().hex
     with REVERSE_PROXY_JOBS_LOCK:
@@ -1706,7 +1713,7 @@ def start_reverse_proxy_apply_progress(request: ReverseProxyApplyRequest) -> dic
     return reverse_proxy_job_snapshot(job_id)
 
 
-@app.get("/api/reverse-proxy/jobs/{job_id}")
+@PROXY_ROUTER.get("/api/reverse-proxy/jobs/{job_id}")
 def get_reverse_proxy_job(job_id: str) -> dict:
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise HTTPException(422, "无效的反向代理部署任务标识")
@@ -1727,7 +1734,7 @@ def delete_reverse_proxy_after_response() -> None:
     audit("reverse_proxy_deleted")
 
 
-@app.post("/api/reverse-proxy/delete")
+@PROXY_ROUTER.post("/api/reverse-proxy/delete")
 def delete_reverse_proxy(background_tasks: BackgroundTasks) -> dict:
     # The browser may be connected through this proxy.  Deleting it before
     # writing the response would make the client misreport a successful
@@ -1740,7 +1747,7 @@ def delete_reverse_proxy(background_tasks: BackgroundTasks) -> dict:
     }
 
 
-@app.post("/api/providers")
+@PROVIDERS_ROUTER.post("/api/providers")
 def save_provider(provider: Provider) -> dict:
     try:
         result = PROVIDER_SERVICE.save(provider.model_dump())
@@ -1750,7 +1757,7 @@ def save_provider(provider: Provider) -> dict:
     return result
 
 
-@app.get("/api/providers/{provider_id}/auth")
+@PROVIDERS_ROUTER.get("/api/providers/{provider_id}/auth")
 def provider_auth_contents(provider_id: str) -> dict:
     profile = read_profiles().get(provider_id)
     if not profile:
@@ -1775,7 +1782,7 @@ def provider_auth_contents(provider_id: str) -> dict:
     )
 
 
-@app.post("/api/providers/{provider_id}/activate")
+@PROVIDERS_ROUTER.post("/api/providers/{provider_id}/activate")
 def activate_provider(provider_id: str, verify: bool = True) -> dict:
     return switch_provider(provider_id, verify=verify)
 
@@ -1788,7 +1795,7 @@ def activation_job_snapshot(job_id: str) -> dict:
         return dict(job)
 
 
-@app.post("/api/providers/{provider_id}/activate-progress")
+@PROVIDERS_ROUTER.post("/api/providers/{provider_id}/activate-progress")
 def start_provider_activation(provider_id: str) -> dict:
     job_id = uuid.uuid4().hex
     with ACTIVATION_JOBS_LOCK:
@@ -1844,14 +1851,14 @@ def start_provider_activation(provider_id: str) -> dict:
     return activation_job_snapshot(job_id)
 
 
-@app.get("/api/provider-activations/{job_id}")
+@PROVIDERS_ROUTER.get("/api/provider-activations/{job_id}")
 def get_provider_activation(job_id: str) -> dict:
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise HTTPException(422, "无效的切换任务标识")
     return activation_job_snapshot(job_id)
 
 
-@app.delete("/api/providers/{provider_id}")
+@PROVIDERS_ROUTER.delete("/api/providers/{provider_id}")
 def delete_provider(provider_id: str) -> dict:
     try:
         PROVIDER_SERVICE.delete(provider_id, active_provider_id=active_provider())
@@ -1863,17 +1870,17 @@ def delete_provider(provider_id: str) -> dict:
     return {"deleted": provider_id}
 
 
-@app.get("/api/preflight")
+@OPERATIONS_ROUTER.get("/api/preflight")
 def get_preflight() -> dict:
     return preflight()
 
 
-@app.get("/api/health")
+@OPERATIONS_ROUTER.get("/api/health")
 def get_health() -> dict:
     return health_check()
 
 
-@app.get("/api/health/plan")
+@OPERATIONS_ROUTER.get("/api/health/plan")
 def get_health_check_plan() -> dict:
     return {"checks": health_check_plan()}
 
@@ -1888,7 +1895,7 @@ def health_check_snapshot(job_id: str) -> dict:
     return snapshot
 
 
-@app.post("/api/health/progress")
+@OPERATIONS_ROUTER.post("/api/health/progress")
 def start_health_check() -> dict:
     job_id = uuid.uuid4().hex
     with HEALTH_CHECK_JOBS_LOCK:
@@ -1924,14 +1931,14 @@ def start_health_check() -> dict:
     return health_check_snapshot(job_id)
 
 
-@app.get("/api/health/progress/{job_id}")
+@OPERATIONS_ROUTER.get("/api/health/progress/{job_id}")
 def get_health_check(job_id: str) -> dict:
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise HTTPException(422, "无效的健康检查任务标识")
     return health_check_snapshot(job_id)
 
 
-@app.post("/api/health/repair-config")
+@OPERATIONS_ROUTER.post("/api/health/repair-config")
 def repair_config_from_health() -> dict:
     if not CONFIG_PATH.exists():
         raise HTTPException(404, "未找到 config.toml")
@@ -1946,7 +1953,7 @@ def repair_config_from_health() -> dict:
     return {"detail": f"已合并重复的 [features] 配置段；已创建备份 {backup_id}。"}
 
 
-@app.post("/api/health/install-codex")
+@OPERATIONS_ROUTER.post("/api/health/install-codex")
 def install_codex_from_health() -> dict:
     if not HOST_CODEX_BIN.parent.parent.exists():
         raise HTTPException(409, "部署未挂载当前用户的主目录；请更新面板后重试")
@@ -1987,11 +1994,11 @@ def install_codex_from_health() -> dict:
     return {"version": version, "detail": f"Codex CLI 已安装到用户 {DEPLOY_USER}；健康检查已刷新。"}
 
 
-@app.post("/api/health/update-codex")
+@OPERATIONS_ROUTER.post("/api/health/update-codex")
 def update_codex_from_health() -> dict:
     return install_codex_from_health()
 
-@app.post("/api/health/deployment-key")
+@OPERATIONS_ROUTER.post("/api/health/deployment-key")
 def deploy_ssh_key() -> dict:
     ssh_dir = DEPLOYMENT_KEY_PATH.parent
     if not USER_HOME.is_dir() or not os.access(USER_HOME, os.W_OK):
@@ -2034,7 +2041,7 @@ def deploy_ssh_key() -> dict:
     return {"detail": "部署密钥已生成并授权。现在请下载私钥，并在 Codex App 中选择该文件。", "download_url": "/api/health/deployment-key/download"}
 
 
-@app.get("/api/health/deployment-key/download")
+@OPERATIONS_ROUTER.get("/api/health/deployment-key/download")
 def download_ssh_key() -> FileResponse:
     ready, _ = deployment_key_status()
     if not ready:
@@ -2048,7 +2055,7 @@ def download_ssh_key() -> FileResponse:
     )
 
 
-@app.post("/api/providers/{provider_id}/capture-auth")
+@PROVIDERS_ROUTER.post("/api/providers/{provider_id}/capture-auth")
 def capture_chatgpt_auth(provider_id: str) -> dict:
     capture_chatgpt_snapshot(provider_id)
     return {"provider_id": provider_id, "captured": True}
@@ -2072,7 +2079,7 @@ def capture_chatgpt_snapshot(provider_id: str) -> None:
     audit("chatgpt_auth_captured", provider_id=provider_id)
 
 
-@app.post("/api/providers/{provider_id}/official-login/start")
+@PROVIDERS_ROUTER.post("/api/providers/{provider_id}/official-login/start")
 def start_official_login(provider_id: str) -> dict:
     global DEVICE_LOGIN
     profile = read_profiles().get(provider_id)
@@ -2094,7 +2101,7 @@ def start_official_login(provider_id: str) -> dict:
     return result
 
 
-@app.get("/api/official-login/status")
+@PROVIDERS_ROUTER.get("/api/official-login/status")
 def official_login_status() -> dict:
     with DEVICE_LOGIN_LOCK:
         if not DEVICE_LOGIN:
@@ -2114,7 +2121,7 @@ def official_login_status() -> dict:
         return status
 
 
-@app.post("/api/official-login/cancel")
+@PROVIDERS_ROUTER.post("/api/official-login/cancel")
 def cancel_official_login() -> dict:
     with DEVICE_LOGIN_LOCK:
         if not DEVICE_LOGIN:
@@ -2124,7 +2131,7 @@ def cancel_official_login() -> dict:
         return DEVICE_LOGIN.public_status()
 
 
-@app.post("/api/providers/{provider_id}/test")
+@DIAGNOSTICS_ROUTER.post("/api/providers/{provider_id}/test")
 def test_saved_provider(provider_id: str) -> dict:
     profile = read_profiles().get(provider_id)
     if not profile:
@@ -2134,7 +2141,7 @@ def test_saved_provider(provider_id: str) -> dict:
     return result
 
 
-@app.post("/api/providers/{provider_id}/relay-test")
+@DIAGNOSTICS_ROUTER.post("/api/providers/{provider_id}/relay-test")
 def relay_test_provider(provider_id: str) -> dict:
     profile = read_profiles().get(provider_id)
     if not profile:
@@ -2152,7 +2159,7 @@ def relay_test_provider(provider_id: str) -> dict:
     return result
 
 
-@app.post("/api/providers/diagnose")
+@DIAGNOSTICS_ROUTER.post("/api/providers/diagnose")
 def diagnose_unsaved_provider(request: ProviderDiagnosticRequest) -> dict:
     result = diagnose_profile(request.model_dump())
     audit("provider_diagnosed", passed=result["ok"])
@@ -2170,7 +2177,7 @@ def provider_diagnostic_snapshot(job_id: str) -> dict:
     return snapshot
 
 
-@app.post("/api/providers/diagnose-progress")
+@DIAGNOSTICS_ROUTER.post("/api/providers/diagnose-progress")
 def start_provider_diagnostic(request: ProviderDiagnosticRequest) -> dict:
     job_id = uuid.uuid4().hex
     with PROVIDER_DIAGNOSTIC_JOBS_LOCK:
@@ -2209,7 +2216,7 @@ def start_provider_diagnostic(request: ProviderDiagnosticRequest) -> dict:
     return provider_diagnostic_snapshot(job_id)
 
 
-@app.get("/api/provider-diagnostics/{job_id}")
+@DIAGNOSTICS_ROUTER.get("/api/provider-diagnostics/{job_id}")
 def get_provider_diagnostic(job_id: str) -> dict:
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise HTTPException(422, "无效的供应商诊断任务标识")
@@ -2253,7 +2260,7 @@ def relay_diagnostic_eligible(profile: dict, names: list[str]) -> bool:
             and str(profile.get("model") or "") in names)
 
 
-@app.post("/api/providers/diagnose-models-progress")
+@DIAGNOSTICS_ROUTER.post("/api/providers/diagnose-models-progress")
 def start_model_diagnostics(request: ModelDiagnosticRequest) -> dict:
     profile = normalize_profile(request.model_dump(exclude={"models"}))
     if profile["mode"] != "pure_api":
@@ -2422,7 +2429,7 @@ def start_model_diagnostics(request: ModelDiagnosticRequest) -> dict:
     return model_diagnostic_snapshot(job_id)
 
 
-@app.post("/api/model-diagnostics/{job_id}/cancel")
+@DIAGNOSTICS_ROUTER.post("/api/model-diagnostics/{job_id}/cancel")
 def cancel_model_diagnostics(job_id: str) -> dict:
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise HTTPException(422, "无效的模型诊断任务标识")
@@ -2437,14 +2444,14 @@ def cancel_model_diagnostics(job_id: str) -> dict:
     return model_diagnostic_snapshot(job_id)
 
 
-@app.get("/api/model-diagnostics/{job_id}")
+@DIAGNOSTICS_ROUTER.get("/api/model-diagnostics/{job_id}")
 def get_model_diagnostics(job_id: str) -> dict:
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise HTTPException(422, "无效的模型诊断任务标识")
     return model_diagnostic_snapshot(job_id)
 
 
-@app.post("/api/upstream/models")
+@DIAGNOSTICS_ROUTER.post("/api/upstream/models")
 def fetch_models_from_upstream(request: UpstreamModelFetch) -> dict:
     return fetch_upstream_models(request)
 
@@ -2467,40 +2474,40 @@ def session_result(operation):
         raise HTTPException(exc.status, str(exc)) from exc
 
 
-@app.get("/api/sessions")
+@SESSIONS_ROUTER.get("/api/sessions")
 def get_server_sessions() -> dict:
     return SESSION_SERVICE.active()
 
 
-@app.get("/api/archived-sessions")
+@SESSIONS_ROUTER.get("/api/archived-sessions")
 def get_archived_server_sessions() -> dict:
     return SESSION_SERVICE.archived()
 
 
-@app.post("/api/sessions/{thread_id}/archive")
+@SESSIONS_ROUTER.post("/api/sessions/{thread_id}/archive")
 def archive_server_session(thread_id: str) -> dict:
     with SESSION_MUTATION_LOCK:
         return session_result(lambda: SESSION_SERVICE.archive(thread_id, True))
 
 
-@app.post("/api/archived-sessions/{thread_id}/unarchive")
+@SESSIONS_ROUTER.post("/api/archived-sessions/{thread_id}/unarchive")
 def unarchive_server_session(thread_id: str) -> dict:
     with SESSION_MUTATION_LOCK:
         return session_result(lambda: SESSION_SERVICE.archive(thread_id, False))
 
 
-@app.post("/api/sessions/migrate")
+@SESSIONS_ROUTER.post("/api/sessions/migrate")
 def migrate_server_sessions(request: SessionMigrationRequest) -> dict:
     return session_result(lambda: SESSION_SERVICE.migrate_provider(request.target_provider, request.source_provider, request.apply, SESSION_PROVIDER_ID))
 
 
-@app.delete("/api/sessions/{thread_id}")
+@SESSIONS_ROUTER.delete("/api/sessions/{thread_id}")
 def delete_server_session(thread_id: str) -> dict:
     with SESSION_MUTATION_LOCK:
         return session_result(lambda: SESSION_SERVICE.delete(thread_id))
 
 
-@app.get("/api/backups")
+@BACKUPS_ROUTER.get("/api/backups")
 def list_backups() -> list[dict]:
     removed = prune_backup_history()
     if removed:
@@ -2508,7 +2515,7 @@ def list_backups() -> list[dict]:
     return BACKUP_SERVICE.list_backups()
 
 
-@app.post("/api/backups/{backup_id}/restore")
+@BACKUPS_ROUTER.post("/api/backups/{backup_id}/restore")
 def restore_backup(backup_id: str) -> dict:
     source = backup_directory(backup_id)
     current_id, _ = backup_state(include_sessions=True, reason="before_restore")
@@ -2519,6 +2526,14 @@ def restore_backup(backup_id: str) -> dict:
     audit("backup_restore_completed", backup_id=backup_id, before_backup_id=current_id)
     return {"restored": backup_id, "before_restore_backup": current_id, "files": restored, "detail": "备份已恢复；恢复前的当前状态也已自动备份。"}
 
+
+app.include_router(SESSIONS_ROUTER)
+app.include_router(BACKUPS_ROUTER)
+app.include_router(PROXY_ROUTER)
+app.include_router(OPERATIONS_ROUTER)
+app.include_router(DIAGNOSTICS_ROUTER)
+app.include_router(PROVIDERS_ROUTER)
+app.include_router(ACCOUNT_ROUTER)
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:

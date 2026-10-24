@@ -9,9 +9,9 @@ class CommonConfigApiTests(unittest.TestCase):
     def test_common_config_routes_and_persistence_are_present(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
         self.assertIn('COMMON_CONFIG_PATH = CODEX_HOME / "control-panel-common-config.toml"', source)
-        self.assertIn('@app.get("/api/common-config")', source)
-        self.assertIn('@app.post("/api/common-config/extract")', source)
-        self.assertIn('@app.post("/api/common-config")', source)
+        self.assertIn('@ACCOUNT_ROUTER.get("/api/common-config")', source)
+        self.assertIn('@ACCOUNT_ROUTER.post("/api/common-config/extract")', source)
+        self.assertIn('@ACCOUNT_ROUTER.post("/api/common-config")', source)
         switch_source = (ROOT / "application" / "provider_switch_service.py").read_text(encoding="utf-8")
         self.assertIn('saved_common = deps.common_config_path.read_text', switch_source)
         self.assertIn('tomllib.loads(contents or "")', source)

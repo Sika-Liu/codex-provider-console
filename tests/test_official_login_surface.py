@@ -9,8 +9,8 @@ class OfficialLoginSurfaceTests(unittest.TestCase):
         routes = (ROOT / "app.py").read_text(encoding="utf-8")
         session = (ROOT / "application" / "official_login.py").read_text(encoding="utf-8")
         self.assertIn('account/login/start", {"type": "chatgptDeviceCode"}', session)
-        self.assertIn('@app.get("/api/official-login/status")', routes)
-        self.assertIn('@app.post("/api/official-login/cancel")', routes)
+        self.assertIn('@PROVIDERS_ROUTER.get("/api/official-login/status")', routes)
+        self.assertIn('@PROVIDERS_ROUTER.post("/api/official-login/cancel")', routes)
 
     def test_official_auth_snapshot_is_not_returned_to_the_browser(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")

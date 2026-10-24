@@ -29,9 +29,10 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn('audit("reverse_proxy_applied", domain=domain, upstream=upstream)', APP)
 
     def test_reverse_proxy_has_status_apply_and_delete_operations(self):
-        self.assertIn('@app.get("/api/reverse-proxy/status")', APP)
-        self.assertIn('@app.post("/api/reverse-proxy/apply")', APP)
-        self.assertIn('@app.post("/api/reverse-proxy/delete")', APP)
+        self.assertIn('@PROXY_ROUTER.get("/api/reverse-proxy/status")', APP)
+        self.assertIn('@PROXY_ROUTER.post("/api/reverse-proxy/apply")', APP)
+        self.assertIn('@PROXY_ROUTER.post("/api/reverse-proxy/delete")', APP)
+        self.assertIn("app.include_router(PROXY_ROUTER)", APP)
         self.assertIn('"docker", "run", "--rm"', GATEWAY)
         self.assertIn('"nginx", "-t"', GATEWAY)
         self.assertIn('"docker", "compose", "--profile", "reverse-proxy", "up", "-d", "--force-recreate", "reverse-proxy"', GATEWAY)
