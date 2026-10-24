@@ -1,3 +1,4 @@
+import re
 import unittest
 from application.recovery_service import RecoveryError, RecoveryService
 
@@ -23,6 +24,13 @@ class RecoveryServiceTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertNotIn("code", result)
         self.assertEqual(len(self.sent), 1)
+
+    def test_binding_verification_persists_email(self):
+        self.service.request_binding("user@example.com", "client")
+        code = re.search(r"(\d{8})", self.sent[-1][2]).group(1)
+        result = self.service.verify_binding(code)
+        self.assertEqual(result, {"bound": True, "email": "u***@example.com"})
+        self.assertEqual(self.settings["panel_recovery_email"], "user@example.com")
 
     def test_reset_rejects_unbound_email(self):
         with self.assertRaises(RecoveryError) as caught:

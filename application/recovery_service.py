@@ -94,7 +94,9 @@ class RecoveryService:
 
     def _verify(self, action: str, code: str, *, email: str | None = None) -> dict:
         pending = self._pending.get(action)
-        expected_email = email if email is not None else str(self.read_settings().get("panel_recovery_email") or "")
+        expected_email = email if email is not None else (
+            str(pending.get("email") or "") if action == "bind" and pending else str(self.read_settings().get("panel_recovery_email") or "")
+        )
         if not pending or pending["expires"] < time.time() or pending["session_secret"] != self.session_secret() or pending["email"] != expected_email:
             self._pending.pop(action, None)
             raise RecoveryError(400, "验证码无效或已过期")
