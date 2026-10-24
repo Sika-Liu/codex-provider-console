@@ -33,11 +33,9 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertEqual(remote_session_unarchive_args(thread_id), ["unarchive", "--remote", "unix://", thread_id])
 
     def test_permanent_delete_does_not_create_a_hidden_backup(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
-        endpoint = source.split('@app.delete("/api/sessions/{thread_id}")', 1)[1].split(
-            '@app.get("/api/backups")', 1
-        )[0]
-        self.assertNotIn("backup_state", endpoint)
+        source = Path(__file__).resolve().parents[1].joinpath("application", "session_service.py").read_text(encoding="utf-8")
+        endpoint = source.split("    def delete(self, thread_id: str)", 1)[1].split("    def migrate_provider", 1)[0]
+        self.assertNotIn("self.backup", endpoint)
         self.assertIn('"recoverable": False', endpoint)
 
     def test_session_page_exposes_archive_and_permanent_delete_only(self):
@@ -60,9 +58,8 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertNotIn("confirm('归档此会话？", source)
 
     def test_archive_endpoints_confirm_state_asynchronously_without_overpromising_desktop_sync(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
-        self.assertIn("confirm_session_archive_in_background(normalized_id, True)", source)
-        self.assertIn("confirm_session_archive_in_background(normalized_id, False)", source)
+        source = Path(__file__).resolve().parents[1].joinpath("application", "session_service.py").read_text(encoding="utf-8")
+        self.assertIn("self.confirm_archive(value, archived)", source)
         self.assertIn('"sync": "pending"', source)
         self.assertNotIn("桌面端将同步更新", source)
         self.assertNotIn("搜索此会话 ID 并打开一次", source)

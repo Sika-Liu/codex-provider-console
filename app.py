@@ -44,6 +44,7 @@ from application.provider_activation import ProviderActivationValidationError, b
 from application.provider_switch_service import ProviderSwitchDependencies, ProviderSwitchService, activation_error_message
 from application.health_service import HealthDependencies, HealthService
 from application.session_catalog import SessionCatalog, SessionCatalogPaths
+from application.session_service import SessionError, SessionService
 from application.recovery_service import RecoveryError, RecoveryService
 from application.diagnostic_service import DiagnosticService
 from application.official_login import DeviceLoginSession
@@ -2771,115 +2772,55 @@ def fetch_models_from_upstream(request: UpstreamModelFetch) -> dict:
     return fetch_upstream_models(request)
 
 
+SESSION_SERVICE = SessionService(
+    valid_id=lambda value: bool(THREAD_ID.fullmatch(value)),
+    list_active=list_server_sessions, list_archived=list_archived_server_sessions,
+    start_app_server=lambda: run_host_app_server_control("start"),
+    archive_remote=run_host_session_archive, delete_remote=run_host_session_delete,
+    confirm_archive=confirm_session_archive_in_background,
+    migrate=lambda source, apply, backup: migrate_session_provider(SESSION_PROVIDER_ID, source, apply=apply, backup_dir=backup),
+    backup=backup_state, profile_exists=lambda provider_id: provider_id in read_profiles(), audit=audit,
+)
+
+
+def session_result(operation):
+    try:
+        return operation()
+    except SessionError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
 @app.get("/api/sessions")
 def get_server_sessions() -> dict:
-    sessions = list_server_sessions()
-    return {"sessions": sessions, "count": len(sessions)}
+    return SESSION_SERVICE.active()
 
 
 @app.get("/api/archived-sessions")
 def get_archived_server_sessions() -> dict:
-    sessions = list_archived_server_sessions()
-    return {"sessions": sessions, "count": len(sessions)}
+    return SESSION_SERVICE.archived()
 
 
 @app.post("/api/sessions/{thread_id}/archive")
 def archive_server_session(thread_id: str) -> dict:
-    normalized_id = thread_id.lower()
-    if not THREAD_ID.fullmatch(normalized_id):
-        raise HTTPException(422, "无效的会话标识")
-    try:
-        with SESSION_MUTATION_LOCK:
-            if not any(item["id"] == normalized_id for item in list_server_sessions()):
-                raise HTTPException(404, "活动会话不存在或已经归档")
-            run_host_app_server_control("start")
-            run_host_session_archive(normalized_id, True)
-    except RuntimeError as exc:
-        raise HTTPException(502, str(exc)) from exc
-    confirm_session_archive_in_background(normalized_id, True)
-    audit("server_session_archived", thread_id=normalized_id, command="host codex archive --remote unix://")
-    return {"archived": normalized_id, "sync": "pending", "detail": "归档命令已提交，会话将从列表中移除。"}
+    with SESSION_MUTATION_LOCK:
+        return session_result(lambda: SESSION_SERVICE.archive(thread_id, True))
 
 
 @app.post("/api/archived-sessions/{thread_id}/unarchive")
 def unarchive_server_session(thread_id: str) -> dict:
-    normalized_id = thread_id.lower()
-    if not THREAD_ID.fullmatch(normalized_id):
-        raise HTTPException(422, "无效的会话标识")
-    try:
-        with SESSION_MUTATION_LOCK:
-            if not any(item["id"] == normalized_id for item in list_archived_server_sessions()):
-                raise HTTPException(404, "归档会话不存在或已经取消归档")
-            run_host_app_server_control("start")
-            run_host_session_archive(normalized_id, False)
-    except RuntimeError as exc:
-        raise HTTPException(502, str(exc)) from exc
-    confirm_session_archive_in_background(normalized_id, False)
-    audit("server_session_unarchived", thread_id=normalized_id, command="host codex unarchive --remote unix://")
-    return {
-        "unarchived": normalized_id,
-        "desktop_sync": "client_refresh_required",
-        "sync": "pending",
-        "detail": "取消归档命令已提交，会话将重新出现在活动列表。",
-    }
+    with SESSION_MUTATION_LOCK:
+        return session_result(lambda: SESSION_SERVICE.archive(thread_id, False))
 
 
 @app.post("/api/sessions/migrate")
 def migrate_server_sessions(request: SessionMigrationRequest) -> dict:
-    if request.target_provider not in read_profiles():
-        raise HTTPException(404, "Target provider profile not found")
-    backup_id = None
-    backup_dir = None
-    if request.apply:
-        backup_id, backup_dir = backup_state(include_sessions=True, reason="session_migration")
-    result = migrate_session_provider(
-        SESSION_PROVIDER_ID,
-        request.source_provider,
-        apply=request.apply,
-        backup_dir=backup_dir,
-    )
-    audit(
-        "session_provider_migrated" if request.apply else "session_provider_migration_previewed",
-        provider_id=request.target_provider,
-        detail=f"session_provider={SESSION_PROVIDER_ID}; source={request.source_provider or '*'}; changes={sum(result.values())}",
-    )
-    return {
-        "target_provider": request.target_provider,
-        "session_provider": SESSION_PROVIDER_ID,
-        "source_provider": request.source_provider,
-        "applied": request.apply,
-        "backup_id": backup_id,
-        "matching_sessions": result["threads"] + result["rollout_records"],
-        "changed_sessions": result["threads"] + result["rollout_records"],
-        "details": result,
-    }
+    return session_result(lambda: SESSION_SERVICE.migrate_provider(request.target_provider, request.source_provider, request.apply, SESSION_PROVIDER_ID))
 
 
 @app.delete("/api/sessions/{thread_id}")
 def delete_server_session(thread_id: str) -> dict:
-    normalized_id = thread_id.lower()
-    if not THREAD_ID.fullmatch(normalized_id):
-        raise HTTPException(422, "无效的会话标识")
-    try:
-        with SESSION_MUTATION_LOCK:
-            # Ensure the daemon exists before asking the CLI to delete through
-            # its control socket. This path is required for desktop sync.
-            run_host_app_server_control("start")
-            run_host_session_delete(normalized_id)
-    except RuntimeError as exc:
-        raise HTTPException(502, str(exc)) from exc
-
-    audit(
-        "server_session_deleted",
-        thread_id=normalized_id,
-        command="host codex delete --remote unix:// --force",
-        recoverable=False,
-    )
-    return {
-        "deleted": normalized_id,
-        "recoverable": False,
-        "detail": "远程会话已通过宿主机 Codex App Server 删除；桌面端对应的远程缓存将同步移除。",
-    }
+    with SESSION_MUTATION_LOCK:
+        return session_result(lambda: SESSION_SERVICE.delete(thread_id))
 
 
 @app.get("/api/backups")
