@@ -8,6 +8,7 @@ class DockerfileImportsTests(unittest.TestCase):
     def test_console_image_copies_app_packages(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("COPY api ./api", dockerfile)
+        self.assertIn("COPY application ./application", dockerfile)
         self.assertIn("COPY security ./security", dockerfile)
 
 
