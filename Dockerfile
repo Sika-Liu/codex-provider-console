@@ -18,6 +18,7 @@ RUN apt-get update \
 COPY VERSION app.py provider_schemas.py model_diagnostic_domain.py host_ops.py storage_ops.py provider_domain.py relay_domain.py relay.py ./
 COPY api ./api
 COPY application ./application
+COPY infrastructure ./infrastructure
 COPY security ./security
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 RUN chmod 755 /usr/local/bin/docker-entrypoint
