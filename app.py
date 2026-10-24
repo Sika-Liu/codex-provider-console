@@ -43,6 +43,7 @@ from application.provider_service import ProviderService
 from application.provider_activation import ProviderActivationValidationError, build_activation_plan
 from application.provider_switch_service import ProviderSwitchDependencies, ProviderSwitchService, activation_error_message
 from application.health_service import HealthDependencies, HealthService
+from application.session_catalog import SessionCatalog, SessionCatalogPaths
 from application.official_login import DeviceLoginSession
 from application.config_service import (
     canonicalize_base_config,
@@ -629,173 +630,45 @@ def audit(action: str, **details: str | bool | None) -> None:
     os.chmod(AUDIT_PATH, 0o600)
 
 
+def session_catalog() -> SessionCatalog:
+    return SessionCatalog(
+        SessionCatalogPaths(
+            codex_home=CODEX_HOME,
+            sessions_path=SESSIONS_PATH,
+            archived_sessions_path=ARCHIVED_SESSIONS_PATH,
+            session_index_path=SESSION_INDEX_PATH,
+            thread_id=THREAD_ID,
+            thread_id_in_text=THREAD_ID_IN_TEXT,
+        )
+    )
+
+
 def session_id_from_path(path: Path) -> str | None:
-    """Return the rollout thread UUID embedded in a Codex session filename."""
-    match = THREAD_ID_IN_TEXT.search(path.name)
-    return match.group(1).lower() if match else None
+    return session_catalog().session_id_from_path(path)
 
 
 def session_index_titles() -> dict[str, str]:
-    """Return the user-facing titles that Codex stores alongside its rollouts."""
-    titles: dict[str, str] = {}
-    if not SESSION_INDEX_PATH.exists():
-        return titles
-    try:
-        with SESSION_INDEX_PATH.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                thread_id = str(record.get("id") or "").lower()
-                title = record.get("thread_name")
-                if THREAD_ID.fullmatch(thread_id) and isinstance(title, str) and title.strip():
-                    titles[thread_id] = title.strip().replace("\n", " ")[:180]
-    except OSError:
-        pass
-    return titles
+    return session_catalog().index_titles()
 
 
 def session_index_records() -> dict[str, dict]:
-    """Read persistent index records, including entries without a rollout."""
-    records: dict[str, dict] = {}
-    if not SESSION_INDEX_PATH.exists():
-        return records
-    try:
-        with SESSION_INDEX_PATH.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                thread_id = str(record.get("id") or "").lower()
-                if THREAD_ID.fullmatch(thread_id):
-                    records[thread_id] = record
-    except OSError:
-        pass
-    return records
+    return session_catalog().index_records()
 
 
 def app_server_thread_states() -> dict[str, bool] | None:
-    """Return App Server thread registration state, or None when unavailable."""
-    candidates: list[tuple[int, Path]] = []
-    for path in CODEX_HOME.glob("state_*.sqlite"):
-        match = re.fullmatch(r"state_(\d+)\.sqlite", path.name)
-        if match:
-            candidates.append((int(match.group(1)), path))
-    for _, path in sorted(candidates, reverse=True):
-        try:
-            uri = f"file:{path.resolve().as_posix()}?mode=ro"
-            with sqlite3.connect(uri, uri=True) as connection:
-                columns = {
-                    str(row[1])
-                    for row in connection.execute("PRAGMA table_info(threads)")
-                }
-                if not {"id", "archived"}.issubset(columns):
-                    continue
-                return {
-                    str(thread_id).lower(): bool(archived)
-                    for thread_id, archived in connection.execute("SELECT id, archived FROM threads")
-                    if THREAD_ID.fullmatch(str(thread_id).lower())
-                }
-        except (OSError, sqlite3.Error):
-            continue
-    return None
+    return session_catalog().app_server_thread_states()
 
 
 def read_session_summary(path: Path, indexed_title: str = "") -> dict:
-    """Read only the opening JSONL records; session files can be very large."""
-    title = ""
-    cwd = ""
-    provider_id = ""
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            for _ in range(24):
-                line = handle.readline()
-                if not line:
-                    break
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                payload = record.get("payload") if isinstance(record.get("payload"), dict) else record
-                if not cwd:
-                    cwd = str(payload.get("cwd") or record.get("cwd") or "")[:500]
-                if not provider_id:
-                    provider_id = str(payload.get("model_provider") or record.get("model_provider") or "")[:80]
-                if not title:
-                    for key in ("title", "session_title", "summary"):
-                        value = payload.get(key) or record.get(key)
-                        if isinstance(value, str) and value.strip():
-                            title = value.strip().replace("\n", " ")[:180]
-                            break
-    except (OSError, UnicodeDecodeError):
-        pass
-    stat = path.stat()
-    return {
-        "id": session_id_from_path(path),
-        "title": indexed_title or title or path.stem,
-        "cwd": cwd,
-        "provider_id": provider_id,
-        "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
-        "size": stat.st_size,
-        "path": str(path.relative_to(CODEX_HOME)),
-    }
+    return session_catalog().read_summary(path, indexed_title)
 
 
 def list_server_sessions() -> list[dict]:
-    sessions: list[dict] = []
-    thread_states = app_server_thread_states()
-    indexes = session_index_records()
-    titles = {
-        thread_id: str(record.get("thread_name") or "").strip().replace("\n", " ")[:180]
-        for thread_id, record in indexes.items()
-    }
-    rollout_ids: set[str] = set()
-    archived_ids = {
-        thread_id
-        for path in ARCHIVED_SESSIONS_PATH.rglob("*.jsonl") if ARCHIVED_SESSIONS_PATH.is_dir()
-        if (thread_id := session_id_from_path(path))
-    }
-    for path in SESSIONS_PATH.rglob("*.jsonl") if SESSIONS_PATH.is_dir() else ():
-        thread_id = session_id_from_path(path)
-        if thread_id and (thread_states is None or thread_states.get(thread_id) is False):
-            rollout_ids.add(thread_id)
-            session = read_session_summary(path, titles.get(thread_id, ""))
-            session["kind"] = "rollout"
-            sessions.append(session)
-    for thread_id, record in indexes.items():
-        if thread_states is not None and thread_states.get(thread_id) is not False:
-            continue
-        if thread_id in rollout_ids or thread_id in archived_ids:
-            continue
-        sessions.append(
-            {
-                "id": thread_id,
-                "title": titles.get(thread_id) or thread_id,
-                "cwd": "",
-                "provider_id": "",
-                "modified_at": str(record.get("updated_at") or ""),
-                "size": 0,
-                "path": "session_index.jsonl",
-                "kind": "orphaned_index",
-            }
-        )
-    return sorted(sessions, key=lambda item: item["modified_at"], reverse=True)
+    return session_catalog().list_active()
 
 
 def list_archived_server_sessions() -> list[dict]:
-    titles = session_index_titles()
-    thread_states = app_server_thread_states()
-    sessions: list[dict] = []
-    for path in ARCHIVED_SESSIONS_PATH.rglob("*.jsonl") if ARCHIVED_SESSIONS_PATH.is_dir() else ():
-        thread_id = session_id_from_path(path)
-        if not thread_id or (thread_states is not None and thread_states.get(thread_id) is not True):
-            continue
-        session = read_session_summary(path, titles.get(thread_id, ""))
-        session["kind"] = "archived"
-        sessions.append(session)
-    return sorted(sessions, key=lambda item: item["modified_at"], reverse=True)
+    return session_catalog().list_archived()
 
 
 def wait_for_session_archive_state(thread_id: str, archived: bool, timeout_seconds: float = 5.0) -> None:

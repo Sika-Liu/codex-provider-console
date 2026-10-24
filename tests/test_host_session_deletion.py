@@ -68,7 +68,7 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertNotIn("搜索此会话 ID 并打开一次", source)
 
     def test_session_lists_require_app_server_registration(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("application", "session_catalog.py").read_text(encoding="utf-8")
         self.assertIn("SELECT id, archived FROM threads", source)
         self.assertIn("thread_states.get(thread_id) is False", source)
         self.assertIn("thread_states.get(thread_id) is not True", source)
