@@ -43,6 +43,7 @@ from application.provider_service import ProviderService
 from application.provider_activation import ProviderActivationValidationError, build_activation_plan
 from application.provider_switch_service import ProviderSwitchDependencies, ProviderSwitchService, activation_error_message
 from application.health_service import HealthDependencies, HealthService
+from application.task_store import TaskStore
 from application.session_catalog import SessionCatalog, SessionCatalogPaths
 from application.session_service import SessionError, SessionService
 from application.recovery_service import RecoveryError, RecoveryService
@@ -125,6 +126,22 @@ HEALTH_CHECK_JOBS_LOCK = threading.Lock()
 REVERSE_PROXY_LOCK = threading.Lock()
 REVERSE_PROXY_JOBS: dict[str, dict] = {}
 REVERSE_PROXY_JOBS_LOCK = threading.Lock()
+
+TASK_STORE = TaskStore(CODEX_HOME / "control-panel-jobs.sqlite3")
+
+def new_background_job(kind: str, payload: dict) -> dict:
+    return TASK_STORE.new_job(kind, payload)
+
+for _kind, _job in TASK_STORE.recover():
+    _registry = {
+        "activation": ACTIVATION_JOBS,
+        "health": HEALTH_CHECK_JOBS,
+        "provider_diagnostic": PROVIDER_DIAGNOSTIC_JOBS,
+        "model_diagnostic": MODEL_DIAGNOSTIC_JOBS,
+        "reverse_proxy": REVERSE_PROXY_JOBS,
+    }.get(_kind)
+    if _registry is not None and _job.get("id"):
+        _registry[_job["id"]] = TASK_STORE.new_job(_kind, _job)
 # The Compose reverse-proxy reaches this service over the internal network.
 REVERSE_PROXY_UPSTREAM = "codex-provider-console:8787"
 HOST_APP_SERVER_STOP_SCRIPT = r'''
@@ -1561,11 +1578,11 @@ def start_reverse_proxy_apply_progress(request: ReverseProxyApplyRequest) -> dic
     with REVERSE_PROXY_JOBS_LOCK:
         if any(job["status"] == "running" for job in REVERSE_PROXY_JOBS.values()):
             raise HTTPException(409, "已有反向代理部署任务正在运行")
-        REVERSE_PROXY_JOBS[job_id] = {
+        REVERSE_PROXY_JOBS[job_id] = new_background_job("reverse_proxy", {
             "id": job_id, "status": "running", "progress": 2, "step": 0,
             "stage": "准备校验输入", "detail": "", "warning": "", "result": None,
             "updated_at": time.time(),
-        }
+        })
         finished = [key for key, job in REVERSE_PROXY_JOBS.items() if job["status"] != "running"]
         for key in finished[:-20]:
             del REVERSE_PROXY_JOBS[key]
@@ -1721,7 +1738,7 @@ def activation_job_snapshot(job_id: str) -> dict:
 def start_provider_activation(provider_id: str) -> dict:
     job_id = uuid.uuid4().hex
     with ACTIVATION_JOBS_LOCK:
-        ACTIVATION_JOBS[job_id] = {
+        ACTIVATION_JOBS[job_id] = new_background_job("activation", {
             "id": job_id,
             "status": "running",
             "progress": 2,
@@ -1729,7 +1746,7 @@ def start_provider_activation(provider_id: str) -> dict:
             "detail": "",
             "result": None,
             "updated_at": time.time(),
-        }
+        })
 
     def report(percent: int, stage: str) -> None:
         with ACTIVATION_JOBS_LOCK:
@@ -1821,12 +1838,12 @@ def health_check_snapshot(job_id: str) -> dict:
 def start_health_check() -> dict:
     job_id = uuid.uuid4().hex
     with HEALTH_CHECK_JOBS_LOCK:
-        HEALTH_CHECK_JOBS[job_id] = {
+        HEALTH_CHECK_JOBS[job_id] = new_background_job("health", {
             "id": job_id,
             "status": "running",
             "checks": [],
             "stage": "正在检查运行环境",
-        }
+        })
 
     def report(item: dict[str, str]) -> None:
         with HEALTH_CHECK_JOBS_LOCK:
@@ -1834,6 +1851,7 @@ def start_health_check() -> dict:
             if job:
                 job["checks"].append(item)
                 job["stage"] = f"已完成：{item['name']}"
+                job.persist()
 
     def run() -> None:
         try:
@@ -2094,7 +2112,7 @@ def provider_diagnostic_snapshot(job_id: str) -> dict:
         if not job:
             raise HTTPException(404, "供应商诊断任务不存在或已过期")
         snapshot = dict(job)
-    snapshot["elapsed_ms"] = round((time.monotonic() - snapshot["started_at"]) * 1000)
+    snapshot["elapsed_ms"] = round((time.time() - snapshot.get("started_at", time.time())) * 1000)
     snapshot.pop("started_at", None)
     return snapshot
 
@@ -2103,15 +2121,15 @@ def provider_diagnostic_snapshot(job_id: str) -> dict:
 def start_provider_diagnostic(request: ProviderDiagnosticRequest) -> dict:
     job_id = uuid.uuid4().hex
     with PROVIDER_DIAGNOSTIC_JOBS_LOCK:
-        PROVIDER_DIAGNOSTIC_JOBS[job_id] = {
+        PROVIDER_DIAGNOSTIC_JOBS[job_id] = new_background_job("provider_diagnostic", {
             "id": job_id,
             "status": "running",
             "progress": 2,
             "stage": "正在准备供应商诊断",
             "result": None,
             "detail": "",
-            "started_at": time.monotonic(),
-        }
+            "started_at": time.time(),
+        })
 
     def report(percent: int, stage: str) -> None:
         with PROVIDER_DIAGNOSTIC_JOBS_LOCK:
@@ -2207,7 +2225,7 @@ def start_model_diagnostics(request: ModelDiagnosticRequest) -> dict:
     with MODEL_DIAGNOSTIC_JOBS_LOCK:
         if len(MODEL_DIAGNOSTIC_JOBS) >= MODEL_DIAGNOSTIC_MAX_JOBS:
             raise HTTPException(429, "正在运行的诊断任务过多，请稍后重试")
-        MODEL_DIAGNOSTIC_JOBS[job_id] = {
+        MODEL_DIAGNOSTIC_JOBS[job_id] = new_background_job("model_diagnostic", {
             "id": job_id,
             "status": "running",
             "total": len(names),
@@ -2222,7 +2240,7 @@ def start_model_diagnostics(request: ModelDiagnosticRequest) -> dict:
                              "detail": "等待上游直连诊断" if relay_eligible else "仅当前启用、未修改的供应商选中模型可测试 Relay"},
             "cancel_requested": False,
             "updated_at": time.time(),
-        }
+        })
 
     def skip_remaining(start_index: int, reason: str, kind: str) -> None:
         with MODEL_DIAGNOSTIC_JOBS_LOCK:
