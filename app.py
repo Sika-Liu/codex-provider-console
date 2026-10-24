@@ -40,6 +40,7 @@ from storage_ops import write_private as atomic_write_private
 from api.compat import AuthService, ProviderStore
 from application.backup_service import BackupService
 from application.provider_service import ProviderService
+from application.provider_activation import ProviderActivationValidationError, build_activation_plan
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 APP_VERSION = (Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip() if Path(__file__).with_name("VERSION").is_file() else "0.1.0")
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
@@ -2388,31 +2389,6 @@ def _switch_provider(
     backup_id, backup_dir = backup_state(include_sessions=True, reason="provider_switch")
     saved_common = COMMON_CONFIG_PATH.read_text(encoding="utf-8") if COMMON_CONFIG_PATH.exists() else config_text()
     base = remove_goals_feature(canonicalize_base_config(saved_common))
-    if mode == "pure_api" and not profile.get("bearer_token") and not profile.get("no_auth", False):
-        raise HTTPException(422, "An API key is required for a pure API provider")
-    if mode == "official":
-        snapshot = profile.get("auth_contents")
-        if not snapshot:
-            raise HTTPException(422, "Capture the current ChatGPT authentication before activating this profile")
-        validate_auth_snapshot(snapshot)
-    selected_model = str(model_override or profile.get("model") or "").strip()
-    generated_root = [f'model_provider = {toml_quote(SESSION_PROVIDER_ID)}']
-    generated_provider = [
-        f'[model_providers.{SESSION_PROVIDER_ID}]',
-        f'name = {toml_quote(SESSION_PROVIDER_ID)}',
-        f'requires_openai_auth = {str(auth_mode == "chatgpt").lower()}',
-    ]
-    if selected_model:
-        generated_root.append(f'model = {toml_quote(selected_model)}')
-    if mode == "pure_api":
-        # Codex always speaks Responses to the Docker-internal relay. The relay
-        # owns the real upstream URL, key and Responses/Chat conversion.
-        generated_provider.append('wire_api = "responses"')
-        # The relay exposes the HTTP Responses endpoint, not the separate
-        # Responses WebSocket protocol used by recent Codex versions.
-        generated_provider.append('supports_websockets = false')
-        generated_provider.append(f'base_url = {toml_quote(HOST_RELAY_BASE_URL)}')
-        generated_provider.append('experimental_bearer_token = "codex-provider-console-relay"')
     provider_config = profile.get("config_contents", "").strip()
     # Older profile forms saved a full config.toml preview here. Reapplying
     # that snapshot would overwrite fields the user later changed in the
@@ -2426,24 +2402,25 @@ def _switch_provider(
         _, provider_config = split_toml_document(canonicalize_base_config(provider_config))
     if profile.get("goals_configured", False):
         provider_config = set_goals_feature(provider_config, bool(profile.get("goals_enabled", False)))
+    base_root, base_sections = split_toml_document(base)
+    merged_sections = normalize_features_sections(
+        "\n\n".join(part for part in (base_sections, provider_config) if part)
+    )
+    try:
+        activation_plan = build_activation_plan(
+            profile,
+            base_root=base_root,
+            merged_sections=merged_sections,
+            session_provider_id=SESSION_PROVIDER_ID,
+            host_relay_base_url=HOST_RELAY_BASE_URL,
+            model_override=model_override,
+        )
+    except ProviderActivationValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    selected_model = activation_plan.selected_model
     app_server_stopped = False
     migration = {"threads": 0, "rollout_files": 0, "rollout_records": 0}
     try:
-        base_root, base_sections = split_toml_document(base)
-        merged_sections = normalize_features_sections(
-            "\n\n".join(part for part in (base_sections, provider_config) if part)
-        )
-        merged_config = "\n\n".join(
-            part
-            for part in (
-                base_root,
-                "\n".join(generated_root),
-                merged_sections,
-                "\n".join(generated_provider),
-            )
-            if part
-        )
-        tomllib.loads(merged_config)
         # Stop first so the daemon cannot keep an old config in memory or
         # write its cached thread metadata while it is being migrated.
         report(62, "正在停止 Codex App Server")
@@ -2453,14 +2430,8 @@ def _switch_provider(
             report(74, "正在写入供应商配置")
             if backfilled_provider_id:
                 write_private(PROFILE_PATH, json.dumps({key: storage_profile(value) for key, value in profiles.items()}, ensure_ascii=False, indent=2) + "\n")
-            write_private(CONFIG_PATH, merged_config + "\n")
-            if mode == "pure_api":
-                api_auth = profile.get("auth_contents", "").strip()
-                if not api_auth:
-                    api_auth = json.dumps({"OPENAI_API_KEY": profile["bearer_token"]}, indent=2)
-                write_private(AUTH_PATH, api_auth.rstrip() + "\n")
-            else:
-                write_private(AUTH_PATH, profile["auth_contents"].rstrip() + "\n")
+            write_private(CONFIG_PATH, activation_plan.config_text)
+            write_private(AUTH_PATH, activation_plan.auth_text)
             report(82, "正在更新已有会话的供应商身份")
             # Codex++ uses a stable `custom` session identity for API-backed
             # profiles. Convert legacy profile-specific identifiers while the

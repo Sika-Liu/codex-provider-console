@@ -13,6 +13,8 @@ are intentionally explicit:
 - `application/provider_service.py`: provider save/delete persistence,
   credential-preserving updates, and public-profile redaction; it has no
   FastAPI dependency.
+- `application/provider_activation.py`: validates and builds the Codex config
+  and auth-file activation plan without starting services or changing state.
 - `provider_domain.py`: provider schema normalization, compatibility migration,
   and session command construction. It has no FastAPI or Docker dependency.
 - `relay.py`: Docker-internal HTTP relay entrypoint.
@@ -23,7 +25,8 @@ are intentionally explicit:
   unavailable.
 
 Backup and provider-persistence workflows are extracted behind dedicated
-application services and covered by filesystem-behavior tests. The next
-provider extraction is activation/switching, which must remain a separate
-change because it coordinates diagnostics, session migration, and host-side
-App Server lifecycle control.
+application services and covered by filesystem-behavior tests. Provider
+activation-plan generation is also isolated; the remaining switch coordinator
+still owns diagnostics, session migration, rollback, and host-side App Server
+lifecycle control, and should be extracted only behind explicit side-effect
+adapters.
