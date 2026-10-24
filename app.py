@@ -1361,7 +1361,7 @@ def test_model_request(
                 with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                     body_text = response.read().decode("utf-8", errors="replace")
                     shape_ok, shape_detail = validate_model_diagnostic_response(body_text, wire_api)
-                    return {"ok": 200 <= response.status < 300 and shape_ok, "endpoint": endpoint, "status": response.status, "detail": shape_detail, "body": body_text[:2000], "error_kind": "" if shape_ok else "invalid_response", "attempts": attempt}
+                    return {"ok": 200 <= response.status < 300 and shape_ok, "endpoint": endpoint, "status": response.status, "detail": shape_detail, "error_kind": "" if shape_ok else "invalid_response", "attempts": attempt}
             except urllib.error.HTTPError as exc:
                 body_text = exc.read().decode("utf-8", errors="replace")
                 retry_after = (exc.headers.get("Retry-After") or "").strip()
@@ -1517,8 +1517,7 @@ def diagnose_profile(
                         endpoint = real_request.get("endpoint", "请求")
                         status = real_request.get("status", "")
                         detail = f"{endpoint} 返回 HTTP {status}{retry_note}"
-                        body = str(real_request.get("body", "")).strip()
-                        diagnostic_detail = f"{detail}\n\n响应摘录：\n{body[:2000]}" if body else detail
+                        diagnostic_detail = detail
                     else:
                         detail = f'测试「{test_model}」失败：{real_request.get("endpoint", "请求")} {real_request.get("detail", "请求失败")}'
                         diagnostic_detail = detail
