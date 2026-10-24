@@ -41,6 +41,7 @@ from api.compat import AuthService, ProviderStore
 from application.backup_service import BackupService
 from application.provider_service import ProviderService
 from application.provider_activation import ProviderActivationValidationError, build_activation_plan
+from application.provider_switch_service import ProviderSwitchDependencies, ProviderSwitchService, activation_error_message
 from application.official_login import DeviceLoginSession
 from application.config_service import (
     canonicalize_base_config,
@@ -2051,169 +2052,32 @@ def deployment_key_status() -> tuple[bool, str]:
     return False, "部署密钥尚未写入 authorized_keys；可在此页重新部署。"
 
 
-def _switch_provider(
-    provider_id: str,
-    verify: bool = True,
-    model_override: str | None = None,
-    progress: Callable[[int, str], None] | None = None,
-) -> dict:
-    def report(percent: int, stage: str) -> None:
-        if progress:
-            progress(percent, stage)
-
-    report(8, "正在验证供应商配置")
-    if not panel_settings()["provider_switching_enabled"]:
-        raise HTTPException(409, "Provider switching is disabled in the control panel")
-    profiles = read_profiles()
-    profile = profiles.get(provider_id)
-    if not profile:
-        raise HTTPException(404, "Provider profile not found")
-    profile = normalize_profile(profile)
-    mode = profile["mode"]
-    auth_mode = profile["auth_mode"]
-    usable, unusable_reason = is_profile_usable(profile)
-    if not usable:
-        raise HTTPException(422, unusable_reason)
-    report(18, "正在诊断上游连通性")
-    diagnostic = diagnose_profile(profile) if verify else {"ok": True, "checks": [], "summary": "诊断已跳过"}
-    check = {"ok": diagnostic["ok"], "detail": diagnostic["summary"], "diagnostic": diagnostic}
-    if not check["ok"]:
-        detail = activation_error_message(
-            {
-                "message": "供应商连通性测试失败；配置未改动。",
-                "check": check,
-            }
-        )
-        audit("provider_switch_rejected", provider_id=provider_id, detail=detail)
-        raise HTTPException(422, {"message": "供应商连通性测试失败；配置未改动。", "check": check})
-    diagnostic_warnings = [
-        f"{item['name']}：{item['detail']}"
-        for item in diagnostic["checks"]
-        if item["status"] == "warning"
-    ]
-    report(38, "诊断完成，正在保存当前状态")
-    # Keep the most recently observed config-level model with the provider
-    # being left. Provider selection is stored separately from Codex's stable
-    # per-session model-provider identity.
-    previous_provider_id = active_provider()
-    previous_model = active_default_model()
-    backfilled_provider_id = None
-    if previous_provider_id and previous_provider_id != provider_id and previous_provider_id in profiles:
-        backfilled_profile, changed = backfill_profile_model(profiles[previous_provider_id], previous_model)
-        if changed:
-            profiles[previous_provider_id] = backfilled_profile
-            backfilled_provider_id = previous_provider_id
-
-    report(48, "正在创建配置备份")
-    backup_id, backup_dir = backup_state(include_sessions=True, reason="provider_switch")
-    saved_common = COMMON_CONFIG_PATH.read_text(encoding="utf-8") if COMMON_CONFIG_PATH.exists() else config_text()
-    base = remove_goals_feature(canonicalize_base_config(saved_common))
-    provider_config = profile.get("config_contents", "").strip()
-    # Older profile forms saved a full config.toml preview here. Reapplying
-    # that snapshot would overwrite fields the user later changed in the
-    # provider form, such as wire_api and auth_mode.
-    if re.search(r"^\s*model_provider\s*=", provider_config, re.M):
-        provider_config = ""
-    if provider_config:
-        masked_token = 'experimental_bearer_token = "***"'
-        if profile.get("bearer_token"):
-            provider_config = provider_config.replace(masked_token, f'experimental_bearer_token = {toml_quote(profile["bearer_token"])}')
-        _, provider_config = split_toml_document(canonicalize_base_config(provider_config))
-    if profile.get("goals_configured", False):
-        provider_config = set_goals_feature(provider_config, bool(profile.get("goals_enabled", False)))
-    base_root, base_sections = split_toml_document(base)
-    merged_sections = normalize_features_sections(
-        "\n\n".join(part for part in (base_sections, provider_config) if part)
+PROVIDER_SWITCH_SERVICE = ProviderSwitchService(
+    ProviderSwitchDependencies(
+        panel_settings=panel_settings,
+        read_profiles=read_profiles,
+        active_provider=active_provider,
+        active_default_model=active_default_model,
+        diagnose_profile=diagnose_profile,
+        backup_state=backup_state,
+        config_text=config_text,
+        run_host_app_server_control=run_host_app_server_control,
+        migrate_session_provider=migrate_session_provider,
+        read_auth_overrides=_read_auth_overrides,
+        write_private=write_private,
+        restore_session_state=restore_session_state,
+        audit=audit,
+        prune_provider_switch_backups=prune_provider_switch_backups,
+        app_server_lock=APP_SERVER_LOCK,
+        common_config_path=COMMON_CONFIG_PATH,
+        config_path=CONFIG_PATH,
+        auth_path=AUTH_PATH,
+        profile_path=PROFILE_PATH,
+        settings_path=SETTINGS_PATH,
+        session_provider_id=SESSION_PROVIDER_ID,
+        host_relay_base_url=HOST_RELAY_BASE_URL,
     )
-    try:
-        activation_plan = build_activation_plan(
-            profile,
-            base_root=base_root,
-            merged_sections=merged_sections,
-            session_provider_id=SESSION_PROVIDER_ID,
-            host_relay_base_url=HOST_RELAY_BASE_URL,
-            model_override=model_override,
-        )
-    except ProviderActivationValidationError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    selected_model = activation_plan.selected_model
-    app_server_stopped = False
-    migration = {"threads": 0, "rollout_files": 0, "rollout_records": 0}
-    try:
-        # Stop first so the daemon cannot keep an old config in memory or
-        # write its cached thread metadata while it is being migrated.
-        report(62, "正在停止 Codex App Server")
-        with APP_SERVER_LOCK:
-            run_host_app_server_control("stop")
-            app_server_stopped = True
-            report(74, "正在写入供应商配置")
-            if backfilled_provider_id:
-                write_private(PROFILE_PATH, json.dumps({key: storage_profile(value) for key, value in profiles.items()}, ensure_ascii=False, indent=2) + "\n")
-            write_private(CONFIG_PATH, activation_plan.config_text)
-            write_private(AUTH_PATH, activation_plan.auth_text)
-            report(82, "正在更新已有会话的供应商身份")
-            # Codex++ uses a stable `custom` session identity for API-backed
-            # profiles. Convert legacy profile-specific identifiers while the
-            # App Server is stopped, so existing conversations continue using
-            # the supplier selected by this switch.
-            migration = migrate_session_provider(
-                SESSION_PROVIDER_ID,
-                apply=True,
-                backup_dir=backup_dir,
-            )
-            settings = _read_auth_overrides()
-            settings["active_provider_id"] = provider_id
-            write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
-            report(88, "正在启动 Codex App Server")
-            run_host_app_server_control("start")
-    except (OSError, RuntimeError, sqlite3.Error, tomllib.TOMLDecodeError) as exc:
-        for name, target in (("config.toml", CONFIG_PATH), ("auth.json", AUTH_PATH), ("control-panel-profiles.json", PROFILE_PATH), ("control-panel-settings.json", SETTINGS_PATH)):
-            backup_file = backup_dir / name
-            if backup_file.exists():
-                shutil.copy2(backup_file, target)
-                os.chmod(target, 0o600)
-        try:
-            restore_session_state(backup_dir)
-        except OSError:
-            pass
-        if app_server_stopped:
-            try:
-                with APP_SERVER_LOCK:
-                    run_host_app_server_control("start")
-            except RuntimeError:
-                pass
-        audit("provider_switch_failed", provider_id=provider_id, detail=str(exc))
-        raise HTTPException(502, "供应商配置未能完成应用；已恢复旧配置并尝试重新启动 Codex App Server。") from exc
-    report(96, "正在确认新配置")
-    pruned_backup_ids = prune_provider_switch_backups()
-    runtime_detail = "Codex App Server 已重启，新的连接会读取当前供应商配置。"
-    if diagnostic_warnings:
-        runtime_detail += " 诊断警告：" + "；".join(diagnostic_warnings)
-    runtime = {"restarted": True, "detail": runtime_detail}
-    audit(
-        "provider_switched",
-        provider_id=provider_id,
-        backup_id=backup_id,
-        model=selected_model or None,
-        previous_provider_id=previous_provider_id,
-        backfilled_provider_id=backfilled_provider_id,
-        migration=migration,
-        diagnostic_warnings=diagnostic_warnings,
-        app_server_restarted=True,
-        pruned_backup_ids=",".join(pruned_backup_ids) or None,
-    )
-    return {
-        "active_provider": provider_id,
-        "backup_id": backup_id,
-        "check": check,
-        "model": selected_model or None,
-        "backfilled_provider_id": backfilled_provider_id,
-        "mode": mode,
-        "migration": migration,
-        "diagnostic_warnings": diagnostic_warnings,
-        "pruned_backup_ids": pruned_backup_ids,
-        "runtime": runtime,
-    }
+)
 
 
 def switch_provider(
@@ -2232,7 +2096,7 @@ def switch_provider(
     if not PROVIDER_SWITCH_LOCK.acquire(blocking=False):
         raise HTTPException(409, "Another provider switch is already in progress")
     try:
-        return _switch_provider(
+        return PROVIDER_SWITCH_SERVICE.run(
             provider_id,
             verify=verify,
             model_override=model_override,
@@ -2836,24 +2700,6 @@ def provider_auth_contents(provider_id: str) -> dict:
 @app.post("/api/providers/{provider_id}/activate")
 def activate_provider(provider_id: str, verify: bool = True) -> dict:
     return switch_provider(provider_id, verify=verify)
-
-
-def activation_error_message(detail: object) -> str:
-    if isinstance(detail, dict):
-        message = str(detail.get("message") or detail.get("detail") or "供应商切换失败")
-        check = detail.get("check")
-        diagnostic = check.get("diagnostic") if isinstance(check, dict) else None
-        checks = diagnostic.get("checks") if isinstance(diagnostic, dict) else None
-        if isinstance(checks, list):
-            failed = [
-                f"{item.get('name', '检查')}：{item.get('detail', '失败')}"
-                for item in checks
-                if isinstance(item, dict) and item.get("status") == "fail"
-            ]
-            if failed:
-                return f"{message}\n" + "\n".join(failed)
-        return message
-    return str(detail or "供应商切换失败")
 
 
 def activation_job_snapshot(job_id: str) -> dict:

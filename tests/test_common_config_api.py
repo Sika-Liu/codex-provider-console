@@ -12,7 +12,8 @@ class CommonConfigApiTests(unittest.TestCase):
         self.assertIn('@app.get("/api/common-config")', source)
         self.assertIn('@app.post("/api/common-config/extract")', source)
         self.assertIn('@app.post("/api/common-config")', source)
-        self.assertIn('saved_common = COMMON_CONFIG_PATH.read_text', source)
+        switch_source = (ROOT / "application" / "provider_switch_service.py").read_text(encoding="utf-8")
+        self.assertIn('saved_common = deps.common_config_path.read_text', switch_source)
         self.assertIn('tomllib.loads(contents or "")', source)
 
 
