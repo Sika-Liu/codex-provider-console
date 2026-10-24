@@ -42,6 +42,7 @@ from application.backup_service import BackupService
 from application.provider_service import ProviderService
 from application.provider_activation import ProviderActivationValidationError, build_activation_plan
 from application.provider_switch_service import ProviderSwitchDependencies, ProviderSwitchService, activation_error_message
+from application.health_service import HealthDependencies, HealthService
 from application.official_login import DeviceLoginSession
 from application.config_service import (
     canonicalize_base_config,
@@ -1870,173 +1871,35 @@ def inspect_session_storage() -> tuple[str, str]:
         return "fail", f"{len(missing)} 个活动会话缺少历史文件（已登记 {len(active_ids)} 个）"
     return "pass", f"{len(active_ids)} 个活动会话均有历史文件；这是存储检查，不包含客户端加载耗时"
 
-def health_check(on_check: Callable[[dict[str, str]], None] | None = None) -> dict:
-    checks: list[dict[str, str]] = []
-
-    def add(name: str, status: str, detail: str, diagnostic_detail: str | None = None, action: str | None = None) -> None:
-        item = {"name": name, "status": status, "detail": detail}
-        if diagnostic_detail:
-            item["diagnostic_detail"] = diagnostic_detail
-        if action:
-            item["action"] = action
-        checks.append(item)
-        if on_check:
-            on_check(dict(item))
-
-    add("Codex 数据目录", "pass" if CODEX_HOME.exists() else "fail", str(CODEX_HOME) if CODEX_HOME.exists() else f"目录不存在：{CODEX_HOME}")
-    # The panel mounts the deployment user's home. This is the only filesystem
-    # view shared reliably by rootful and rootless Docker deployments.
-    cli_path = executable_user_cli_path()
-    cli_version = ""
-    if cli_path:
-        try:
-            cli_version = subprocess.run([str(cli_path), "--version"], capture_output=True, text=True, timeout=8, check=False).stdout.strip().splitlines()[0]
-        except (OSError, subprocess.SubprocessError, IndexError):
-            cli_version = ""
-    # The version recorded at deployment time can be stale. Run the resolved
-    # user CLI instead; install.sh maintains /usr/local/bin/codex as its stable
-    # non-interactive SSH entry point.
-    cli_installed = bool(cli_version)
-    if cli_installed:
-        cli_detail = f"{cli_version}；已验证部署用户 {DEPLOY_USER} 的实际 CLI。"
-    else:
-        cli_detail = f"用户 {DEPLOY_USER} 未检测到 Codex CLI；可在此页直接安装。"
-    add(
-        "Codex CLI",
-        "pass" if cli_installed else "fail",
-        cli_detail,
+def health_dependencies() -> HealthDependencies:
+    return HealthDependencies(
+        codex_home=CODEX_HOME,
+        config_path=CONFIG_PATH,
+        auth_path=AUTH_PATH,
+        deploy_user=DEPLOY_USER,
+        auth_enabled=AUTH_ENABLED,
+        executable_user_cli_path=executable_user_cli_path,
+        fetch_latest_cli_version=fetch_latest_cli_version,
+        cli_version_number=cli_version_number,
+        deployment_key_status=deployment_key_status,
+        inspect_host_app_server=inspect_host_app_server,
+        inspect_session_storage=inspect_session_storage,
+        config_text=config_text,
+        auth_configured=auth_configured,
+        read_profiles=read_profiles,
+        active_provider=active_provider,
+        normalize_profile=normalize_profile,
+        diagnose_profile=diagnose_profile,
+        audit=audit,
     )
-    if cli_installed:
-        try:
-            latest_cli_version = fetch_latest_cli_version()
-            current_cli_version = cli_version_number(cli_version)
-            current_key = tuple(int(part) for part in current_cli_version.split("-", 1)[0].split(".")) if current_cli_version else ()
-            latest_key = tuple(int(part) for part in latest_cli_version.split("-", 1)[0].split("."))
-            if not current_key:
-                add("Codex CLI 版本", "warning", f"当前版本无法识别；官方最新版本为 {latest_cli_version}")
-            elif current_key < latest_key:
-                add("Codex CLI 版本", "warning", f"当前 {current_cli_version}，最新 {latest_cli_version}；可以更新", action="update-codex")
-            else:
-                add("Codex CLI 版本", "pass", f"当前 {current_cli_version}，已是最新版本")
-        except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError, urllib.error.HTTPError) as exc:
-            add("Codex CLI 版本", "warning", f"暂时无法获取官方最新版本：{exc}")
-    else:
-        add("Codex CLI 版本", "warning", "尚未安装 Codex CLI")
 
-    deployment_key_ready, deployment_key_detail = deployment_key_status()
-    add("Codex Desktop 部署密钥", "pass" if deployment_key_ready else "warning", deployment_key_detail)
-    app_server_status, app_server_detail = inspect_host_app_server()
-    add("Codex App Server", app_server_status, app_server_detail)
-    session_status, session_detail = inspect_session_storage()
-    add("会话文件与索引", session_status, session_detail)
-    add("目录写入权限", "pass" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "fail", "可写" if CODEX_HOME.exists() and os.access(CODEX_HOME, os.W_OK) else "控制台无法写入 Codex 数据目录")
 
-    config = config_text()
-    if CONFIG_PATH.exists():
-        add("config.toml", "pass" if config.strip() else "warning", "已找到配置文件" if config.strip() else "配置文件为空")
-        try:
-            tomllib.loads(config)
-            add("config.toml 语法", "pass", "TOML 格式有效")
-        except tomllib.TOMLDecodeError as exc:
-            add("config.toml 语法", "fail", f"TOML 格式无效：{exc}；可在此页修复重复的 [features] 配置段")
-        provider_match = re.search(r"^\s*model_provider\s*=\s*['\"]([^'\"]+)['\"]", config, re.M)
-        model_match = re.search(r"^\s*model\s*=\s*['\"]([^'\"]+)['\"]", config, re.M)
-        if provider_match:
-            detail = f"供应商：{provider_match.group(1)}"
-            if model_match:
-                detail += f"，默认模型：{model_match.group(1)}"
-            else:
-                detail += "；未设置默认模型（可在 Codex 中自行选择）"
-            add("Codex 关键配置", "pass", detail)
-        else:
-            add("Codex 关键配置", "warning", "缺少 model_provider；保存并激活供应商后会自动补齐")
-    else:
-        add("config.toml", "warning", "尚未生成；保存并激活供应商后会创建")
-
-    if AUTH_PATH.exists():
-        try:
-            parsed_auth = json.loads(AUTH_PATH.read_text(encoding="utf-8"))
-            add("auth.json", "pass" if isinstance(parsed_auth, dict) else "fail", "JSON 格式有效" if isinstance(parsed_auth, dict) else "必须是 JSON 对象")
-        except (OSError, json.JSONDecodeError):
-            add("auth.json", "fail", "文件不可读或不是有效 JSON")
-    else:
-        add("auth.json", "warning", "未找到；官方登录和纯 API 供应商都会使用该文件保存认证，保存并激活供应商后会自动创建")
-
-    if not auth_configured() and AUTH_ENABLED:
-        add("控制台认证", "fail", "认证已启用但管理员账号、密码或会话密钥未配置")
-    else:
-        add("控制台认证", "pass", "认证配置完整" if AUTH_ENABLED else "认证已关闭")
-
-    profiles = read_profiles()
-    active_id = active_provider()
-    active = profiles.get(active_id) if active_id else None
-    if not active:
-        add("当前供应商", "warning", "尚未激活供应商；请先保存并激活一个供应商")
-    else:
-        add("当前供应商", "pass", f"{active.get('name', active_id)} ({active_id})")
-        def add_supplier_check(item: dict[str, str]) -> None:
-            name = "模型目录" if item["name"] == "上游模型目录" else item["name"]
-            status = item["status"]
-            if name == "真实请求" and status == "warning" and item["detail"].startswith("测试「"):
-                status = "fail"
-            add(f"供应商 · {name}", status, item["detail"], item.get("diagnostic_detail"))
-
-        diagnose_profile(active, on_check=add_supplier_check)
-
-    try:
-        usage = shutil.disk_usage(CODEX_HOME)
-        free_gb = usage.free / (1024 ** 3)
-        add("磁盘空间", "pass" if free_gb >= 1 else "warning", f"剩余 {free_gb:.1f} GB")
-    except OSError as exc:
-        add("磁盘空间", "warning", f"无法读取磁盘空间：{exc}")
-
-    failed = sum(item["status"] == "fail" for item in checks)
-    warnings = sum(item["status"] == "warning" for item in checks)
-    audit("health_checked", failed=failed, warnings=warnings)
-    return {
-        "ok": failed == 0,
-        "passed": failed == 0 and warnings == 0,
-        "checks": checks,
-        "summary": "环境满足使用条件。" if failed == 0 and warnings == 0 else f"发现 {failed} 项失败、{warnings} 项提醒。",
-    }
+def health_check(on_check: Callable[[dict[str, str]], None] | None = None) -> dict:
+    return HealthService(health_dependencies()).run(on_check)
 
 
 def health_check_plan() -> list[dict[str, str]]:
-    """Return the visible checklist without performing filesystem or network checks."""
-    names = [
-        "Codex 数据目录",
-        "Codex CLI",
-        "Codex CLI 版本",
-        "Codex Desktop 部署密钥",
-        "Codex App Server",
-        "会话文件与索引",
-        "目录写入权限",
-        "config.toml",
-        "config.toml 语法",
-        "Codex 关键配置",
-        "auth.json",
-        "控制台认证",
-        "当前供应商",
-    ]
-    profiles = read_profiles()
-    active_id = active_provider()
-    active = profiles.get(active_id) if active_id else None
-    if active:
-        profile = normalize_profile(active)
-        if profile["mode"] == "official":
-            names.append("供应商 · 官方认证")
-        else:
-            names.extend([
-                "供应商 · Base URL",
-                "供应商 · API Key",
-                "供应商 · 上游协议",
-                "供应商 · 模型目录",
-            ])
-            if str(profile.get("model", "")).strip():
-                names.append("供应商 · 配置模型可见性")
-            names.append("供应商 · 真实请求")
-    names.append("磁盘空间")
-    return [{"name": name, "status": "pending", "detail": "等待检查"} for name in names]
+    return HealthService(health_dependencies()).plan()
 
 
 def deployment_key_status() -> tuple[bool, str]:
