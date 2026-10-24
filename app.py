@@ -750,6 +750,7 @@ MODEL_DIAGNOSTIC_JOB_TTL_SECONDS = 3600
 MODEL_DIAGNOSTIC_MAX_JOBS = 30
 
 
+from infrastructure.host_gateway import HostGateway
 from infrastructure.upstream_http import (
     UpstreamModelFetchError,
     fetch_upstream_models as fetch_upstream_models_http,
@@ -886,31 +887,26 @@ def host_ssh_command(gateway: str) -> list[str]:
     return build_host_ssh_command(DEPLOYMENT_KEY_PATH, DEPLOY_USER, gateway, USER_HOME / ".ssh" / "known_hosts", PANEL_SSH_HOST_ALIAS, environment=ssh_client_environment())
 
 
-def run_host_app_server_control(action: Literal["start", "stop"]) -> str:
-    """Use the panel deployment key for one fixed host-side App Server action."""
-    if not DEPLOYMENT_KEY_PATH.is_file():
-        raise RuntimeError("缺少面板部署密钥；请先在健康检查中部署密钥")
-    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", DEPLOY_USER):
-        raise RuntimeError("部署用户名无效，无法管理 Codex App Server")
-    script = HOST_APP_SERVER_START_SCRIPT if action == "start" else HOST_APP_SERVER_STOP_SCRIPT
-    gateway = docker_host_gateway()
-    try:
-        result = subprocess.run(
-            host_ssh_command(gateway),
-            capture_output=True,
-            text=True,
-            input=script,
-            timeout=45,
-            check=False,
-            env=ssh_client_environment(),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("宿主机 Codex App Server 操作超时") from exc
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "宿主机未提供失败原因").strip()
-        raise RuntimeError(f"宿主机 Codex App Server {action} 失败：{detail[-400:]}")
-    return (result.stdout or result.stderr).strip()
+def host_gateway() -> HostGateway:
+    return HostGateway(
+        deployment_key=DEPLOYMENT_KEY_PATH,
+        deploy_user=DEPLOY_USER,
+        user_home=USER_HOME,
+        host_user_home=HOST_USER_HOME_PATH,
+        host_codex_home=HOST_CODEX_HOME_PATH,
+        command=host_ssh_command,
+        environment=ssh_client_environment,
+    )
 
+
+def run_host_gateway_script(script: str, operation: str, timeout: int = 45) -> str:
+    return host_gateway().run(script, operation, timeout)
+
+
+def run_host_app_server_control(action: Literal["start", "stop"]) -> str:
+    """Use the verified gateway for one fixed App Server action."""
+    script = HOST_APP_SERVER_START_SCRIPT if action == "start" else HOST_APP_SERVER_STOP_SCRIPT
+    return run_host_gateway_script(script, f"Codex App Server {action}")
 
 def host_panel_project_path() -> str:
     if HOST_USER_HOME_PATH and Path(HOST_USER_HOME_PATH).is_absolute():
@@ -1287,30 +1283,8 @@ print(message)
 
 
 def run_host_session_delete(thread_id: str) -> str:
-    """Delete via the host App Server, not the container-local CLI cache."""
-    if not DEPLOYMENT_KEY_PATH.is_file():
-        raise RuntimeError("缺少面板部署密钥；请先在健康检查中部署密钥")
-    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", DEPLOY_USER):
-        raise RuntimeError("部署用户名无效，无法删除云端会话")
-    script = host_session_delete_script(thread_id, host_codex_home_path())
-    gateway = docker_host_gateway()
-    try:
-        result = subprocess.run(
-            host_ssh_command(gateway),
-            capture_output=True,
-            text=True,
-            input=script,
-            timeout=45,
-            check=False,
-            env=ssh_client_environment(),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("宿主机 Codex 删除会话超时") from exc
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "宿主机未提供失败原因").strip()
-        raise RuntimeError(f"宿主机 Codex 无法删除会话：{detail[-400:]}")
-    return (result.stdout or result.stderr).strip()
-
+    """Delete via the host App Server through the verified gateway."""
+    return run_host_gateway_script(host_session_delete_script(thread_id, host_codex_home_path()), "Codex 删除会话")
 
 def host_session_archive_script(thread_id: str, codex_home: str, archived: bool) -> str:
     """Build a host-side archive or unarchive command using the managed daemon."""
@@ -1338,32 +1312,9 @@ print(result.stdout.strip())
 
 
 def run_host_session_archive(thread_id: str, archived: bool) -> str:
-    """Archive or unarchive through the host App Server for desktop synchronization."""
-    if not DEPLOYMENT_KEY_PATH.is_file():
-        raise RuntimeError("缺少面板部署密钥；请先在健康检查中部署密钥")
-    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", DEPLOY_USER):
-        raise RuntimeError("部署用户名无效，无法修改云端会话归档状态")
-    script = host_session_archive_script(thread_id, host_codex_home_path(), archived)
-    gateway = docker_host_gateway()
-    try:
-        result = subprocess.run(
-            host_ssh_command(gateway),
-            capture_output=True,
-            text=True,
-            input=script,
-            timeout=45,
-            check=False,
-            env=ssh_client_environment(),
-        )
-    except subprocess.TimeoutExpired as exc:
-        action = "归档" if archived else "取消归档"
-        raise RuntimeError(f"宿主机 Codex {action}会话超时") from exc
-    if result.returncode != 0:
-        action = "归档" if archived else "取消归档"
-        detail = (result.stderr or result.stdout or "宿主机未提供失败原因").strip()
-        raise RuntimeError(f"宿主机 Codex 无法{action}会话：{detail[-400:]}")
-    return (result.stdout or result.stderr).strip()
-
+    """Archive or unarchive through the verified host gateway."""
+    action = "归档会话" if archived else "取消归档会话"
+    return run_host_gateway_script(host_session_archive_script(thread_id, host_codex_home_path(), archived), f"Codex {action}")
 
 def migrate_session_provider(
     provider_id: str,

@@ -9,9 +9,11 @@ class SshHostVerificationTests(unittest.TestCase):
     def test_all_host_operations_use_the_shared_strict_ssh_builder(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
         host_ops = (ROOT / "host_ops.py").read_text(encoding="utf-8")
-        self.assertEqual(source.count("host_ssh_command(gateway),"), 5)
+        gateway = (ROOT / "infrastructure" / "host_gateway.py").read_text(encoding="utf-8")
+        self.assertIn("command=host_ssh_command", source)
+        self.assertIn("self.command(self.docker_gateway())", gateway)
         self.assertIn('"StrictHostKeyChecking=yes"', host_ops)
-        self.assertNotIn("StrictHostKeyChecking=accept-new", source + host_ops)
+        self.assertNotIn("StrictHostKeyChecking=accept-new", source + host_ops + gateway)
 
     def test_missing_or_unknown_host_key_fails_closed(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
