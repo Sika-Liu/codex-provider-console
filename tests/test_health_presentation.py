@@ -4,10 +4,12 @@ from pathlib import Path
 
 class HealthPresentationTests(unittest.TestCase):
     def test_successful_live_request_uses_a_compact_summary_and_limited_detail(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        root = Path(__file__).resolve().parents[1]
+        source = root.joinpath("application", "diagnostic_service.py").read_text(encoding="utf-8")
+        gateway = root.joinpath("infrastructure", "upstream_http.py").read_text(encoding="utf-8")
         self.assertIn('detail = f"{endpoint} 返回 HTTP {status}{retry_note}"', source)
-        self.assertNotIn('"body": body_text[:2000]', source)
-        self.assertNotIn('响应摘录', source)
+        self.assertNotIn('"body": body_text[:2000]', gateway)
+        self.assertNotIn('响应摘录', gateway)
         self.assertIn('add("真实请求", "pass" if real_request["ok"] else "warning", detail, diagnostic_detail)', source)
 
     def test_health_page_groups_checks_and_collapses_diagnostic_output(self):
