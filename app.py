@@ -44,6 +44,7 @@ from application.provider_activation import ProviderActivationValidationError, b
 from application.provider_switch_service import ProviderSwitchDependencies, ProviderSwitchService, activation_error_message
 from application.health_service import HealthDependencies, HealthService
 from application.session_catalog import SessionCatalog, SessionCatalogPaths
+from application.recovery_service import RecoveryError, RecoveryService
 from application.official_login import DeviceLoginSession
 from application.config_service import (
     canonicalize_base_config,
@@ -1964,196 +1965,84 @@ def save_account_username(request: AccountUsernameRequest) -> dict:
     return {"username": PANEL_USERNAME, "sessions_invalidated": True}
 
 
+def _write_recovery_settings(settings: dict) -> None:
+    write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+
+
+def _apply_recovery_password(new_password: str) -> None:
+    global PANEL_PASSWORD, SESSION_SECRET
+    settings = _read_auth_overrides()
+    salt = secrets.token_urlsafe(24)
+    settings["panel_password_salt"] = salt
+    settings["panel_password_hash"] = hashlib.pbkdf2_hmac("sha256", new_password.encode("utf-8"), salt.encode("utf-8"), 210_000).hex()
+    settings["panel_session_secret"] = secrets.token_urlsafe(32)
+    _write_recovery_settings(settings)
+    PANEL_PASSWORD = ""
+    SESSION_SECRET = settings["panel_session_secret"]
+    AUTH_SERVICE.update_runtime(password=PANEL_PASSWORD, session_secret=SESSION_SECRET)
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.clear()
+
+
+RECOVERY_SERVICE = RecoveryService(
+    read_settings=_read_auth_overrides,
+    write_settings=_write_recovery_settings,
+    session_secret=lambda: SESSION_SECRET,
+    password_matches=current_password_matches,
+    password_reset=_apply_recovery_password,
+    send_email=send_recovery_email,
+    email_ready=recovery_email_ready,
+    audit=audit,
+    code_lifetime=RECOVERY_CODE_LIFETIME,
+    grant_lifetime=RECOVERY_GRANT_LIFETIME,
+)
+
+
+def recovery_result(operation):
+    try:
+        return operation()
+    except RecoveryError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
 @app.get("/api/account/recovery-email")
 def get_recovery_email() -> dict:
-    email = str(_read_auth_overrides().get("panel_recovery_email") or "")
-    return {"configured": recovery_email_ready(), "email": masked_recovery_email(email), "bound": bool(email)}
+    return RECOVERY_SERVICE.status()
 
 
 @app.post("/api/account/recovery-email/unbind/request")
 def request_recovery_email_unbind(request: Request) -> dict:
-    email = str(_read_auth_overrides().get("panel_recovery_email") or "")
-    if not email:
-        raise HTTPException(400, "尚未绑定辅助邮箱")
-    if not recovery_email_ready():
-        raise HTTPException(503, "邮件服务尚未就绪，请联系管理员。")
-    if not recovery_send_allowed("unbind", login_client_key(request)):
-        raise HTTPException(429, "验证码发送过于频繁，请稍后重试")
-    code, pending = new_recovery_code()
-    pending.update({"email": email, "session_secret": SESSION_SECRET})
-    with RECOVERY_LOCK:
-        RECOVERY_PENDING["unbind"] = pending
-    try:
-        send_recovery_email(email, "解除 Codex 控制台辅助邮箱绑定", f"邮箱解绑验证码：{code}。10 分钟内有效；如非本人操作，请忽略。")
-    except HTTPException:
-        with RECOVERY_LOCK:
-            if RECOVERY_PENDING.get("unbind") is pending:
-                RECOVERY_PENDING.pop("unbind", None)
-        raise
-    return {"sent": True, "email": masked_recovery_email(email), "expires_in": RECOVERY_CODE_LIFETIME}
+    return recovery_result(lambda: RECOVERY_SERVICE.request_unbind(login_client_key(request)))
 
 
 @app.delete("/api/account/recovery-email")
 def delete_recovery_email(details: RecoveryCodeRequest) -> dict:
-    with RECOVERY_LOCK:
-        pending = RECOVERY_PENDING.get("unbind")
-        settings = _read_auth_overrides()
-        email = str(settings.get("panel_recovery_email") or "")
-        if not email:
-            raise HTTPException(400, "尚未绑定辅助邮箱")
-        if not pending or pending["expires"] < time.time() or pending["session_secret"] != SESSION_SECRET or pending["email"] != email:
-            RECOVERY_PENDING.pop("unbind", None)
-            raise HTTPException(400, "验证码无效或已过期")
-        pending["attempts"] += 1
-        if pending["attempts"] > 5:
-            RECOVERY_PENDING.pop("unbind", None)
-            raise HTTPException(400, "验证码尝试次数过多，请重新发送")
-        if not hmac.compare_digest(recovery_code_digest(details.code, pending["salt"]), pending["digest"]):
-            raise HTTPException(400, "验证码不正确")
-        settings.pop("panel_recovery_email", None)
-        write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
-        RECOVERY_PENDING.pop("bind", None)
-        RECOVERY_PENDING.pop("reset", None)
-        RECOVERY_PENDING.pop("grant", None)
-        RECOVERY_PENDING.pop("unbind", None)
-    audit("recovery_email_unbound")
-    return {"bound": False}
+    return recovery_result(lambda: RECOVERY_SERVICE.unbind(details.code))
 
 
 @app.post("/api/account/recovery-email/request")
 def request_recovery_email_binding(details: RecoveryEmailRequest, request: Request) -> dict:
-    if not recovery_email_ready():
-        raise HTTPException(503, "邮件服务尚未配置")
-    email = details.email.strip().lower()
-    if email == _read_auth_overrides().get("panel_recovery_email"):
-        raise HTTPException(400, "该邮箱已经绑定")
-    if not recovery_send_allowed("bind", login_client_key(request)):
-        raise HTTPException(429, "验证码发送过于频繁，请稍后重试")
-    code, pending = new_recovery_code()
-    pending.update({"email": email, "session_secret": SESSION_SECRET})
-    with RECOVERY_LOCK:
-        RECOVERY_PENDING["bind"] = pending
-    try:
-        send_recovery_email(email, "验证 Codex 控制台辅助邮箱", f"邮箱绑定验证码：{code}。10 分钟内有效；如非本人操作，请忽略。")
-    except HTTPException:
-        with RECOVERY_LOCK:
-            if RECOVERY_PENDING.get("bind") is pending:
-                RECOVERY_PENDING.pop("bind", None)
-        raise
-    return {"sent": True, "expires_in": RECOVERY_CODE_LIFETIME}
+    return recovery_result(lambda: RECOVERY_SERVICE.request_binding(details.email, login_client_key(request)))
 
 
 @app.post("/api/account/recovery-email/verify")
 def verify_recovery_email_binding(details: RecoveryCodeRequest) -> dict:
-    with RECOVERY_LOCK:
-        pending = RECOVERY_PENDING.get("bind")
-        if not pending or pending["expires"] < time.time() or pending["session_secret"] != SESSION_SECRET:
-            RECOVERY_PENDING.pop("bind", None)
-            raise HTTPException(400, "验证码无效或已过期")
-        pending["attempts"] += 1
-        if pending["attempts"] > 5:
-            RECOVERY_PENDING.pop("bind", None)
-            raise HTTPException(400, "验证码尝试次数过多，请重新发送")
-        if not hmac.compare_digest(recovery_code_digest(details.code, pending["salt"]), pending["digest"]):
-            raise HTTPException(400, "验证码不正确")
-        email = pending["email"]
-        settings = _read_auth_overrides()
-        old_email = str(settings.get("panel_recovery_email") or "")
-        settings["panel_recovery_email"] = email
-        write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
-        RECOVERY_PENDING.pop("bind", None)
-        RECOVERY_PENDING.pop("reset", None)
-        RECOVERY_PENDING.pop("grant", None)
-        RECOVERY_PENDING.pop("unbind", None)
-    if old_email and old_email != email:
-        try:
-            send_recovery_email(old_email, "Codex 控制台辅助邮箱已更换", "控制台辅助邮箱已更换。如非本人操作，请通过服务器 SSH 立即重置管理员密码。")
-        except HTTPException:
-            audit("recovery_email_change_notice_failed")
-    audit("recovery_email_bound")
-    return {"bound": True, "email": masked_recovery_email(email)}
+    return recovery_result(lambda: RECOVERY_SERVICE.verify_binding(details.code))
 
 
 @app.post("/api/password-reset/request")
 def request_password_reset(details: RecoveryEmailRequest, request: Request) -> dict:
-    email = str(_read_auth_overrides().get("panel_recovery_email") or "")
-    if not email:
-        raise HTTPException(400, "未添加辅助邮箱，请通过服务器 SSH 重置密码。")
-    if not recovery_email_ready():
-        raise HTTPException(503, "邮件找回尚未配置，请通过服务器 SSH 重置密码")
-    if not recovery_send_allowed("reset", login_client_key(request)):
-        raise HTTPException(429, "请求过于频繁，请稍后重试")
-    if not hmac.compare_digest(details.email.strip().lower(), email.lower()):
-        raise HTTPException(400, "辅助邮箱不匹配")
-    code, pending = new_recovery_code()
-    pending.update({"email": email, "session_secret": SESSION_SECRET})
-    with RECOVERY_LOCK:
-        RECOVERY_PENDING["reset"] = pending
-        RECOVERY_PENDING.pop("grant", None)
-    try:
-        send_recovery_email(email, "重置 Codex 控制台密码", f"密码重置验证码：{code}。10 分钟内有效；如非本人操作，请忽略。")
-    except HTTPException:
-        with RECOVERY_LOCK:
-            if RECOVERY_PENDING.get("reset") is pending:
-                RECOVERY_PENDING.pop("reset", None)
-        raise
-    return {"sent": True, "message": "验证码已发送至辅助邮箱。"}
+    return recovery_result(lambda: RECOVERY_SERVICE.request_reset(details.email, login_client_key(request)))
 
 
 @app.post("/api/password-reset/verify")
 def verify_password_reset(details: RecoveryCodeRequest) -> dict:
-    with RECOVERY_LOCK:
-        pending = RECOVERY_PENDING.get("reset")
-        email = str(_read_auth_overrides().get("panel_recovery_email") or "")
-        if not pending or pending["expires"] < time.time() or pending["session_secret"] != SESSION_SECRET or pending["email"] != email:
-            RECOVERY_PENDING.pop("reset", None)
-            raise HTTPException(400, "验证码无效或已过期")
-        pending["attempts"] += 1
-        if pending["attempts"] > 5:
-            RECOVERY_PENDING.pop("reset", None)
-            raise HTTPException(400, "验证码尝试次数过多，请重新发送")
-        if not hmac.compare_digest(recovery_code_digest(details.code, pending["salt"]), pending["digest"]):
-            raise HTTPException(400, "验证码不正确")
-        token = secrets.token_urlsafe(32)
-        RECOVERY_PENDING["grant"] = {
-            "digest": hashlib.sha256(token.encode("utf-8")).hexdigest(),
-            "expires": time.time() + RECOVERY_GRANT_LIFETIME,
-            "session_secret": SESSION_SECRET,
-            "email": email,
-        }
-        RECOVERY_PENDING.pop("reset", None)
-    return {"reset_token": token, "expires_in": RECOVERY_GRANT_LIFETIME}
+    return recovery_result(lambda: RECOVERY_SERVICE.verify_reset(details.code))
 
 
 @app.post("/api/password-reset/complete")
 def complete_password_reset(details: ResetPasswordRequest) -> dict:
-    global PANEL_PASSWORD, SESSION_SECRET
-    with RECOVERY_LOCK:
-        grant = RECOVERY_PENDING.get("grant")
-        email = str(_read_auth_overrides().get("panel_recovery_email") or "")
-        token_digest = hashlib.sha256(details.reset_token.encode("utf-8")).hexdigest()
-        if not grant or grant["expires"] < time.time() or grant["session_secret"] != SESSION_SECRET or grant["email"] != email or not hmac.compare_digest(token_digest, grant["digest"]):
-            raise HTTPException(400, "重置凭证无效或已过期")
-        if current_password_matches(details.new_password):
-            raise HTTPException(400, "新密码不能与当前密码相同")
-        settings = _read_auth_overrides()
-        salt = secrets.token_urlsafe(24)
-        settings["panel_password_salt"] = salt
-        settings["panel_password_hash"] = hashlib.pbkdf2_hmac(
-            "sha256", details.new_password.encode("utf-8"), salt.encode("utf-8"), 210_000
-        ).hex()
-        settings["panel_session_secret"] = secrets.token_urlsafe(32)
-        write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
-        PANEL_PASSWORD = ""
-        SESSION_SECRET = settings["panel_session_secret"]
-        AUTH_SERVICE.update_runtime(password=PANEL_PASSWORD, session_secret=SESSION_SECRET)
-        RECOVERY_PENDING.pop("grant", None)
-        RECOVERY_PENDING.pop("bind", None)
-        RECOVERY_PENDING.pop("unbind", None)
-    with LOGIN_FAILURES_LOCK:
-        LOGIN_FAILURES.clear()
-    audit("account_password_reset")
-    return {"reset": True, "sessions_invalidated": True}
+    return recovery_result(lambda: RECOVERY_SERVICE.complete_reset(details.reset_token, details.new_password))
 
 
 @app.get("/api/common-config")
