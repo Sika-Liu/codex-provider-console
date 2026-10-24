@@ -19,6 +19,7 @@ COPY VERSION app.py provider_schemas.py model_diagnostic_domain.py host_ops.py s
 COPY api ./api
 COPY application ./application
 COPY infrastructure ./infrastructure
+COPY web ./web
 COPY security ./security
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 RUN chmod 755 /usr/local/bin/docker-entrypoint

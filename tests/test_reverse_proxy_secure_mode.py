@@ -7,6 +7,7 @@ class ReverseProxySecureModeTests(unittest.TestCase):
     def setUpClass(cls):
         root = Path(__file__).parents[1]
         cls.source = (root / "app.py").read_text(encoding="utf-8")
+        cls.pages = (root / "web" / "pages.py").read_text(encoding="utf-8")
         cls.gateway = (root / "infrastructure" / "reverse_proxy_gateway.py").read_text(encoding="utf-8")
 
     def test_endpoint_requires_https_proxy_identity(self):
@@ -15,7 +16,7 @@ class ReverseProxySecureModeTests(unittest.TestCase):
         self.assertIn("x-forwarded-proto", self.source)
         self.assertIn("request_host != domain", self.source)
         self.assertIn("https_verified", self.source)
-        self.assertIn("https_error", self.source)
+        self.assertIn("https_error", self.pages)
 
     def test_secure_mode_updates_host_environment_and_recreates_panel(self):
         self.assertIn('PANEL_BIND", "127.0.0.1"', self.gateway)
@@ -27,15 +28,15 @@ class ReverseProxySecureModeTests(unittest.TestCase):
         self.assertIn("import json, os, re, shutil, subprocess, uuid", self.gateway)
 
     def test_ui_exposes_explicit_secure_mode_action(self):
-        self.assertIn('id="proxy-enable-secure"', self.source)
-        self.assertIn("enableProxySecureMode", self.source)
-        self.assertIn("result.secure_mode", self.source)
-        self.assertIn('id="proxy-disable-secure"', self.source)
-        self.assertIn("disableProxySecureMode", self.source)
-        self.assertNotIn("renderSecurityWarnings(d.preflight)", self.source)
-        self.assertIn("确认启用安全模式", self.source)
-        self.assertIn("安全性更高", self.source)
-        self.assertNotIn('id="proxy-security-status"', self.source)
+        self.assertIn('id="proxy-enable-secure"', self.pages)
+        self.assertIn("enableProxySecureMode", self.pages)
+        self.assertIn("result.secure_mode", self.pages)
+        self.assertIn('id="proxy-disable-secure"', self.pages)
+        self.assertIn("disableProxySecureMode", self.pages)
+        self.assertNotIn("renderSecurityWarnings(d.preflight)", self.pages)
+        self.assertIn("确认启用安全模式", self.pages)
+        self.assertIn("安全性更高", self.pages)
+        self.assertNotIn('id="proxy-security-status"', self.pages)
 
 
 if __name__ == "__main__":

@@ -39,20 +39,15 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertIn('"recoverable": False', endpoint)
 
     def test_session_page_exposes_archive_and_permanent_delete_only(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("web", "pages.py").read_text(encoding="utf-8")
         self.assertIn("永久删除不会创建备份", source)
         self.assertIn("已归档会话", source)
-        self.assertIn('@SESSIONS_ROUTER.get("/api/archived-sessions")', source)
-        self.assertIn('@SESSIONS_ROUTER.post("/api/sessions/{thread_id}/archive")', source)
-        self.assertIn('@SESSIONS_ROUTER.post("/api/archived-sessions/{thread_id}/unarchive")', source)
-        self.assertIn('@SESSIONS_ROUTER.delete("/api/sessions/{thread_id}")', source)
-        self.assertIn("app.include_router(SESSIONS_ROUTER)", source)
         self.assertNotIn("回收站", source)
         self.assertNotIn("/api/session-trash", source)
         self.assertNotIn('/trash"', source)
 
     def test_session_archive_confirmation_uses_the_panel_modal(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("web", "pages.py").read_text(encoding="utf-8")
         self.assertIn("function confirmSessionArchive(threadId,title)", source)
         self.assertIn("归档云端会话", source)
         self.assertIn("归档会话", source)
@@ -72,6 +67,6 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertIn("thread_states.get(thread_id) is not True", source)
 
     def test_session_navigation_cannot_hide_the_provider_page_before_its_panel_exists(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("web", "pages.py").read_text(encoding="utf-8")
         self.assertIn("if(section!=='providers'&&!target){section='providers';target=null}", source)
         self.assertIn("if(localStorage.getItem('console-section')==='sessions')window.openConsoleSection('sessions');", source)

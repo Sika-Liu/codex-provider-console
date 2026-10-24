@@ -15,11 +15,12 @@ class ProviderSchemaTests(unittest.TestCase):
 
     def test_status_profiles_redact_credentials(self):
         source = (ROOT / "app.py").read_text(encoding="utf-8")
+        page = (ROOT / "web" / "pages.py").read_text(encoding="utf-8")
         self.assertIn('result["has_bearer_token"]', source)
         self.assertIn('result.pop("bearer_token", None)', source)
         self.assertIn('result.pop("auth_contents", None)', source)
-        self.assertIn("p.mode==='official'", source)
-        self.assertIn("p.protocol==='responses'", source)
+        self.assertIn("p.mode==='official'", page)
+        self.assertIn("p.protocol==='responses'", page)
 
 
 if __name__ == "__main__":

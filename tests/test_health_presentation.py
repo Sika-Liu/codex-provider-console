@@ -13,13 +13,14 @@ class HealthPresentationTests(unittest.TestCase):
         self.assertIn('add("真实请求", "pass" if real_request["ok"] else "warning", detail, diagnostic_detail)', source)
 
     def test_health_page_groups_checks_and_collapses_diagnostic_output(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("web", "pages.py").read_text(encoding="utf-8")
         self.assertIn("function healthCategory(name)", source)
         self.assertIn("运行环境','Codex 配置','供应商连接", source)
         self.assertIn("查看诊断详情", source)
         self.assertIn("复制诊断详情", source)
         self.assertIn("health-check ${item.status} ${problem?'':'compact'}", source)
-        self.assertIn("CODEX_LATEST_RELEASE_URL", source)
+        app_source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        self.assertIn("CODEX_LATEST_RELEASE_URL", app_source)
         self.assertIn("/api/health/update-codex", source)
         self.assertIn("更新 Codex CLI", source)
         self.assertIn("检查安装环境", source)
@@ -27,10 +28,11 @@ class HealthPresentationTests(unittest.TestCase):
         self.assertIn("验证安装版本", source)
 
     def test_health_page_loads_a_plan_then_polls_incremental_results(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
-        self.assertIn('@OPERATIONS_ROUTER.get("/api/health/plan")', source)
-        self.assertIn('@OPERATIONS_ROUTER.post("/api/health/progress")', source)
-        self.assertIn('@OPERATIONS_ROUTER.get("/api/health/progress/{job_id}")', source)
+        source = Path(__file__).resolve().parents[1].joinpath("web", "pages.py").read_text(encoding="utf-8")
+        app_source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        self.assertIn('@OPERATIONS_ROUTER.get("/api/health/plan")', app_source)
+        self.assertIn('@OPERATIONS_ROUTER.post("/api/health/progress")', app_source)
+        self.assertIn('@OPERATIONS_ROUTER.get("/api/health/progress/{job_id}")', app_source)
         self.assertIn("async function loadHealthPlan(force=false)", source)
         self.assertIn("function prepareHealthPanel()", source)
         self.assertIn("if(!button||!note||!summary)return false", source)
@@ -39,31 +41,31 @@ class HealthPresentationTests(unittest.TestCase):
         self.assertNotIn("if(section==='health')runHealth()", source)
 
     def test_supplier_health_memory_is_cleared_when_active_provider_changes(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("web", "pages.py").read_text(encoding="utf-8")
         self.assertIn("window.healthProviderKey&&window.healthProviderKey!==nextHealthProvider", source)
         self.assertIn("resetHealthProviderMemory()", source)
         self.assertIn("尚未检查当前供应商", source)
 
     def test_add_provider_uses_stable_entrypoint(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("web", "pages.py").read_text(encoding="utf-8")
         self.assertIn("onclick=\"openNewProvider()\"", source)
         self.assertIn("function openNewProvider(mode='apikey')", source)
 
     def test_health_state_uses_window_scope_across_embedded_scripts(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("web", "pages.py").read_text(encoding="utf-8")
         self.assertIn("window.healthProviderKey=''", source)
         self.assertNotIn("if(!healthProviderKey)", source)
 
     def test_provider_refresh_has_no_health_state_initialization_race(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("web", "pages.py").read_text(encoding="utf-8")
         self.assertIn("window.healthProviderKey=''", source)
         self.assertIn("window.setTimeout(()=>refreshAll().catch(error=>", source)
 
     def test_provider_navigation_restores_list_after_detail_view(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("web", "pages.py").read_text(encoding="utf-8")
         self.assertIn("list.className='page list-view'", source)
         self.assertIn("detail.classList.remove('visible')", source)
 
     def test_deployment_key_action_waits_for_a_completed_check(self):
-        source = Path(__file__).resolve().parents[1].joinpath("app.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("web", "pages.py").read_text(encoding="utf-8")
         self.assertIn("item.name==='Codex Desktop 部署密钥'&&['pass','warning','fail'].includes(item.status)", source)
