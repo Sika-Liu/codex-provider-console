@@ -8,6 +8,8 @@ are intentionally explicit:
   it does not own business routes.
 - `storage_ops.py`: atomic private-file writes and validated backup path
   resolution.
+- `application/backup_service.py`: panel backup creation, retention, listing,
+  and restoration; it has no FastAPI dependency.
 - `provider_domain.py`: provider schema normalization, compatibility migration,
   and session command construction. It has no FastAPI or Docker dependency.
 - `relay.py`: Docker-internal HTTP relay entrypoint.
@@ -17,6 +19,7 @@ are intentionally explicit:
 - `tests/`: pure contract tests; Docker smoke tests are skipped when Docker is
   unavailable.
 
-The next safe extraction target is the backup/storage helper set from `app.py`.
-It should move only after its current contracts have dedicated tests, so
-personal deployments do not get a risky all-at-once rewrite.
+The backup/storage workflow has been extracted behind `BackupService` and
+covered by filesystem-behavior tests. The next extraction should be the
+provider application workflow, while retaining the current HTTP paths and
+response shapes.

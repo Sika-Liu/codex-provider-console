@@ -36,8 +36,9 @@ from provider_domain import (
     resolve_host_codex_home,
 )
 from host_ops import host_ssh_command as build_host_ssh_command, nss_environment, ssh_host_key_options as verify_ssh_host_key
-from storage_ops import resolve_backup_directory, write_private as atomic_write_private
+from storage_ops import write_private as atomic_write_private
 from api.compat import AuthService, ProviderStore
+from application.backup_service import BackupService
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", "/codex"))
 APP_VERSION = (Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip() if Path(__file__).with_name("VERSION").is_file() else "0.1.0")
 CODEX_CLI_VERSION = os.environ.get("CODEX_CLI_VERSION", "not_installed")
@@ -675,177 +676,51 @@ def write_private(path: Path, text: str) -> None:
     atomic_write_private(path, text)
 
 
+BACKUP_SERVICE = BackupService(
+    codex_home=CODEX_HOME,
+    backup_root=BACKUP_ROOT,
+    metadata_name=BACKUP_METADATA_NAME,
+    backup_id_pattern=BACKUP_ID,
+    config_path=CONFIG_PATH,
+    profile_path=PROFILE_PATH,
+    settings_path=SETTINGS_PATH,
+    auth_path=AUTH_PATH,
+    common_config_path=COMMON_CONFIG_PATH,
+    session_index_path=SESSION_INDEX_PATH,
+    write_private=write_private,
+)
+
+
 def backup_state(include_sessions: bool = False, reason: str | None = None) -> tuple[str, Path]:
-    created_at = datetime.now(timezone.utc)
-    destination = BACKUP_ROOT / created_at.strftime("%Y%m%dT%H%M%S%fZ")
-    destination.mkdir(parents=True, mode=0o700)
-    write_private(
-        destination / BACKUP_METADATA_NAME,
-        json.dumps(
-            {"reason": reason or "manual", "created_at": created_at.isoformat(), "include_sessions": include_sessions},
-            ensure_ascii=False,
-        )
-        + "\n",
-    )
-    for source in (CONFIG_PATH, PROFILE_PATH, SETTINGS_PATH, AUTH_PATH, COMMON_CONFIG_PATH):
-        if source.exists():
-            target = destination / source.name
-            shutil.copy2(source, target)
-            os.chmod(target, 0o600)
-    if include_sessions:
-        (destination / "sessions").mkdir(mode=0o700)
-        # SQLite's backup API gives a consistent snapshot even when Codex has
-        # the database open. JSONL rollout files are copied lazily immediately
-        # before this panel rewrites an affected file.
-        database = CODEX_HOME / "state_5.sqlite"
-        if database.is_file():
-            source_connection = sqlite3.connect(database, timeout=10)
-            target_connection = sqlite3.connect(destination / database.name)
-            try:
-                source_connection.backup(target_connection)
-            finally:
-                target_connection.close()
-                source_connection.close()
-            os.chmod(destination / database.name, 0o600)
-        if SESSION_INDEX_PATH.is_file():
-            target = destination / SESSION_INDEX_PATH.name
-            shutil.copy2(SESSION_INDEX_PATH, target)
-            os.chmod(target, 0o600)
-    return destination.name, destination
+    return BACKUP_SERVICE.backup_state(include_sessions=include_sessions, reason=reason)
 
 
 def prune_provider_switch_backups(retain: int = PROVIDER_SWITCH_BACKUP_RETENTION) -> list[str]:
-    """Keep only the newest managed provider-switch snapshots.
-
-    The backup root also contains snapshots from repair and session migration.
-    Only directories explicitly marked as provider-switch backups are eligible
-    for automatic cleanup.
-    """
-    if not BACKUP_ROOT.is_dir():
-        return []
-    managed: list[Path] = []
-    for candidate in BACKUP_ROOT.iterdir():
-        if not candidate.is_dir() or candidate.parent != BACKUP_ROOT:
-            continue
-        metadata_path = candidate / BACKUP_METADATA_NAME
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(metadata, dict) and metadata.get("reason") == "provider_switch":
-            managed.append(candidate)
-
-    removed: list[str] = []
-    for candidate in sorted(managed, key=lambda path: path.name, reverse=True)[max(retain, 0):]:
-        # candidate is a direct child discovered from BACKUP_ROOT above; do not
-        # recurse through any path supplied externally.
-        try:
-            shutil.rmtree(candidate)
-            removed.append(candidate.name)
-        except OSError:
-            # A stale snapshot must not make an otherwise successful provider
-            # switch report failure. It will be retried after the next switch.
-            continue
-    return removed
-
+    return BACKUP_SERVICE.prune_provider_switch_backups(retain)
 
 
 def prune_backup_history(retain_complete: int = 1, retain_before_restore: int = 1) -> list[str]:
-    """Keep only the latest complete restore point and before-restore point."""
-    if not BACKUP_ROOT.is_dir():
-        return []
-    candidates: list[tuple[Path, dict, set[str]]] = []
-    for candidate in BACKUP_ROOT.iterdir():
-        if not candidate.is_dir() or candidate.parent != BACKUP_ROOT or candidate.is_symlink():
-            continue
-        metadata: dict = {}
-        try:
-            raw = json.loads((candidate / BACKUP_METADATA_NAME).read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                metadata = raw
-        except (OSError, json.JSONDecodeError):
-            pass
-        try:
-            files = {item.name for item in candidate.iterdir() if item.is_file() and item.name != BACKUP_METADATA_NAME}
-        except OSError:
-            continue
-        candidates.append((candidate, metadata, files))
-    complete = [
-        item for item in candidates
-        if {"config.toml", PROFILE_PATH.name, SETTINGS_PATH.name, AUTH_PATH.name}.issubset(item[2])
-    ]
-    before_restore = [item for item in candidates if item[1].get("reason") == "before_restore"]
-    keep = {
-        item[0]
-        for item in sorted(complete, key=lambda item: item[0].name, reverse=True)[:max(retain_complete, 0)]
-    }
-    keep.update(
-        item[0]
-        for item in sorted(before_restore, key=lambda item: item[0].name, reverse=True)[:max(retain_before_restore, 0)]
+    return BACKUP_SERVICE.prune_history(
+        retain_complete=retain_complete,
+        retain_before_restore=retain_before_restore,
     )
-    removed: list[str] = []
-    for candidate, _, _ in candidates:
-        if candidate in keep:
-            continue
-        try:
-            shutil.rmtree(candidate)
-            removed.append(candidate.name)
-        except OSError:
-            continue
-    return removed
 
 
 def restore_session_state(backup_dir: Path) -> None:
-    """Restore the session files touched by a failed provider switch."""
-    database_backup = backup_dir / "state_5.sqlite"
-    if database_backup.is_file():
-        shutil.copy2(database_backup, CODEX_HOME / "state_5.sqlite")
-        os.chmod(CODEX_HOME / "state_5.sqlite", 0o600)
-    index_backup = backup_dir / SESSION_INDEX_PATH.name
-    if index_backup.is_file():
-        shutil.copy2(index_backup, SESSION_INDEX_PATH)
-        os.chmod(SESSION_INDEX_PATH, 0o600)
-    for directory_name in ("sessions", "archived_sessions"):
-        source_root = backup_dir / directory_name
-        if not source_root.is_dir():
-            continue
-        for source in source_root.rglob("*.jsonl"):
-            target = CODEX_HOME / source.relative_to(backup_dir)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            os.chmod(target, 0o600)
+    BACKUP_SERVICE.restore_session_state(backup_dir)
 
 
 def backup_directory(backup_id: str) -> Path:
-    """Resolve a backup id without allowing path traversal."""
     try:
-        return resolve_backup_directory(BACKUP_ROOT, backup_id, BACKUP_ID)
+        return BACKUP_SERVICE.backup_directory(backup_id)
     except ValueError as exc:
-        raise HTTPException(422, "无效的备份标识") from exc
+        raise HTTPException(422, "\u65e0\u6548\u7684\u5907\u4efd\u6807\u8bc6") from exc
     except FileNotFoundError as exc:
-        raise HTTPException(404, "备份不存在") from exc
+        raise HTTPException(404, "\u5907\u4efd\u4e0d\u5b58\u5728") from exc
 
 
 def restore_backup_state(backup_dir: Path) -> list[str]:
-    """Restore panel-owned files from a validated snapshot."""
-    restored: list[str] = []
-    for source_name, target in (
-        (CONFIG_PATH.name, CONFIG_PATH),
-        (PROFILE_PATH.name, PROFILE_PATH),
-        (SETTINGS_PATH.name, SETTINGS_PATH),
-        (AUTH_PATH.name, AUTH_PATH),
-        (COMMON_CONFIG_PATH.name, COMMON_CONFIG_PATH),
-    ):
-        source = backup_dir / source_name
-        if source.is_file():
-            write_private(target, source.read_text(encoding="utf-8"))
-            restored.append(source_name)
-        elif target.exists():
-            target.unlink()
-            restored.append(f"removed:{source_name}")
-    if (backup_dir / "state_5.sqlite").is_file() or (backup_dir / "session_index.jsonl").is_file():
-        restore_session_state(backup_dir)
-        restored.append("sessions")
+    restored = BACKUP_SERVICE.restore_state(backup_dir)
     audit("backup_restored", backup_id=backup_dir.name, detail=",".join(restored))
     return restored
 
@@ -4098,29 +3973,7 @@ def list_backups() -> list[dict]:
     removed = prune_backup_history()
     if removed:
         audit("backup_history_pruned", removed=",".join(removed))
-    if not BACKUP_ROOT.exists():
-        return []
-    backups: list[dict] = []
-    for path in sorted(BACKUP_ROOT.iterdir(), reverse=True):
-        if not path.is_dir() or not BACKUP_ID.fullmatch(path.name):
-            continue
-        metadata: dict = {}
-        try:
-            raw_metadata = json.loads((path / BACKUP_METADATA_NAME).read_text(encoding="utf-8"))
-            if isinstance(raw_metadata, dict):
-                metadata = raw_metadata
-        except (OSError, json.JSONDecodeError):
-            pass
-        files = [item.name for item in path.iterdir() if item.is_file() and item.name != BACKUP_METADATA_NAME]
-        backups.append({
-            "id": path.name,
-            "created_at": metadata.get("created_at", ""),
-            "reason": metadata.get("reason", "unknown"),
-            "include_sessions": bool(metadata.get("include_sessions")),
-            "files": sorted(files),
-            "has_config": "config.toml" in files,
-        })
-    return backups
+    return BACKUP_SERVICE.list_backups()
 
 
 @app.post("/api/backups/{backup_id}/restore")
