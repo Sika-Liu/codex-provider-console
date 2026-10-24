@@ -7,7 +7,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 class DockerfileImportsTests(unittest.TestCase):
     def test_console_image_copies_app_packages(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("COPY api security ./", dockerfile)
+        self.assertIn("COPY api ./api", dockerfile)
+        self.assertIn("COPY security ./security", dockerfile)
 
 
 if __name__ == "__main__":
