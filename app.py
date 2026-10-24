@@ -2620,6 +2620,7 @@ def save_account_password(request: AccountPasswordRequest) -> dict:
     write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
     PANEL_PASSWORD = ""
     SESSION_SECRET = settings["panel_session_secret"]
+    AUTH_SERVICE.update_runtime(password=PANEL_PASSWORD, session_secret=SESSION_SECRET)
     with LOGIN_FAILURES_LOCK:
         LOGIN_FAILURES.clear()
     audit("account_password_changed", username=PANEL_USERNAME)
@@ -2637,6 +2638,7 @@ def save_account_username(request: AccountUsernameRequest) -> dict:
     write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
     PANEL_USERNAME = request.username
     SESSION_SECRET = settings["panel_session_secret"]
+    AUTH_SERVICE.update_runtime(username=PANEL_USERNAME, session_secret=SESSION_SECRET)
     with LOGIN_FAILURES_LOCK:
         LOGIN_FAILURES.clear()
     audit("account_username_changed", username=request.username)
@@ -2825,6 +2827,7 @@ def complete_password_reset(details: ResetPasswordRequest) -> dict:
         write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
         PANEL_PASSWORD = ""
         SESSION_SECRET = settings["panel_session_secret"]
+        AUTH_SERVICE.update_runtime(password=PANEL_PASSWORD, session_secret=SESSION_SECRET)
         RECOVERY_PENDING.pop("grant", None)
         RECOVERY_PENDING.pop("bind", None)
         RECOVERY_PENDING.pop("unbind", None)

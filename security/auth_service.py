@@ -74,6 +74,21 @@ class AuthService:
         except (ValueError, UnicodeDecodeError):
             return False
 
+    def update_runtime(
+        self,
+        *,
+        username: str | None = None,
+        password: str | None = None,
+        session_secret: str | None = None,
+    ) -> None:
+        """Apply an account change immediately without waiting for restart."""
+        if username is not None:
+            self.username = username
+        if password is not None:
+            self.password = password
+        if session_secret is not None:
+            self.session_secret = session_secret
+
     @staticmethod
     def client_key(client_host: str | None) -> str:
         return client_host or "unknown"

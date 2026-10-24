@@ -42,6 +42,16 @@ class AuthServiceTests(unittest.TestCase):
             self.assertTrue(service.current_password_matches("new-password"))
             self.assertFalse(service.current_password_matches("plain-password"))
 
+    def test_runtime_account_update_invalidates_old_sessions_immediately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.make_service(Path(directory))
+            old_token = service.session_token("admin")
+            (Path(directory) / "settings.json").write_text(json.dumps({"panel_password_hash": "persisted-hash"}), encoding="utf-8")
+            service.update_runtime(username="new-admin", password="", session_secret="new-secret")
+            self.assertFalse(service.valid_session(old_token))
+            self.assertFalse(service.current_password_matches("plain-password"))
+            self.assertTrue(service.valid_session(service.session_token("new-admin")))
+
     def test_login_rate_limit_window_and_clear(self):
         with tempfile.TemporaryDirectory() as directory:
             service = self.make_service(Path(directory), max_failures=2)
