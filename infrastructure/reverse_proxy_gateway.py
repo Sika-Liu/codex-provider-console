@@ -1,9 +1,14 @@
 """Reverse-proxy validation and host script construction."""
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
+import socket
+from pathlib import Path
+
+from fastapi import HTTPException
 
 REVERSE_PROXY_UPSTREAM = "codex-provider-console:8787"
 
