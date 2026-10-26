@@ -264,7 +264,7 @@ document.getElementById('account-unbind-cancel')?.addEventListener('click',close
  ['proxy-domain'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateProxyConfig));
  document.getElementById('proxy-apply')?.addEventListener('click',applyReverseProxy);document.getElementById('proxy-enable-secure')?.addEventListener('click',enableProxySecureMode);document.getElementById('proxy-disable-secure')?.addEventListener('click',disableProxySecureMode);document.getElementById('proxy-edit')?.addEventListener('click',showProxyForm);document.getElementById('proxy-cancel-edit')?.addEventListener('click',cancelProxyEdit);document.getElementById('proxy-disable')?.addEventListener('click',deleteReverseProxy);
   const baseOpenConsoleSection=window.openConsoleSection;window.openConsoleSection=function(section){const target=section==='proxy'?'console':section;if(target!=='console')abandonProxyEdit();baseOpenConsoleSection(target);if(target==='console'){refreshConsoleAccount();refreshReverseProxyStatus()}};
- loadConsoleSettings();openConsoleSection('console');
+ loadConsoleSettings();openConsoleSection('providers');
  </script>'''
     session_management_script = r'''<script>
  (()=>{
