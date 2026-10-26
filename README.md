@@ -35,6 +35,13 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 
 安装过程中会询问面板端口，默认是 `8787`。首次安装还会生成管理员用户名、随机密码和会话密钥，并在终端中显示一次，请及时保存。
 
+### 部署常见问题
+
+- **应该用 root 运行吗？** 不应该。请用 Codex Desktop 后续 SSH 所使用的普通运维用户（例如 Ubuntu 镜像常见的 `ubuntu`）执行引导命令，**不要**在命令前添加 `sudo`。安装器仅在安装 Docker 或写入系统路径等确有需要时自行请求 sudo。
+- **为什么提示 `[sudo] password for ubuntu:`？** 这是该 Linux 用户的系统密码，不是面板的管理员密码；输入时终端不会显示任何字符。可先运行 `sudo -v` 验证。成功时通常直接返回提示符；`sudo -n true && echo "sudo 正常"` 会输出“sudo 正常”。
+- **为什么提示 `user ubuntu is not allowed to execute ... as root`？** 该账户没有可用的 sudo 授权，或 sudo 策略限制了当前命令。先运行 `groups` 和 `sudo -l` 确认；需要由服务器管理员或云厂商控制台授予权限后再部署，不能由普通用户自行修改 `/etc/passwd` 或把自己加入 sudo 组。
+- **已经存在 `~/codex-provider-console` 还能运行一键命令吗？** 不建议。引导脚本会拒绝覆盖已有项目或数据；首次部署被中断时按屏幕提示恢复，已有配置后通常在项目目录运行 `codex-panel update` 或 `codex-panel restart`。
+
 安装完成后，终端会显示：
 
 - 公网访问地址
