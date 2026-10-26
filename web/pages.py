@@ -11,6 +11,7 @@ LOGIN_HTML = '''<!doctype html>
     .login,.recovery-dialog{width:min(380px,calc(100vw - 36px));box-sizing:border-box;background:#fff;border:1px solid #dde1e6;border-radius:8px;padding:28px;box-shadow:0 12px 32px #0000000d}
     h1{margin:0;font-size:22px}h2{margin:0;font-size:20px}p{color:#687078;line-height:1.5}label{display:block;font-weight:700;margin:17px 0 7px}
     input{box-sizing:border-box;width:100%;border:1px solid #cfd5da;border-radius:6px;padding:10px 11px;font:inherit}
+    .password-field{position:relative}.password-field input{padding-right:44px}.password-toggle{position:absolute;right:7px;top:50%;width:32px;height:32px;transform:translateY(-50%);margin:0;padding:0;border:0;border-radius:5px;background:transparent;color:#59636e;display:grid;place-items:center;cursor:pointer}.password-toggle:hover{background:#eef0f2;color:#202124}.password-toggle:focus-visible{outline:2px solid #365d80;outline-offset:1px}.password-toggle svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.password-toggle.visible::after{content:"";position:absolute;width:21px;height:1.8px;background:currentColor;transform:rotate(-45deg)}
     button{width:100%;border:0;border-radius:6px;background:#202124;color:#fff;padding:11px;margin-top:20px;font:inherit;font-weight:700;cursor:pointer}
     button:disabled{opacity:.6;cursor:wait}button.link{background:none;color:#365d80;padding:5px;margin-top:14px;text-align:left;font-weight:400}button.link:hover{text-decoration:underline}
     .message{min-height:20px;color:#bd3131;margin-top:12px;line-height:1.5}[hidden]{display:none!important}
@@ -28,7 +29,7 @@ LOGIN_HTML = '''<!doctype html>
     <p>请输入管理员账号和密码。</p>
     <form id="login">
       <label>用户名<input id="username" autocomplete="username" required autofocus></label>
-      <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
+      <label>密码<span class="password-field"><input id="password" type="password" autocomplete="current-password" required><button id="password-toggle" class="password-toggle" type="button" title="显示密码" aria-label="显示密码" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg></button></span></label>
       <button>登录</button>
       <div id="message" class="message" role="alert"></div>
     </form>
@@ -61,6 +62,8 @@ LOGIN_HTML = '''<!doctype html>
   <script>
     const byId=id=>document.getElementById(id);let resetToken='';
     function initOtpEntry(input){const entry=input.closest('.otp-entry'),container=entry.querySelector('.otp-slots');for(let i=0;i<8;i++){const slot=document.createElement('span');slot.className='otp-slot';container.appendChild(slot)}const slots=Array.from(container.children);function render(){const digits=input.value.replace(/[^0-9]/g,'').slice(0,8);if(input.value!==digits)input.value=digits;slots.forEach((slot,index)=>{slot.textContent=digits[index]||'';slot.classList.toggle('current',document.activeElement===input&&index===Math.min(digits.length,7))})}input.addEventListener('paste',event=>{event.preventDefault();const digits=event.clipboardData.getData('text').replace(/[^0-9]/g,'');const start=input.selectionStart??input.value.length,end=input.selectionEnd??start;input.value=(input.value.slice(0,start)+digits+input.value.slice(end)).slice(0,8);render()});input.addEventListener('input',render);input.addEventListener('focus',render);input.addEventListener('blur',render);entry.addEventListener('click',()=>input.focus());render()}
+    const passwordInput=byId('password'),passwordToggle=byId('password-toggle');
+    passwordToggle.addEventListener('click',()=>{const visible=passwordInput.type==='password';passwordInput.type=visible?'text':'password';passwordToggle.classList.toggle('visible',visible);passwordToggle.setAttribute('aria-pressed',String(visible));passwordToggle.setAttribute('aria-label',visible?'隐藏密码':'显示密码');passwordToggle.title=visible?'隐藏密码':'显示密码';passwordInput.focus()});
     initOtpEntry(byId('recovery-code'));
     async function recoveryPost(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json().catch(()=>({}));if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'请求失败，请稍后重试');return data}
     function showRecoveryStep(step){for(const [number,id] of [[1,'recovery-email-form'],[2,'recovery-code-form'],[3,'recovery-password-form']])byId(id).hidden=number!==step;byId('recovery-description').textContent=step===1?'请输入邮箱。':step===2?'验证码已发送至辅助邮箱，请输入 8 位验证码。':'验证成功，请设置新密码。';byId('recovery-message').textContent='';if(step===2){byId('recovery-code').value='';byId('recovery-code').dispatchEvent(new Event('input'))}byId(step===1?'recovery-email':step===2?'recovery-code':'recovery-new-password').focus()}
