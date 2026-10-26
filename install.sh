@@ -391,7 +391,63 @@ if [[ "$(id -u)" -eq 0 ]]; then
   chown -R "$DEPLOY_USER":"$(id -gn "$DEPLOY_USER")" "$PROJECT_DIR"
 fi
 
+
+prepare_panel_host_gateway() {
+  local ssh_dir="$CODEX_CLI_HOME/.ssh"
+  local key_path="$ssh_dir/codex-provider-console_ed25519"
+  local public_key_path="$key_path.pub"
+  local authorized_keys="$ssh_dir/authorized_keys"
+  local known_hosts="$ssh_dir/known_hosts"
+  local gateway host_key key_line key_count=0
+
+  mkdir -p "$ssh_dir"
+  chmod 700 "$ssh_dir"
+  if [[ -f "$key_path" && ! -f "$public_key_path" ]] || [[ -f "$public_key_path" && ! -f "$key_path" ]]; then
+    echo "Incomplete panel deployment key found; refusing to overwrite it." >&2
+    return 1
+  fi
+  if [[ ! -f "$key_path" ]]; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+      runuser -u "$DEPLOY_USER" -- ssh-keygen -q -t ed25519 -f "$key_path" -N "" -C "codex-provider-console-$DEPLOY_USER"
+    else
+      ssh-keygen -q -t ed25519 -f "$key_path" -N "" -C "codex-provider-console-$DEPLOY_USER"
+    fi
+  fi
+  local public_key
+  public_key=$(<"$public_key_path")
+  touch "$authorized_keys" "$known_hosts"
+  if ! grep -Fqx "$public_key" "$authorized_keys"; then
+    printf '%s\n' "$public_key" >> "$authorized_keys"
+  fi
+  gateway=$(docker compose -f "$PROJECT_DIR/compose.yml" exec -T codex-provider-console python -c 'from pathlib import Path
+for line in Path("/proc/net/route").read_text(encoding="ascii").splitlines()[1:]:
+    fields = line.split()
+    if len(fields) >= 3 and fields[1] == "00000000":
+        value = fields[2]
+        print(".".join(str(int(value[index:index + 2], 16)) for index in range(6, -1, -2)))
+        break' 2>/dev/null || true)
+  [[ "$gateway" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "Could not determine the panel Docker gateway." >&2; return 1; }
+  for host_key in /etc/ssh/ssh_host_*_key.pub; do
+    [[ -r "$host_key" ]] || continue
+    key_line=$(awk 'NF >= 2 { print $1 " " $2; exit }' "$host_key")
+    [[ -n "$key_line" ]] || continue
+    if ! ssh-keygen -F "$gateway" -f "$known_hosts" 2>/dev/null | grep -Fq "$key_line"; then
+      printf '%s %s\n' "$gateway" "$key_line" >> "$known_hosts"
+    fi
+    key_count=$((key_count + 1))
+  done
+  [[ "$key_count" -gt 0 ]] || { echo "No local SSH host public keys were found for Docker gateway verification." >&2; return 1; }
+  chmod 600 "$key_path" "$authorized_keys" "$known_hosts"
+  chmod 644 "$public_key_path"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    chown "$DEPLOY_USER":"$(id -gn "$DEPLOY_USER")" "$ssh_dir" "$key_path" "$public_key_path" "$authorized_keys" "$known_hosts"
+  fi
+  docker compose -f "$PROJECT_DIR/compose.yml" exec -T codex-provider-console ssh -i "$key_path" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -o HostKeyAlias="$gateway" -o UserKnownHostsFile="$known_hosts" -o LogLevel=ERROR "$DEPLOY_USER@$gateway" true
+  echo "Panel host SSH gateway verified: $gateway"
+}
+
 docker compose -f "$PROJECT_DIR/compose.yml" up -d --build
+prepare_panel_host_gateway
 
 local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
 local_ip=${local_ip:-127.0.0.1}
