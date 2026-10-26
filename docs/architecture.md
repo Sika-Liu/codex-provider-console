@@ -19,7 +19,7 @@ are intentionally explicit:
   and auth-file activation plan without starting services or changing state.
 - `provider_domain.py`: provider schema normalization, compatibility migration,
   and session command construction. It has no FastAPI or Docker dependency.
-- `relay.py`: Docker-internal HTTP relay entrypoint.
+- `relay.py`: Docker-internal bounded Responses relay with request IDs, upstream status, a 1 MiB body limit, 120-second upstream timeout, and four concurrent requests by default.
 - `relay_domain.py`: pure Responses/Chat Completions conversion primitives and
   capability declarations.
 - `compose.yml`: the console, relay, and optional reverse-proxy runtime.

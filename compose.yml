@@ -51,6 +51,9 @@ services:
       - "${CODEX_HOME_HOST:-./codex-data}:/codex"
     environment:
       CODEX_HOME: /codex
+      RELAY_MAX_BODY_BYTES: "${RELAY_MAX_BODY_BYTES:-1048576}"
+      RELAY_UPSTREAM_TIMEOUT_SECONDS: "${RELAY_UPSTREAM_TIMEOUT_SECONDS:-120}"
+      RELAY_CONCURRENCY_LIMIT: "${RELAY_CONCURRENCY_LIMIT:-4}"
     security_opt:
       - no-new-privileges:true
     cap_drop:
