@@ -33,7 +33,7 @@ class SshHostVerificationTests(unittest.TestCase):
         self.assertIn("prepare_panel_host_gateway()", install)
         self.assertIn("codex-provider-console_ed25519", install)
         self.assertIn("/etc/ssh/ssh_host_*_key.pub", install)
-        self.assertIn("StrictHostKeyChecking=yes", install)
+        self.assertIn("run_host_reverse_proxy_script", install)
         self.assertIn("Panel host SSH gateway verified", install)
 
 
