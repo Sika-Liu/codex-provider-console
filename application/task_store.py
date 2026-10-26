@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Callable
 
 
+DEFAULT_FINISHED_RETENTION_SECONDS = 7 * 24 * 60 * 60
+DEFAULT_MAX_FINISHED_JOBS = 200
+
+
 class PersistentJob(dict):
     """A job mapping that durably records whole-state changes."""
 
@@ -101,7 +105,39 @@ class TaskStore:
                 recovered.append((kind, payload))
         return recovered
 
+    def prune_finished(
+        self,
+        now: float | None = None,
+        retention_seconds: float = DEFAULT_FINISHED_RETENTION_SECONDS,
+        max_finished: int = DEFAULT_MAX_FINISHED_JOBS,
+    ) -> int:
+        """Bound historical records without ever removing a live task."""
+        now = time.time() if now is None else now
+        cutoff = now - retention_seconds
+        with self.lock, self._connect() as connection:
+            removed = connection.execute(
+                "DELETE FROM background_jobs WHERE status != 'running' AND updated_at < ?",
+                (cutoff,),
+            ).rowcount
+            overflow = connection.execute(
+                """
+                SELECT id FROM background_jobs
+                WHERE status != 'running'
+                ORDER BY updated_at DESC
+                LIMIT -1 OFFSET ?
+                """,
+                (max_finished,),
+            ).fetchall()
+            if overflow:
+                connection.executemany(
+                    "DELETE FROM background_jobs WHERE id=?",
+                    overflow,
+                )
+                removed += len(overflow)
+        return removed
+
     def new_job(self, kind: str, payload: dict) -> PersistentJob:
+        self.prune_finished()
         job = PersistentJob(payload, lambda value: self.save(kind, value))
         job.persist()
         return job

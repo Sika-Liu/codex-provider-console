@@ -5,6 +5,7 @@ are intentionally explicit:
 
 - `app.py`: HTTP routes and orchestration for the control panel.
 - web/pages.py: server-rendered login and console templates; contains no API or service logic.
+- application/task_store.py: durable single-instance job snapshots in SQLite; completed history is retained for up to seven days and capped at 200 records.
 - `host_ops.py`: verified host SSH command construction and container NSS setup;
   it does not own business routes.
 - `storage_ops.py`: atomic private-file writes and validated backup path
