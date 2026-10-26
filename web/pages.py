@@ -264,7 +264,7 @@ document.getElementById('account-unbind-cancel')?.addEventListener('click',close
  ['proxy-domain'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateProxyConfig));
  document.getElementById('proxy-apply')?.addEventListener('click',applyReverseProxy);document.getElementById('proxy-enable-secure')?.addEventListener('click',enableProxySecureMode);document.getElementById('proxy-disable-secure')?.addEventListener('click',disableProxySecureMode);document.getElementById('proxy-edit')?.addEventListener('click',showProxyForm);document.getElementById('proxy-cancel-edit')?.addEventListener('click',cancelProxyEdit);document.getElementById('proxy-disable')?.addEventListener('click',deleteReverseProxy);
   const baseOpenConsoleSection=window.openConsoleSection;window.openConsoleSection=function(section){const target=section==='proxy'?'console':section;if(target!=='console')abandonProxyEdit();baseOpenConsoleSection(target);if(target==='console'){refreshConsoleAccount();refreshReverseProxyStatus()}};
- loadConsoleSettings();openConsoleSection(localStorage.getItem('console-section')||'providers');
+ loadConsoleSettings();openConsoleSection('console');
  </script>'''
     session_management_script = r'''<script>
  (()=>{
@@ -276,7 +276,7 @@ document.getElementById('account-unbind-cancel')?.addEventListener('click',close
    const baseOpen=window.openConsoleSection;
    window.openConsoleSection=function(section){baseOpen(section);if(section==='sessions')refreshSessionManagement()};
    document.querySelector('#session-refresh')?.addEventListener('click',refreshSessionManagement);
-   if(localStorage.getItem('console-section')==='sessions')window.openConsoleSection('sessions');
+  
  })();
  function sessionEscape(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
  function sessionTime(value){const time=new Date(value);return Number.isNaN(time.getTime())?value:time.toLocaleString('zh-CN',{hour12:false})}
