@@ -69,7 +69,7 @@ LOGIN_HTML = '''<!doctype html>
     async function recoveryPost(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json().catch(()=>({}));if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'请求失败，请稍后重试');return data}
     function showRecoveryStep(step){for(const [number,id] of [[1,'recovery-email-form'],[2,'recovery-code-form'],[3,'recovery-password-form']])byId(id).hidden=number!==step;byId('recovery-description').textContent=step===1?'请输入邮箱。':step===2?'验证码已发送至辅助邮箱，请输入 8 位验证码。':'验证成功，请设置新密码。';byId('recovery-message').textContent='';if(step===2){byId('recovery-code').value='';byId('recovery-code').dispatchEvent(new Event('input'))}byId(step===1?'recovery-email':step===2?'recovery-code':'recovery-new-password').focus()}
     function closeRecovery(){byId('recovery-mask').hidden=true;resetToken='';byId('recovery-email-form').reset();byId('recovery-code-form').reset();byId('recovery-code').dispatchEvent(new Event('input'));byId('recovery-password-form').reset();byId('forgot-link').focus()}
-    byId('login').addEventListener('submit',async event=>{event.preventDefault();try{await recoveryPost('/login',{username:byId('username').value,password:byId('password').value});location.href='/'}catch(error){byId('message').textContent=error.message}});
+    byId('login').addEventListener('submit',async event=>{event.preventDefault();try{await recoveryPost('/login',{username:byId('username').value,password:byId('password').value});location.href='/?section=providers'}catch(error){byId('message').textContent=error.message}});
     byId('forgot-link').addEventListener('click',()=>{byId('recovery-mask').hidden=false;showRecoveryStep(1)});
     byId('recovery-close').addEventListener('click',closeRecovery);
     document.querySelectorAll('[data-recovery-cancel]').forEach(button=>button.addEventListener('click',closeRecovery));
@@ -264,7 +264,7 @@ document.getElementById('account-unbind-cancel')?.addEventListener('click',close
  ['proxy-domain'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateProxyConfig));
  document.getElementById('proxy-apply')?.addEventListener('click',applyReverseProxy);document.getElementById('proxy-enable-secure')?.addEventListener('click',enableProxySecureMode);document.getElementById('proxy-disable-secure')?.addEventListener('click',disableProxySecureMode);document.getElementById('proxy-edit')?.addEventListener('click',showProxyForm);document.getElementById('proxy-cancel-edit')?.addEventListener('click',cancelProxyEdit);document.getElementById('proxy-disable')?.addEventListener('click',deleteReverseProxy);
   const baseOpenConsoleSection=window.openConsoleSection;window.openConsoleSection=function(section){const target=section==='proxy'?'console':section;if(target!=='console')abandonProxyEdit();baseOpenConsoleSection(target);if(target==='console'){refreshConsoleAccount();refreshReverseProxyStatus()}};
- loadConsoleSettings();openConsoleSection('providers');
+ loadConsoleSettings();const loginSection=new URLSearchParams(location.search).get('section');openConsoleSection(loginSection||localStorage.getItem('console-section')||'providers');if(loginSection)history.replaceState(null,'',location.pathname+location.hash);
  </script>'''
     session_management_script = r'''<script>
  (()=>{
