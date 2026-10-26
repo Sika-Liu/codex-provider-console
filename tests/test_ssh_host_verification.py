@@ -28,6 +28,14 @@ class SshHostVerificationTests(unittest.TestCase):
         self.assertIn("PANEL_SSH_HOST_ALIAS", compose)
         self.assertIn("PANEL_SSH_HOST_ALIAS=", env_example)
 
+    def test_installer_provisions_verified_docker_gateway_trust(self):
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("prepare_panel_host_gateway()", install)
+        self.assertIn("codex-provider-console_ed25519", install)
+        self.assertIn("/etc/ssh/ssh_host_*_key.pub", install)
+        self.assertIn("StrictHostKeyChecking=yes", install)
+        self.assertIn("Panel host SSH gateway verified", install)
+
 
 if __name__ == "__main__":
     unittest.main()
