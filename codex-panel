@@ -78,7 +78,7 @@ Commands:
   restart   Rebuild and restart the console
   status    Show container status
   logs      Follow console logs
-  update    Pull the latest Git revision and rebuild the console
+  update <ref> Update to an explicit Git tag, branch, or commit and rebuild
   install-codex Install Codex CLI for the configured SSH user and refresh health status
   config    Print the active .env file path
   version   Print the installed console version
@@ -94,7 +94,26 @@ case "${1:-}" in
   status) docker compose ps ;;
   logs) docker compose logs -f --tail=100 codex-provider-console ;;
   update)
-    git pull --ff-only
+    target_ref="${2:-}"
+    if [[ -z "$target_ref" || -n "${3:-}" ]]; then
+      echo "Usage: codex-panel update <git-ref>" >&2
+      echo "Example: codex-panel update 1a84a02608a00b26f112c183143810410799cae7" >&2
+      exit 2
+    fi
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+      echo "The project working tree has local changes; commit or stash them before updating." >&2
+      exit 1
+    fi
+    git fetch --tags origin
+    git rev-parse --verify "$target_ref^{commit}" >/dev/null 2>&1 || {
+      git fetch origin "$target_ref"
+    }
+    git rev-parse --verify "$target_ref^{commit}" >/dev/null 2>&1 || {
+      echo "Git ref not found: $target_ref" >&2
+      exit 1
+    }
+    git checkout --detach "$target_ref"
+    echo "Updating console to $(git rev-parse HEAD)"
     cli_user=$(configured_cli_user)
     ensure_cli_home_mount_path "$cli_user"
     if id "$cli_user" >/dev/null 2>&1; then
