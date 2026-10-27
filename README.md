@@ -1,5 +1,7 @@
 # Codex Provider Console
 
+本项目采用 [MIT License](LICENSE) 发布。
+
 通用的 Codex 供应商控制台，适合部署在安装了 Docker 的 Linux 云服务器上。
 
 它可以管理：
