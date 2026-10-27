@@ -105,14 +105,19 @@ case "${1:-}" in
       exit 1
     fi
     git fetch --tags origin
-    git rev-parse --verify "$target_ref^{commit}" >/dev/null 2>&1 || {
+    resolved_ref="$target_ref"
+    if git show-ref --verify --quiet "refs/remotes/origin/$target_ref"; then
+      resolved_ref="origin/$target_ref"
+    fi
+    git rev-parse --verify "$resolved_ref^{commit}" >/dev/null 2>&1 || {
       git fetch origin "$target_ref"
+      git rev-parse --verify "$target_ref^{commit}" >/dev/null 2>&1 || {
+        echo "Git ref not found: $target_ref" >&2
+        exit 1
+      }
+      resolved_ref="$target_ref"
     }
-    git rev-parse --verify "$target_ref^{commit}" >/dev/null 2>&1 || {
-      echo "Git ref not found: $target_ref" >&2
-      exit 1
-    }
-    git checkout --detach "$target_ref"
+    git checkout --detach "$resolved_ref"
     echo "Updating console to $(git rev-parse HEAD)"
     cli_user=$(configured_cli_user)
     ensure_cli_home_mount_path "$cli_user"
