@@ -98,12 +98,12 @@ The resume command depends on when the interruption happened:
 
   ```bash
   cd ~/codex-provider-console
-  codex-panel update
+  codex-panel update <git-ref>
   ```
 
-  `codex-panel update` pulls the latest code and recreates the existing
-  container while preserving its configured panel port. If `git pull --ff-only`
-  has already been run, use `codex-panel restart` to rebuild and restart only.
+  `codex-panel update <git-ref>` fetches the specified Git reference and recreates the existing
+  container while preserving its configured panel port. Use `codex-panel restart`
+  when no code update is needed.
 
 At the panel-port prompt, press Enter to accept `8787`, or enter another unused
 port and press Enter.
@@ -219,7 +219,7 @@ After installation, run these commands from any directory:
 codex-panel status
 codex-panel logs
 codex-panel restart
-codex-panel update
+codex-panel update <git-ref>
 codex-panel help
 codex-panel uninstall
 ```
