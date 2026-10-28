@@ -66,7 +66,8 @@ class HostSessionDeletionTests(unittest.TestCase):
         self.assertIn("thread_states.get(thread_id) is False", source)
         self.assertIn("thread_states.get(thread_id) is not True", source)
 
-    def test_session_navigation_cannot_hide_the_provider_page_before_its_panel_exists(self):
+    def test_session_navigation_installs_a_refresh_hook_after_its_panel_exists(self):
         source = Path(__file__).resolve().parents[1].joinpath("web", "pages.py").read_text(encoding="utf-8")
         self.assertIn("if(section!=='providers'&&!target){section='providers';target=null}", source)
-        self.assertIn("if(localStorage.getItem('console-section')==='sessions')window.openConsoleSection('sessions');", source)
+        self.assertIn("const baseOpen=window.openConsoleSection;", source)
+        self.assertIn("if(section==='sessions')refreshSessionManagement()", source)
