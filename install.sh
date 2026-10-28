@@ -341,6 +341,7 @@ set_env PANEL_PORT "$PANEL_PORT" "$PORT_SET"
 set_env PUID "$PANEL_PUID" "$FORCE"
 set_env PGID "$PANEL_PGID" "$FORCE"
 set_env CODEX_CLI_VERSION "$CODEX_CLI_VERSION" true
+set_env CODEX_CONSOLE_COMMIT "$(git rev-parse HEAD)" true
 set_env CODEX_CLI_USER "$CODEX_CLI_USER" true
 set_env DEPLOY_USER "$DEPLOY_USER" true
 set_env CODEX_USER_HOME_HOST "$CODEX_USER_HOME_HOST" true
