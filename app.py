@@ -682,6 +682,28 @@ def validate_auth_snapshot(contents: str) -> None:
         raise HTTPException(422, "The current auth.json is not a ChatGPT login session")
 
 
+AUTH_SECRET_FIELD = re.compile(r"(?:token|secret|api[_-]?key|access|refresh|cookie|authorization|credential)", re.IGNORECASE)
+
+
+def redacted_auth_snapshot(contents: str) -> str:
+    """Return account metadata while masking reusable authentication material."""
+    try:
+        payload = json.loads(contents)
+    except (TypeError, json.JSONDecodeError):
+        return "官方登录认证已保存，但 auth.json 不是可展示的 JSON。"
+
+    def redact(value: object, field: str = "") -> object:
+        if field and AUTH_SECRET_FIELD.search(field):
+            return "***"
+        if isinstance(value, dict):
+            return {str(key): redact(item, str(key)) for key, item in value.items()}
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        return value
+
+    return json.dumps(redact(payload), ensure_ascii=False, indent=2)
+
+
 
 
 def config_text() -> str:
@@ -1702,10 +1724,10 @@ def provider_auth_contents(provider_id: str) -> dict:
     if not profile:
         raise HTTPException(404, "Provider profile not found")
     contents = profile.get("auth_contents", "")
-    # Official-login tokens stay server-side. The edit view only needs to know
-    # that a snapshot exists; returning its JSON would expose long-lived tokens.
+    # Official-login tokens stay server-side. Show only redacted account and
+    # session metadata so the edit view can confirm what is stored.
     if profile.get("auth_mode") == "chatgpt":
-        contents = ""
+        contents = redacted_auth_snapshot(str(contents)) if contents else "官方登录认证尚未保存。"
     # Older pure-API profiles may have stored their key only in the profile.
     # The authenticated edit view uses this no-store endpoint to populate the
     # Key field, so preserve that behavior after upgrading those profiles.
