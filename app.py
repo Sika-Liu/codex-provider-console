@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 26473)
-Total output lines: 2502
-
 import base64
 import hashlib
 import hmac
@@ -1037,7 +1034,591 @@ def migrate_session_provider(
                         f"UPDATE threads SET model_provider = ? WHERE {predicate}",
                         (provider_id, *arguments),
                     )
-                    database_chang…6473 tokens truncated…rtificate_pem, request.private_key_pem
+                    database_changes = max(row.rowcount, 0)
+                    connection.commit()
+                else:
+                    database_changes = int(connection.execute(f"SELECT COUNT(*) FROM threads WHERE {predicate}", arguments).fetchone()[0])
+        finally:
+            connection.close()
+
+    rollout_files = 0
+    rollout_records = 0
+    for directory in (SESSIONS_PATH, ARCHIVED_SESSIONS_PATH):
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*.jsonl"):
+            original = path.read_text(encoding="utf-8", errors="replace")
+            lines: list[str] = []
+            changed = 0
+            for line in original.splitlines(keepends=True):
+                newline = "\n" if line.endswith("\n") else ""
+                try:
+                    record = json.loads(line.rstrip("\n"))
+                except json.JSONDecodeError:
+                    lines.append(line)
+                    continue
+                payload = record.get("payload")
+                matches_source = isinstance(payload, dict) and (not source_provider or payload.get("model_provider") == source_provider)
+                if record.get("type") == "session_meta" and isinstance(payload, dict) and matches_source and payload.get("model_provider") != provider_id:
+                    payload["model_provider"] = provider_id
+                    line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + newline
+                    changed += 1
+                lines.append(line)
+            if changed and apply:
+                if backup_dir:
+                    relative = path.relative_to(CODEX_HOME)
+                    snapshot = backup_dir / relative
+                    snapshot.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, snapshot)
+                    os.chmod(snapshot, 0o600)
+                temporary = path.with_name(path.name + ".provider-switch.tmp")
+                temporary.write_text("".join(lines), encoding="utf-8")
+                temporary.chmod(path.stat().st_mode)
+                temporary.replace(path)
+            if changed:
+                rollout_files += 1
+                rollout_records += changed
+    return {"threads": database_changes, "rollout_files": rollout_files, "rollout_records": rollout_records}
+
+
+def cli_version_number(value: str) -> str:
+    match = re.search(r"(?<!\d)(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)", value or "")
+    return match.group(1) if match else ""
+
+def fetch_latest_cli_version() -> str:
+    request = urllib.request.Request(
+        CODEX_LATEST_RELEASE_URL,
+        headers={"User-Agent": "codex-provider-console-health"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.load(response)
+    version = cli_version_number(str(payload.get("tag_name", "")))
+    if not version:
+        raise ValueError("官方版本信息格式无法识别")
+    return version
+
+
+def inspect_host_app_server() -> tuple[str, str]:
+    """Check the managed host daemon without starting or stopping it."""
+    if not DEPLOYMENT_KEY_PATH.is_file():
+        return "warning", "缺少面板部署密钥，无法检查宿主机 App Server"
+    script = r'''
+import json
+import os
+import shutil
+import stat
+import subprocess
+from pathlib import Path
+
+codex = Path.home() / ".local" / "bin" / "codex"
+if not codex.is_file() or not os.access(codex, os.X_OK):
+    codex = Path(shutil.which("codex") or "")
+if not codex.is_file():
+    raise SystemExit("Codex CLI not found")
+result = subprocess.run(
+    [str(codex), "app-server", "daemon", "version"],
+    capture_output=True, text=True, timeout=5, check=False,
+)
+if result.returncode:
+    raise SystemExit((result.stderr or result.stdout or "daemon version failed").strip())
+payload = json.loads(result.stdout)
+socket_path = payload.get("socketPath")
+try:
+    socket_ready = bool(socket_path and stat.S_ISSOCK(Path(socket_path).stat().st_mode))
+except OSError:
+    socket_ready = False
+print(json.dumps({"status": payload.get("status"), "socket_ready": socket_ready,
+                  "version": payload.get("appServerVersion") or payload.get("managedCodexVersion")}))
+'''
+    try:
+        gateway = docker_host_gateway()
+        result = subprocess.run(
+            host_ssh_command(gateway), input=script, capture_output=True, text=True,
+            timeout=15, check=False, env=ssh_client_environment(),
+        )
+        if result.returncode:
+            detail = (result.stderr or result.stdout or "宿主机未提供失败原因").strip()
+            return "fail", f"无法读取 App Server 状态：{detail[-300:]}"
+        payload = json.loads(result.stdout)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        return "warning", f"无法检查宿主机 App Server：{str(exc)[-300:]}"
+    if payload.get("status") != "running" or not payload.get("socket_ready"):
+        return "fail", f"状态：{payload.get('status') or '未知'}；控制套接字{'就绪' if payload.get('socket_ready') else '不可用'}"
+    return "pass", f"运行中；控制套接字就绪；版本 {payload.get('version') or '未知'}"
+
+
+def inspect_session_storage() -> tuple[str, str]:
+    """Check that registered active threads still have rollout files."""
+    states = app_server_thread_states()
+    if states is None:
+        return "warning", "无法读取 App Server 会话数据库"
+    active_ids = {thread_id for thread_id, archived in states.items() if not archived}
+    try:
+        rollout_ids = {
+            thread_id
+            for path in SESSIONS_PATH.rglob("*.jsonl") if SESSIONS_PATH.is_dir()
+            if (thread_id := session_id_from_path(path))
+        }
+    except OSError as exc:
+        return "fail", f"无法读取会话文件：{exc}"
+    missing = active_ids - rollout_ids
+    if missing:
+        return "fail", f"{len(missing)} 个活动会话缺少历史文件（已登记 {len(active_ids)} 个）"
+    return "pass", f"{len(active_ids)} 个活动会话均有历史文件；这是存储检查，不包含客户端加载耗时"
+
+def health_dependencies() -> HealthDependencies:
+    return HealthDependencies(
+        codex_home=CODEX_HOME,
+        config_path=CONFIG_PATH,
+        auth_path=AUTH_PATH,
+        deploy_user=DEPLOY_USER,
+        auth_enabled=AUTH_ENABLED,
+        executable_user_cli_path=executable_user_cli_path,
+        fetch_latest_cli_version=fetch_latest_cli_version,
+        cli_version_number=cli_version_number,
+        deployment_key_status=deployment_key_status,
+        inspect_host_app_server=inspect_host_app_server,
+        inspect_session_storage=inspect_session_storage,
+        config_text=config_text,
+        auth_configured=auth_configured,
+        read_profiles=read_profiles,
+        active_provider=active_provider,
+        normalize_profile=normalize_profile,
+        diagnose_profile=diagnose_profile,
+        audit=audit,
+    )
+
+
+def health_check(on_check: Callable[[dict[str, str]], None] | None = None) -> dict:
+    return HealthService(health_dependencies()).run(on_check)
+
+
+def health_check_plan() -> list[dict[str, str]]:
+    return HealthService(health_dependencies()).plan()
+
+
+def deployment_key_status() -> tuple[bool, str]:
+    if not DEPLOYMENT_KEY_PATH.is_file() or not DEPLOYMENT_KEY_PUBLIC_PATH.is_file():
+        return False, "尚未生成面板管理的部署密钥；可在此页创建、部署并下载。"
+    try:
+        public_key = DEPLOYMENT_KEY_PUBLIC_PATH.read_text(encoding="utf-8").strip()
+        authorized_keys = AUTHORIZED_KEYS_PATH.read_text(encoding="utf-8") if AUTHORIZED_KEYS_PATH.exists() else ""
+    except OSError:
+        return False, "部署密钥文件不可读；请检查部署用户主目录权限。"
+    if public_key and public_key in authorized_keys:
+        return True, f"已部署到用户 {DEPLOY_USER} 的 authorized_keys；可下载私钥供 Codex Desktop 使用。"
+    return False, "部署密钥尚未写入 authorized_keys；可在此页重新部署。"
+
+
+PROVIDER_SWITCH_SERVICE = ProviderSwitchService(
+    ProviderSwitchDependencies(
+        panel_settings=panel_settings,
+        read_profiles=read_profiles,
+        active_provider=active_provider,
+        active_default_model=active_default_model,
+        diagnose_profile=diagnose_profile,
+        backup_state=backup_state,
+        config_text=config_text,
+        run_host_app_server_control=run_host_app_server_control,
+        migrate_session_provider=migrate_session_provider,
+        read_auth_overrides=_read_auth_overrides,
+        write_private=write_private,
+        restore_session_state=restore_session_state,
+        audit=audit,
+        prune_provider_switch_backups=prune_provider_switch_backups,
+        app_server_lock=APP_SERVER_LOCK,
+        common_config_path=COMMON_CONFIG_PATH,
+        config_path=CONFIG_PATH,
+        auth_path=AUTH_PATH,
+        profile_path=PROFILE_PATH,
+        settings_path=SETTINGS_PATH,
+        session_provider_id=SESSION_PROVIDER_ID,
+        host_relay_base_url=HOST_RELAY_BASE_URL,
+    )
+)
+
+
+def switch_provider(
+    provider_id: str,
+    verify: bool = True,
+    model_override: str | None = None,
+    progress: Callable[[int, str], None] | None = None,
+) -> dict:
+    """Switch providers serially so auth/config snapshots cannot interleave.
+
+    A switch replaces the shared Codex config and auth files.  Serializing the
+    whole operation is required for multiple official-login profiles: two
+    concurrent switches could otherwise validate different snapshots and then
+    write the wrong account last.
+    """
+    if not PROVIDER_SWITCH_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "Another provider switch is already in progress")
+    try:
+        return PROVIDER_SWITCH_SERVICE.run(
+            provider_id,
+            verify=verify,
+            model_override=model_override,
+            progress=progress,
+        )
+    finally:
+        PROVIDER_SWITCH_LOCK.release()
+
+
+@OPERATIONS_ROUTER.get("/api/status")
+def status() -> dict:
+    model = None
+    if CONFIG_PATH.exists():
+        match = re.search(r'^\s*model\s*=\s*"([^"]+)"', CONFIG_PATH.read_text(encoding="utf-8"), re.M)
+        model = match.group(1) if match else None
+    return {"active_provider": active_provider(), "model": model, "profiles": [public_profile(p) for p in read_profiles().values()], "preflight": preflight(), "settings": panel_settings()}
+
+
+class PanelSettings(BaseModel):
+    provider_switching_enabled: bool = True
+    reverse_proxy: dict = Field(default_factory=dict)
+    # Internal selection state. Browser settings forms do not need to send it.
+    active_provider_id: str | None = Field(default=None, pattern=r"^(|[a-zA-Z0-9_-]{1,48})$")
+
+
+class AccountPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=8, max_length=256)
+
+
+class AccountUsernameRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
+
+
+class RecoveryEmailRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class RecoveryCodeRequest(BaseModel):
+    code: str = Field(pattern=r"^[0-9]{8}$")
+
+
+class ResetPasswordRequest(BaseModel):
+    reset_token: str = Field(min_length=32, max_length=128)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
+class ReverseProxyApplyRequest(BaseModel):
+    domain: str = Field(min_length=1, max_length=253)
+    certificate_pem: str = Field(min_length=1, max_length=200_000)
+    private_key_pem: str = Field(min_length=1, max_length=200_000)
+
+
+class CommonConfigRequest(BaseModel):
+    contents: str = Field(default="", max_length=200000)
+
+
+class SessionMigrationRequest(BaseModel):
+    target_provider: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,48}$")
+    source_provider: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,48}$")
+    apply: bool = False
+
+
+@ACCOUNT_ROUTER.get("/api/settings")
+def get_settings() -> dict:
+    return panel_settings()
+
+
+@ACCOUNT_ROUTER.post("/api/settings")
+def save_settings(request: PanelSettings) -> dict:
+    settings = _read_auth_overrides()
+    settings["provider_switching_enabled"] = request.provider_switching_enabled
+    settings["reverse_proxy"] = request.reverse_proxy
+    if request.active_provider_id is not None:
+        settings["active_provider_id"] = request.active_provider_id
+    write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+    audit("provider_switching_setting_changed", enabled=request.provider_switching_enabled)
+    return settings
+
+
+@ACCOUNT_ROUTER.get("/api/account")
+def get_account_settings() -> dict:
+    return {
+        "username": PANEL_USERNAME,
+        "cookie_secure": COOKIE_SECURE,
+        "panel_bind": PANEL_BIND,
+        "public_bind_warning": PANEL_BIND not in {"127.0.0.1", "localhost", "::1"},
+        "restart_required_for_bind": True,
+    }
+
+
+@ACCOUNT_ROUTER.post("/api/account")
+@ACCOUNT_ROUTER.post("/api/account/password")
+def save_account_password(request: AccountPasswordRequest) -> dict:
+    global PANEL_PASSWORD, SESSION_SECRET
+    if current_password_matches(request.new_password):
+        raise HTTPException(400, "新密码不能与当前密码相同")
+    settings = _read_auth_overrides()
+    salt = secrets.token_urlsafe(24)
+    settings["panel_password_salt"] = salt
+    settings["panel_password_hash"] = hashlib.pbkdf2_hmac(
+        "sha256", request.new_password.encode("utf-8"), salt.encode("utf-8"), 210_000
+    ).hex()
+    settings["panel_session_secret"] = secrets.token_urlsafe(32)
+    write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+    PANEL_PASSWORD = ""
+    SESSION_SECRET = settings["panel_session_secret"]
+    AUTH_SERVICE.update_runtime(password=PANEL_PASSWORD, session_secret=SESSION_SECRET)
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.clear()
+    audit("account_password_changed", username=PANEL_USERNAME)
+    return {"username": PANEL_USERNAME, "cookie_secure": COOKIE_SECURE, "sessions_invalidated": True}
+
+
+@ACCOUNT_ROUTER.post("/api/account/username")
+def save_account_username(request: AccountUsernameRequest) -> dict:
+    global PANEL_USERNAME, SESSION_SECRET
+    if request.username == PANEL_USERNAME:
+        raise HTTPException(400, "新账号不能与当前账号相同")
+    settings = _read_auth_overrides()
+    settings["panel_username"] = request.username
+    settings["panel_session_secret"] = secrets.token_urlsafe(32)
+    write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+    PANEL_USERNAME = request.username
+    SESSION_SECRET = settings["panel_session_secret"]
+    AUTH_SERVICE.update_runtime(username=PANEL_USERNAME, session_secret=SESSION_SECRET)
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.clear()
+    audit("account_username_changed", username=request.username)
+    return {"username": PANEL_USERNAME, "sessions_invalidated": True}
+
+
+def _write_recovery_settings(settings: dict) -> None:
+    write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+
+
+def _apply_recovery_password(new_password: str) -> None:
+    global PANEL_PASSWORD, SESSION_SECRET
+    settings = _read_auth_overrides()
+    salt = secrets.token_urlsafe(24)
+    settings["panel_password_salt"] = salt
+    settings["panel_password_hash"] = hashlib.pbkdf2_hmac("sha256", new_password.encode("utf-8"), salt.encode("utf-8"), 210_000).hex()
+    settings["panel_session_secret"] = secrets.token_urlsafe(32)
+    _write_recovery_settings(settings)
+    PANEL_PASSWORD = ""
+    SESSION_SECRET = settings["panel_session_secret"]
+    AUTH_SERVICE.update_runtime(password=PANEL_PASSWORD, session_secret=SESSION_SECRET)
+    with LOGIN_FAILURES_LOCK:
+        LOGIN_FAILURES.clear()
+
+
+RECOVERY_SERVICE = RecoveryService(
+    read_settings=_read_auth_overrides,
+    write_settings=_write_recovery_settings,
+    session_secret=lambda: SESSION_SECRET,
+    password_matches=current_password_matches,
+    password_reset=_apply_recovery_password,
+    send_email=send_recovery_email,
+    email_ready=recovery_email_ready,
+    audit=audit,
+    code_lifetime=RECOVERY_CODE_LIFETIME,
+    grant_lifetime=RECOVERY_GRANT_LIFETIME,
+)
+
+
+def recovery_result(operation):
+    try:
+        return operation()
+    except RecoveryError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
+@ACCOUNT_ROUTER.get("/api/account/recovery-email")
+def get_recovery_email() -> dict:
+    return RECOVERY_SERVICE.status()
+
+
+@ACCOUNT_ROUTER.post("/api/account/recovery-email/unbind/request")
+def request_recovery_email_unbind(request: Request) -> dict:
+    return recovery_result(lambda: RECOVERY_SERVICE.request_unbind(login_client_key(request)))
+
+
+@ACCOUNT_ROUTER.delete("/api/account/recovery-email")
+def delete_recovery_email(details: RecoveryCodeRequest) -> dict:
+    return recovery_result(lambda: RECOVERY_SERVICE.unbind(details.code))
+
+
+@ACCOUNT_ROUTER.post("/api/account/recovery-email/request")
+def request_recovery_email_binding(details: RecoveryEmailRequest, request: Request) -> dict:
+    return recovery_result(lambda: RECOVERY_SERVICE.request_binding(details.email, login_client_key(request)))
+
+
+@ACCOUNT_ROUTER.post("/api/account/recovery-email/verify")
+def verify_recovery_email_binding(details: RecoveryCodeRequest) -> dict:
+    return recovery_result(lambda: RECOVERY_SERVICE.verify_binding(details.code))
+
+
+@ACCOUNT_ROUTER.post("/api/password-reset/request")
+def request_password_reset(details: RecoveryEmailRequest, request: Request) -> dict:
+    return recovery_result(lambda: RECOVERY_SERVICE.request_reset(details.email, login_client_key(request)))
+
+
+@ACCOUNT_ROUTER.post("/api/password-reset/verify")
+def verify_password_reset(details: RecoveryCodeRequest) -> dict:
+    return recovery_result(lambda: RECOVERY_SERVICE.verify_reset(details.code))
+
+
+@ACCOUNT_ROUTER.post("/api/password-reset/complete")
+def complete_password_reset(details: ResetPasswordRequest) -> dict:
+    return recovery_result(lambda: RECOVERY_SERVICE.complete_reset(details.reset_token, details.new_password))
+
+
+@ACCOUNT_ROUTER.get("/api/common-config")
+def get_common_config() -> dict:
+    contents = COMMON_CONFIG_PATH.read_text(encoding="utf-8") if COMMON_CONFIG_PATH.exists() else remove_provider_sections(config_text())
+    return {"contents": contents}
+
+
+@ACCOUNT_ROUTER.post("/api/common-config/extract")
+def extract_common_config() -> dict:
+    contents = remove_provider_sections(config_text())
+    write_private(COMMON_CONFIG_PATH, contents + ("\n" if contents else ""))
+    audit("common_config_extracted")
+    return {"contents": contents}
+
+
+@ACCOUNT_ROUTER.post("/api/common-config")
+def save_common_config(request: CommonConfigRequest) -> dict:
+    contents = canonicalize_base_config(request.contents.strip())
+    try:
+        tomllib.loads(contents or "")
+    except tomllib.TOMLDecodeError as exc:
+        raise HTTPException(422, "通用配置不是有效的 TOML") from exc
+    write_private(COMMON_CONFIG_PATH, contents + ("\n" if contents else ""))
+    audit("common_config_saved")
+    return {"contents": contents}
+
+
+@PROXY_ROUTER.get("/api/reverse-proxy/status")
+def reverse_proxy_status() -> dict:
+    """Return deployment state without ever exposing certificate material."""
+    try:
+        result = json.loads(run_host_reverse_proxy_script(reverse_proxy_status_script(str(panel_settings().get("reverse_proxy", {}).get("domain", "")).strip().lower()), "读取状态", timeout=30))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(502, "反向代理状态返回格式无效") from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    saved = panel_settings().get("reverse_proxy", {})
+    return {
+        "configured": bool(result.get("configured")),
+        "running": bool(result.get("running")),
+        "secure_mode": PANEL_BIND in {"127.0.0.1", "localhost", "::1"} and bool(COOKIE_SECURE),
+        "panel_bind": PANEL_BIND,
+        "cookie_secure": bool(COOKIE_SECURE),
+        "mode_mismatch": (PANEL_BIND in {"127.0.0.1", "localhost", "::1"}) != bool(COOKIE_SECURE),
+        "https_verified": bool(result.get("https_verified")),
+        "https_error": str(result.get("https_error", "")),
+        "domain": str(saved.get("domain", "")),
+        "upstream": str(saved.get("upstream", "")),
+        "managed_upstream": REVERSE_PROXY_UPSTREAM,
+    }
+
+
+@PROXY_ROUTER.post("/api/reverse-proxy/enable-secure-mode")
+def enable_reverse_proxy_secure_mode(request: Request) -> dict:
+    saved = panel_settings().get("reverse_proxy", {})
+    domain = str(saved.get("domain", "")).strip().lower()
+    if not domain:
+        raise HTTPException(409, "请先部署 HTTPS 反向代理")
+    forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",", 1)[0].strip().lower()
+    request_host = request.headers.get("host", "").split(":", 1)[0].strip().lower()
+    if forwarded_proto != "https" or request_host != domain:
+        raise HTTPException(409, f"请先通过 https://{domain} 访问控制台，再启用安全模式")
+    try:
+        result = json.loads(run_host_reverse_proxy_script(reverse_proxy_secure_mode_script(), "启用安全模式", timeout=150))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(502, "安全模式切换返回格式无效") from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    audit("reverse_proxy_secure_mode_enabled", domain=domain)
+    return {"secure_mode": bool(result.get("secure_mode")), "detail": "HTTPS 已验证，面板已切换为本机监听并启用 Secure Cookie。请刷新页面。"}
+
+
+@PROXY_ROUTER.post("/api/reverse-proxy/disable-secure-mode")
+def disable_reverse_proxy_secure_mode(request: Request) -> dict:
+    saved = panel_settings().get("reverse_proxy", {})
+    domain = str(saved.get("domain", "")).strip().lower()
+    if not domain:
+        raise HTTPException(409, "请先部署 HTTPS 反向代理")
+    forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",", 1)[0].strip().lower()
+    request_host = request.headers.get("host", "").split(":", 1)[0].strip().lower()
+    if forwarded_proto != "https" or request_host != domain:
+        raise HTTPException(409, f"请通过 https://{domain} 访问控制台后再关闭安全模式")
+    try:
+        result = json.loads(run_host_reverse_proxy_script(reverse_proxy_disable_secure_mode_script(), "关闭安全模式", timeout=150))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(502, "关闭安全模式返回格式无效") from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    audit("reverse_proxy_secure_mode_disabled", domain=domain)
+    return {"secure_mode": bool(result.get("secure_mode")), "detail": "安全模式已关闭，面板将恢复 8787 公网监听。请刷新页面。"} 
+
+
+@PROXY_ROUTER.post("/api/reverse-proxy/apply")
+def apply_reverse_proxy(request: ReverseProxyApplyRequest) -> dict:
+    domain, upstream, certificate_pem, private_key_pem = validate_reverse_proxy_input(
+        request.domain, request.certificate_pem, request.private_key_pem
+    )
+    with REVERSE_PROXY_LOCK:
+        try:
+            result = json.loads(run_host_reverse_proxy_script(
+                reverse_proxy_apply_script(domain, upstream, certificate_pem, private_key_pem),
+                "部署",
+            ))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(502, "反向代理部署返回格式无效") from exc
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
+    # Keep only non-sensitive deployment metadata in the panel's settings file.
+    settings = _read_auth_overrides()
+    settings["reverse_proxy"] = {"domain": domain, "upstream": upstream}
+    write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+    audit("reverse_proxy_applied", domain=domain, upstream=upstream)
+    return {
+        "configured": True,
+        "running": bool(result.get("running")),
+        "domain": domain,
+        "upstream": upstream,
+        "detail": "已校验证书并部署反向代理。请在云防火墙中仅公开 80/443，并限制面板端口 8787 的直接访问。",
+    }
+
+
+def reverse_proxy_job_snapshot(job_id: str) -> dict:
+    with REVERSE_PROXY_JOBS_LOCK:
+        job = REVERSE_PROXY_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "反向代理部署任务不存在或已过期")
+        return dict(job)
+
+
+@PROXY_ROUTER.post("/api/reverse-proxy/apply-progress")
+def start_reverse_proxy_apply_progress(request: ReverseProxyApplyRequest) -> dict:
+    job_id = uuid.uuid4().hex
+    with REVERSE_PROXY_JOBS_LOCK:
+        if any(job["status"] == "running" for job in REVERSE_PROXY_JOBS.values()):
+            raise HTTPException(409, "已有反向代理部署任务正在运行")
+        REVERSE_PROXY_JOBS[job_id] = new_background_job("reverse_proxy", {
+            "id": job_id, "status": "running", "progress": 2, "step": 0,
+            "stage": "准备校验输入", "detail": "", "warning": "", "result": None,
+            "updated_at": time.time(),
+        })
+        finished = [key for key, job in REVERSE_PROXY_JOBS.items() if job["status"] != "running"]
+        for key in finished[:-20]:
+            del REVERSE_PROXY_JOBS[key]
+
+    def report(progress: int, step: int, stage: str) -> None:
+        with REVERSE_PROXY_JOBS_LOCK:
+            REVERSE_PROXY_JOBS[job_id].update(progress=progress, step=step, stage=stage, updated_at=time.time())
+
+    def run() -> None:
+        try:
+            with REVERSE_PROXY_LOCK:
+                report(5, 0, "正在校验输入")
+                domain, upstream, certificate, private_key = validate_reverse_proxy_input(
+                    request.domain, request.certificate_pem, request.private_key_pem
                 )
                 report(20, 1, "正在检查上游连接")
                 check_reverse_proxy_upstream(upstream)
