@@ -18,7 +18,8 @@ class OfficialLoginSurfaceTests(unittest.TestCase):
         self.assertIn('redacted_auth_snapshot', source)
         self.assertIn("data.contents||'官方登录认证尚未保存。'", page)
         self.assertIn("auth_contents:auth_mode==='chatgpt'?'':$('#auth-preview').value", page)
-        self.assertIn('敏感字段已隐藏', page)
+        self.assertIn('id=\"auth-visibility-toggle\"', page)
+        self.assertIn('toggleAuthVisibility()', page)
 
 
 if __name__ == "__main__":
