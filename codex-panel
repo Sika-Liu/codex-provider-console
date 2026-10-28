@@ -23,6 +23,16 @@ run_as_cli_user() {
   fi
 }
 
+record_console_commit() {
+  local commit
+  commit=$(git rev-parse HEAD)
+  if grep -q '^CODEX_CONSOLE_COMMIT=' "$PROJECT_DIR/.env"; then
+    sed -i "s|^CODEX_CONSOLE_COMMIT=.*|CODEX_CONSOLE_COMMIT=${commit}|" "$PROJECT_DIR/.env"
+  else
+    printf 'CODEX_CONSOLE_COMMIT=%s\n' "$commit" >> "$PROJECT_DIR/.env"
+  fi
+}
+
 ensure_cli_home_mount_path() {
   local cli_user="$1"
   local cli_home
@@ -118,6 +128,7 @@ case "${1:-}" in
       resolved_ref="$target_ref"
     }
     git checkout --detach "$resolved_ref"
+    record_console_commit
     echo "Updating console to $(git rev-parse HEAD)"
     cli_user=$(configured_cli_user)
     ensure_cli_home_mount_path "$cli_user"
@@ -150,7 +161,11 @@ case "${1:-}" in
     echo "Codex CLI installed for ${cli_user}: ${version}"
     ;;
   config) printf '%s\n' "$PROJECT_DIR/.env" ;;
-  version) cat "$PROJECT_DIR/VERSION" ;;
+  version)
+    printf 'Console version: %s\n' "$(cat "$PROJECT_DIR/VERSION")"
+    printf 'Console commit: %s\n' "$(git rev-parse HEAD)"
+    printf 'Codex CLI: %s\n' "$(sed -n 's/^CODEX_CLI_VERSION=//p' "$PROJECT_DIR/.env" 2>/dev/null | tail -n 1 || true)"
+    ;;
   uninstall)
     if [[ -z "${CODEX_HOME_HOST:-}" && -f "$PROJECT_DIR/.env" ]]; then
       CODEX_HOME_HOST=$(sed -n 's/^CODEX_HOME_HOST=//p' "$PROJECT_DIR/.env" | tail -n 1)
