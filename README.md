@@ -115,6 +115,7 @@ ssh -N -L 8787:127.0.0.1:8787 用户名@服务器IP
 codex-panel status
 codex-panel logs
 codex-panel restart
+codex-panel version
 codex-panel update <git-ref>
 codex-panel help
 codex-panel uninstall
