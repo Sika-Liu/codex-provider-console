@@ -176,6 +176,16 @@ shown by the installer. Configure a domain and HTTPS from the panel's 反向代�
 page only when needed; the panel can read and replace Codex credentials, so
 public deployments must retain login authentication.
 
+### Existing system Nginx
+
+The Compose reverse proxy binds host ports 80 and 443. Use only one reverse
+proxy owner for those ports. If the server already runs Nginx for other
+domains, keep that system Nginx as the edge proxy and add a virtual host that
+passes the console domain to `127.0.0.1:8787`. A reusable example is in
+`deploy/nginx/codex-provider-console.conf.example`. Do not start the
+`reverse-proxy` Compose profile on the same host unless ports 80 and 443 are
+free. After installing the virtual host, run `nginx -t` and reload Nginx.
+
 After signing in, use the left-side **健康检查** page before running Codex. It
 checks the mounted Codex directory, write permissions, Codex CLI, and compares
 the installed CLI with the latest version published by OpenAI. When an update
