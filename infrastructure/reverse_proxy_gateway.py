@@ -123,10 +123,12 @@ if system_nginx:
             "    }}\\n"
             "}}\\n")
         (stage / "default.conf").write_text(config, encoding="utf-8")
+        target_cert_dir = "/target" + cert_dir[len("/etc/nginx"):]
+        target_config_path = "/target" + config_path[len("/etc/nginx"):]
         copy = subprocess.run([
             "docker", "run", "--rm", "-v", f"{{stage}}:/src:ro", "-v", "/etc/nginx:/target",
             "nginx:1.27-alpine", "sh", "-c",
-            "set -eu; mkdir -p /target" + cert_dir + "; cp /src/certificate.pem /target" + cert_dir + "/certificate.pem; cp /src/private-key.pem /target" + cert_dir + "/private-key.pem; chmod 600 /target" + cert_dir + "/*; cp /src/default.conf /target" + config_path,
+            "set -eu; mkdir -p " + target_cert_dir + "; cp /src/certificate.pem " + target_cert_dir + "/certificate.pem; cp /src/private-key.pem " + target_cert_dir + "/private-key.pem; chmod 600 " + target_cert_dir + "/*; cp /src/default.conf " + target_config_path,
         ], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if copy.returncode != 0:
             raise SystemExit(copy.stdout[-1200:])
