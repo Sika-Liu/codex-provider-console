@@ -19,11 +19,16 @@ if test -f "$SOURCE_DIR/delete"; then
   case "$delete_domain" in
     (*[!a-zA-Z0-9.-]*|'') echo 'Invalid delete target.' >&2; exit 1 ;;
   esac
-  legacy_target="/etc/nginx/conf.d/$delete_domain.conf"
   legacy_cert_dir="/etc/nginx/codex-provider-console-certs/$delete_domain"
-  if test ! -f "$TARGET" && test -f "$legacy_target"; then
-    TARGET="$legacy_target"
-    CERT_DIR="$legacy_cert_dir"
+  if test ! -f "$TARGET"; then
+    for candidate in /etc/nginx/conf.d/*.conf /etc/nginx/sites-enabled/*.conf; do
+      test -f "$candidate" || continue
+      grep -Fq '# Managed by codex-provider-console.' "$candidate" || continue
+      grep -Fq "server_name $delete_domain;" "$candidate" || continue
+      TARGET="$candidate"
+      CERT_DIR="$legacy_cert_dir"
+      break
+    done
   fi
 fi
 

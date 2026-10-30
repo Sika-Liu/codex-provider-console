@@ -370,11 +370,15 @@ project = Path({project})
 target = {target}
 system_config = Path("/etc/nginx/conf.d/codex-provider-console.conf")
 system_managed = False
-try:
-    contents = system_config.read_text(encoding="utf-8", errors="ignore")
-    system_managed = "# Managed by codex-provider-console." in contents and "server_name " + target + ";" in contents
-except OSError:
-    pass
+for candidate in (system_config, *Path("/etc/nginx/conf.d").glob("*.conf"), *Path("/etc/nginx/sites-enabled").glob("*.conf")):
+    try:
+        contents = candidate.read_text(encoding="utf-8", errors="ignore")
+        if "# Managed by codex-provider-console." in contents and "server_name " + target + ";" in contents:
+            system_config = candidate
+            system_managed = True
+            break
+    except OSError:
+        pass
 if target and system_managed:
     staging = project / ".reverse-proxy-host-staging"
     if staging.exists():
