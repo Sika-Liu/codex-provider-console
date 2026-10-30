@@ -373,7 +373,7 @@ system_managed = False
 for candidate in (system_config, *Path("/etc/nginx/conf.d").glob("*.conf"), *Path("/etc/nginx/sites-enabled").glob("*.conf")):
     try:
         contents = candidate.read_text(encoding="utf-8", errors="ignore")
-        if "# Managed by codex-provider-console." in contents and "server_name " + target + ";" in contents:
+        if (("# Managed by codex-provider-console." in contents) or ("# Managed by codex-provider-console domain guard." in contents)) and "server_name " + target + ";" in contents:
             system_config = candidate
             system_managed = True
             break

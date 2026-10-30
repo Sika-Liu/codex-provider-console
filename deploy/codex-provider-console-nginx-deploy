@@ -6,6 +6,7 @@ set -eu
 PROJECT_DIR=$(pwd -P)
 SOURCE_DIR="$PROJECT_DIR/.reverse-proxy-host-staging"
 TARGET=/etc/nginx/conf.d/codex-provider-console.conf
+GUARD=/etc/nginx/conf.d/codex-provider-console-domain-guard.conf
 CERT_DIR=/etc/nginx/codex-provider-console-certs
 BACKUP_DIR=/var/lib/codex-provider-console
 BACKUP_CONFIG="$BACKUP_DIR/nginx-last-known-good.conf"
@@ -35,14 +36,17 @@ fi
 mkdir -p "$BACKUP_DIR"
 
 had_config=0
+had_guard=0
 had_cert=0
 had_key=0
 if test -f "$TARGET"; then cp "$TARGET" "$BACKUP_CONFIG"; had_config=1; fi
+if test -f "$GUARD"; then cp "$GUARD" "$BACKUP_DIR/domain-guard.conf"; had_guard=1; fi
 if test -f "$CERT_DIR/certificate.pem"; then cp "$CERT_DIR/certificate.pem" "$BACKUP_CERT"; had_cert=1; fi
 if test -f "$CERT_DIR/private-key.pem"; then cp "$CERT_DIR/private-key.pem" "$BACKUP_KEY"; had_key=1; fi
 
 restore() {
   if test "$had_config" -eq 1; then cp "$BACKUP_CONFIG" "$TARGET"; else rm -f "$TARGET"; fi
+  if test "$had_guard" -eq 1; then cp "$BACKUP_DIR/domain-guard.conf" "$GUARD"; else rm -f "$GUARD"; fi
   if test "$had_cert" -eq 1; then mkdir -p "$CERT_DIR"; cp "$BACKUP_CERT" "$CERT_DIR/certificate.pem"; else rm -f "$CERT_DIR/certificate.pem"; fi
   if test "$had_key" -eq 1; then mkdir -p "$CERT_DIR"; cp "$BACKUP_KEY" "$CERT_DIR/private-key.pem"; else rm -f "$CERT_DIR/private-key.pem"; fi
   chmod 600 "$CERT_DIR"/private-key.pem 2>/dev/null || true
@@ -50,6 +54,14 @@ restore() {
 
 if test -f "$SOURCE_DIR/delete"; then
   rm -f "$TARGET" "$CERT_DIR/certificate.pem" "$CERT_DIR/private-key.pem"
+  cat > "$GUARD" <<EOF
+server {
+    # Managed by codex-provider-console domain guard.
+    listen 443 ssl;
+    server_name $delete_domain;
+    ssl_reject_handshake on;
+}
+EOF
 else
   test -r "$SOURCE_DIR/default.conf"
   test -r "$SOURCE_DIR/certificate.pem"
@@ -58,6 +70,7 @@ else
   install -o root -g root -m 600 "$SOURCE_DIR/certificate.pem" "$CERT_DIR/certificate.pem"
   install -o root -g root -m 600 "$SOURCE_DIR/private-key.pem" "$CERT_DIR/private-key.pem"
   install -o root -g root -m 644 "$SOURCE_DIR/default.conf" "$TARGET"
+  rm -f "$GUARD"
 fi
 
 if ! /usr/sbin/nginx -t; then
