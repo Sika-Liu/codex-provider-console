@@ -1582,7 +1582,7 @@ def apply_reverse_proxy(request: ReverseProxyApplyRequest) -> dict:
         "configured": True,
         "running": bool(result.get("running")),
         "domain": domain,
-        "upstream": upstream,
+        "upstream": str(result.get("upstream") or upstream),
         "detail": "已校验证书并部署反向代理。请在云防火墙中仅公开 80/443，并限制面板端口 8787 的直接访问。",
     }
 
@@ -1652,7 +1652,10 @@ def start_reverse_proxy_apply_progress(request: ReverseProxyApplyRequest) -> dic
                     warning = f"HTTPS 状态暂无法确认：{exc}"
                 result = {
                     "configured": True, "running": bool(deployed.get("running")),
-                    "domain": domain, "upstream": upstream, "https_verified": not bool(warning),
+                    "domain": domain,
+                    "upstream": str(deployed.get("upstream") or upstream),
+                    "backend": str(deployed.get("backend") or "docker"),
+                    "https_verified": not bool(warning),
                 }
             with REVERSE_PROXY_JOBS_LOCK:
                 REVERSE_PROXY_JOBS[job_id].update(

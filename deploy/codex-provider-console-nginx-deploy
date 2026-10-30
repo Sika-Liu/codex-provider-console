@@ -1,0 +1,72 @@
+#!/bin/sh
+# Root-only deployment helper. It accepts no arguments and only operates on
+# the staging directory in the caller's current project directory.
+set -eu
+
+PROJECT_DIR=$(pwd -P)
+SOURCE_DIR="$PROJECT_DIR/.reverse-proxy-host-staging"
+TARGET=/etc/nginx/conf.d/codex-provider-console.conf
+CERT_DIR=/etc/nginx/codex-provider-console-certs
+BACKUP_DIR=/var/lib/codex-provider-console
+BACKUP_CONFIG="$BACKUP_DIR/nginx-last-known-good.conf"
+BACKUP_CERT="$BACKUP_DIR/certificate.pem"
+BACKUP_KEY="$BACKUP_DIR/private-key.pem"
+
+test -d "$SOURCE_DIR"
+
+if test -f "$SOURCE_DIR/delete"; then
+  delete_domain=$(tr -d '\n' < "$SOURCE_DIR/delete")
+  case "$delete_domain" in
+    (*[!a-zA-Z0-9.-]*|'') echo 'Invalid delete target.' >&2; exit 1 ;;
+  esac
+  legacy_target="/etc/nginx/conf.d/$delete_domain.conf"
+  legacy_cert_dir="/etc/nginx/codex-provider-console-certs/$delete_domain"
+  if test ! -f "$TARGET" && test -f "$legacy_target"; then
+    TARGET="$legacy_target"
+    CERT_DIR="$legacy_cert_dir"
+  fi
+fi
+
+mkdir -p "$BACKUP_DIR"
+
+had_config=0
+had_cert=0
+had_key=0
+if test -f "$TARGET"; then cp "$TARGET" "$BACKUP_CONFIG"; had_config=1; fi
+if test -f "$CERT_DIR/certificate.pem"; then cp "$CERT_DIR/certificate.pem" "$BACKUP_CERT"; had_cert=1; fi
+if test -f "$CERT_DIR/private-key.pem"; then cp "$CERT_DIR/private-key.pem" "$BACKUP_KEY"; had_key=1; fi
+
+restore() {
+  if test "$had_config" -eq 1; then cp "$BACKUP_CONFIG" "$TARGET"; else rm -f "$TARGET"; fi
+  if test "$had_cert" -eq 1; then mkdir -p "$CERT_DIR"; cp "$BACKUP_CERT" "$CERT_DIR/certificate.pem"; else rm -f "$CERT_DIR/certificate.pem"; fi
+  if test "$had_key" -eq 1; then mkdir -p "$CERT_DIR"; cp "$BACKUP_KEY" "$CERT_DIR/private-key.pem"; else rm -f "$CERT_DIR/private-key.pem"; fi
+  chmod 600 "$CERT_DIR"/private-key.pem 2>/dev/null || true
+}
+
+if test -f "$SOURCE_DIR/delete"; then
+  rm -f "$TARGET" "$CERT_DIR/certificate.pem" "$CERT_DIR/private-key.pem"
+else
+  test -r "$SOURCE_DIR/default.conf"
+  test -r "$SOURCE_DIR/certificate.pem"
+  test -r "$SOURCE_DIR/private-key.pem"
+  install -d -m 700 "$CERT_DIR"
+  install -o root -g root -m 600 "$SOURCE_DIR/certificate.pem" "$CERT_DIR/certificate.pem"
+  install -o root -g root -m 600 "$SOURCE_DIR/private-key.pem" "$CERT_DIR/private-key.pem"
+  install -o root -g root -m 644 "$SOURCE_DIR/default.conf" "$TARGET"
+fi
+
+if ! /usr/sbin/nginx -t; then
+  restore
+  echo 'Nginx configuration validation failed; previous configuration was restored.' >&2
+  exit 1
+fi
+if ! /usr/bin/systemctl reload nginx.service; then
+  restore
+  /usr/sbin/nginx -t || true
+  /usr/bin/systemctl reload nginx.service || true
+  echo 'Nginx reload failed; previous configuration was restored.' >&2
+  exit 1
+fi
+
+rm -rf "$SOURCE_DIR"
+echo 'Codex Provider Console Nginx deployment succeeded.'

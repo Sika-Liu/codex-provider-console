@@ -80,20 +80,9 @@ listeners = subprocess.run(["ss", "-ltn"], text=True, stdout=subprocess.PIPE, st
 system_nginx = shutil.which("nginx") and ("LISTEN" in listeners) and (":80 " in listeners or ":443 " in listeners)
 if system_nginx:
     domain = data["domain"]
-    cert_dir = "/etc/nginx/codex-provider-console-certs/" + domain
-    config_path = "/etc/nginx/conf.d/" + domain + ".conf"
-    marker = "server_name " + domain + ";"
-    for directory in (Path("/etc/nginx/conf.d"), Path("/etc/nginx/sites-enabled")):
-        try:
-            for candidate in directory.glob("*.conf"):
-                contents = candidate.read_text(encoding="utf-8", errors="ignore")
-                if marker in contents and ("127.0.0.1:8787" in contents or "codex-provider-console" in contents):
-                    config_path = str(candidate)
-                    break
-        except OSError:
-            pass
+    staging = project / ".reverse-proxy-host-staging"
     if data["validate_only"]:
-        print(json.dumps({{"validated": True, "backend": "system_nginx"}}))
+        print(json.dumps({{"validated": True, "backend": "system_nginx", "upstream": "127.0.0.1:8787"}}))
         sys.exit(0)
     stage = project / (".external-proxy-stage-" + uuid.uuid4().hex)
     stage.mkdir(mode=0o700)
@@ -108,8 +97,8 @@ if system_nginx:
             "server {{\\n"
             "    listen 443 ssl;\\n"
             "    server_name " + domain + ";\\n"
-            "    ssl_certificate " + cert_dir + "/certificate.pem;\\n"
-            "    ssl_certificate_key " + cert_dir + "/private-key.pem;\\n"
+            "    ssl_certificate /etc/nginx/codex-provider-console-certs/certificate.pem;\\n"
+            "    ssl_certificate_key /etc/nginx/codex-provider-console-certs/private-key.pem;\\n"
             "    ssl_protocols TLSv1.2 TLSv1.3;\\n"
             "    # Managed by codex-provider-console.\\n"
             "    location / {{\\n"
@@ -123,24 +112,13 @@ if system_nginx:
             "    }}\\n"
             "}}\\n")
         (stage / "default.conf").write_text(config, encoding="utf-8")
-        target_cert_dir = "/target" + cert_dir[len("/etc/nginx"):]
-        target_config_path = "/target" + config_path[len("/etc/nginx"):]
-        copy = subprocess.run([
-            "docker", "run", "--rm", "-v", f"{{stage}}:/src:ro", "-v", "/etc/nginx:/target",
-            "nginx:1.27-alpine", "sh", "-c",
-            "set -eu; mkdir -p " + target_cert_dir + "; cp /src/certificate.pem " + target_cert_dir + "/certificate.pem; cp /src/private-key.pem " + target_cert_dir + "/private-key.pem; chmod 600 " + target_cert_dir + "/*; cp /src/default.conf " + target_config_path,
-        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        if copy.returncode != 0:
-            raise SystemExit(copy.stdout[-1200:])
-        reload_script = ("set -eu; master=$(ps -eo pid,args | awk '$0 ~ /nginx: master process/ {{print $1; exit}}'); "
-            'test -n "$master"; nsenter -t "$master" -m -u -i -n -p -- nginx -t; '
-            'nsenter -t "$master" -m -u -i -n -p -- nginx -s reload')
-        reloaded = subprocess.run([
-            "docker", "run", "--rm", "--pid=host", "--privileged", "nginx:1.27-alpine", "sh", "-c", reload_script,
-        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        if reloaded.returncode != 0:
-            raise SystemExit(reloaded.stdout[-1200:])
-        print(json.dumps({{"running": True, "domain": domain, "backend": "system_nginx"}}))
+        if staging.exists():
+            shutil.rmtree(staging)
+        stage.rename(staging)
+        deployed = subprocess.run(["sudo", "-n", "/usr/local/sbin/codex-provider-console-nginx-deploy"], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if deployed.returncode != 0:
+            raise SystemExit(deployed.stdout[-1200:])
+        print(json.dumps({{"running": True, "domain": domain, "backend": "system_nginx", "upstream": "127.0.0.1:8787"}}))
     finally:
         if stage.exists():
             shutil.rmtree(stage)
@@ -240,10 +218,11 @@ for directory in (Path("/etc/nginx/conf.d"), Path("/etc/nginx/sites-enabled"), P
             if not path.is_file():
                 continue
             contents = path.read_text(encoding="utf-8", errors="ignore")
+            managed = "# Managed by codex-provider-console." in contents
             if target:
-                match = "server_name " + target + ";" in contents
+                match = managed and "server_name " + target + ";" in contents
             else:
-                match = "127.0.0.1:8787" in contents and "server_name " in contents
+                match = managed and "server_name " in contents
             if match:
                 system_configured = True
                 system_config_path = str(path)
@@ -389,33 +368,24 @@ def reverse_proxy_delete_script(domain: str = "") -> str:
 from pathlib import Path
 project = Path({project})
 target = {target}
-if target:
-    marker = "server_name " + target + ";"
-    candidates = []
-    for directory in (Path("/etc/nginx/conf.d"), Path("/etc/nginx/sites-enabled")):
-        try:
-            candidates.extend(path for path in directory.glob("*.conf") if path.is_file() and marker in path.read_text(encoding="utf-8", errors="ignore") and ("127.0.0.1:8787" in path.read_text(encoding="utf-8", errors="ignore") or "codex-provider-console" in path.read_text(encoding="utf-8", errors="ignore")))
-        except OSError:
-            pass
-    if candidates:
-        stage = project / (".external-proxy-delete-" + target.replace(".", "_") + ".stage")
-        stage.mkdir(mode=0o700)
-        try:
-            (stage / "paths").write_text("\\n".join(str(path) for path in candidates), encoding="utf-8")
-            remove = subprocess.run(["docker", "run", "--rm", "-v", f"{{stage}}:/src:ro", "-v", "/etc/nginx:/target", "nginx:1.27-alpine", "sh", "-c", "set -eu; while read -r path; do rm -f /target$path; done < /src/paths"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            if remove.returncode != 0:
-                raise SystemExit(remove.stdout[-1200:])
-            reload_script = ("set -eu; master=$(ps -eo pid,args | awk '$0 ~ /nginx: master process/ {{print $1; exit}}'); "
-                'test -n "$master"; nsenter -t "$master" -m -u -i -n -p -- nginx -t; '
-                'nsenter -t "$master" -m -u -i -n -p -- nginx -s reload')
-            reloaded = subprocess.run(["docker", "run", "--rm", "--pid=host", "--privileged", "nginx:1.27-alpine", "sh", "-c", reload_script], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            if reloaded.returncode != 0:
-                raise SystemExit(reloaded.stdout[-1200:])
-            print("deleted system nginx proxy")
-        finally:
-            if stage.exists():
-                shutil.rmtree(stage)
-        raise SystemExit(0)
+system_config = Path("/etc/nginx/conf.d/codex-provider-console.conf")
+system_managed = False
+try:
+    contents = system_config.read_text(encoding="utf-8", errors="ignore")
+    system_managed = "# Managed by codex-provider-console." in contents and "server_name " + target + ";" in contents
+except OSError:
+    pass
+if target and system_managed:
+    staging = project / ".reverse-proxy-host-staging"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(mode=0o700)
+    (staging / "delete").write_text(target, encoding="utf-8")
+    removed = subprocess.run(["sudo", "-n", "/usr/local/sbin/codex-provider-console-nginx-deploy"], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if removed.returncode != 0:
+        raise SystemExit(removed.stdout[-1200:])
+    print("deleted system nginx proxy")
+    raise SystemExit(0)
 root = project / "reverse-proxy"
 result = subprocess.run(["docker", "compose", "--profile", "reverse-proxy", "rm", "-sf", "reverse-proxy"], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 if result.returncode != 0:

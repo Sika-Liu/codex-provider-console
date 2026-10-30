@@ -448,7 +448,25 @@ for line in Path("/proc/net/route").read_text(encoding="ascii").splitlines()[1:]
   echo "Panel host SSH gateway verified: $gateway"
 }
 
+install_reverse_proxy_helper() {
+  local helper_path=/usr/local/sbin/codex-provider-console-nginx-deploy
+  local sudoers_path=/etc/sudoers.d/codex-provider-console-nginx-deploy
+  if [[ "$(id -u)" -eq 0 ]]; then
+    install -o root -g root -m 0755 "$PROJECT_DIR/deploy/codex-provider-console-nginx-deploy" "$helper_path"
+    printf '%s ALL=(root) NOPASSWD: %s\n' "$DEPLOY_USER" "$helper_path" > "$sudoers_path"
+    chmod 0440 "$sudoers_path"
+  else
+    sudo install -o root -g root -m 0755 "$PROJECT_DIR/deploy/codex-provider-console-nginx-deploy" "$helper_path"
+    printf '%s ALL=(root) NOPASSWD: %s\n' "$DEPLOY_USER" "$helper_path" | sudo tee "$sudoers_path" >/dev/null
+    sudo chmod 0440 "$sudoers_path"
+  fi
+  if command -v visudo >/dev/null 2>&1; then
+    if [[ "$(id -u)" -eq 0 ]]; then visudo -cf "$sudoers_path" >/dev/null; else sudo visudo -cf "$sudoers_path" >/dev/null; fi
+  fi
+}
+
 docker compose -f "$PROJECT_DIR/compose.yml" up -d --build
+install_reverse_proxy_helper
 prepare_panel_host_gateway
 
 local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')

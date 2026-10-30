@@ -7,6 +7,7 @@ APP = (ROOT / "app.py").read_text(encoding="utf-8")
 GATEWAY = (ROOT / "infrastructure" / "reverse_proxy_gateway.py").read_text(encoding="utf-8")
 PAGES = (ROOT / "web" / "pages.py").read_text(encoding="utf-8")
 COMPOSE = (ROOT / "compose.yml").read_text(encoding="utf-8")
+HELPER = (ROOT / "deploy" / "codex-provider-console-nginx-deploy").read_text(encoding="utf-8")
 
 
 class ReverseProxyManagementTests(unittest.TestCase):
@@ -42,8 +43,12 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn("proxy_pass $proxy_upstream;", GATEWAY)
         self.assertIn('backend": "system_nginx"', GATEWAY)
         self.assertIn('127.0.0.1:8787', GATEWAY)
-        self.assertIn('--pid=host', GATEWAY)
-        self.assertIn('nsenter', GATEWAY)
+        self.assertIn('codex-provider-console-nginx-deploy', GATEWAY)
+        self.assertNotIn('--pid=host', GATEWAY)
+        self.assertNotIn('nsenter', GATEWAY)
+        self.assertIn("nginx-last-known-good.conf", HELPER)
+        self.assertIn("systemctl reload nginx.service", HELPER)
+        self.assertIn("configuration validation failed", HELPER)
 
     def test_reverse_proxy_ui_accepts_pem_but_does_not_load_it_back(self):
         self.assertIn('id="proxy-certificate"', PAGES)
