@@ -43,6 +43,7 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn("proxy_pass $proxy_upstream;", GATEWAY)
         self.assertIn('backend": "system_nginx"', GATEWAY)
         self.assertIn('127.0.0.1:8787', GATEWAY)
+        self.assertIn('managed_upstream', GATEWAY)
         self.assertIn('codex-provider-console-nginx-deploy', GATEWAY)
         self.assertNotIn('--pid=host', GATEWAY)
         self.assertNotIn('nsenter', GATEWAY)

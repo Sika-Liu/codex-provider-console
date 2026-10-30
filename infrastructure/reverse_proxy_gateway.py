@@ -207,6 +207,8 @@ from pathlib import Path
 project = Path({project})
 target = {target}
 root = project / "reverse-proxy"
+listeners = subprocess.run(["ss", "-ltn"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+system_nginx_available = bool(__import__("shutil").which("nginx") and (":80 " in listeners or ":443 " in listeners))
 result = subprocess.run(["docker", "compose", "--profile", "reverse-proxy", "ps", "--status", "running", "--services"], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 docker_configured = (root / "nginx" / "default.conf").is_file()
 docker_running = "reverse-proxy" in result.stdout.splitlines()
@@ -257,7 +259,8 @@ elif not configured:
     https_error = "尚未生成 Nginx 配置"
 elif not running:
     https_error = "反向代理容器未运行"
-print(json.dumps({{"configured": configured, "running": running, "backend": backend, "domain": target, "upstream": upstream, "https_verified": https_verified, "https_error": https_error}}))
+managed_upstream = "127.0.0.1:8787" if system_nginx_available else "codex-provider-console:8787"
+print(json.dumps({{"configured": configured, "running": running, "backend": backend, "domain": target, "upstream": upstream, "managed_upstream": managed_upstream, "https_verified": https_verified, "https_error": https_error}}))
 '''
 
 

@@ -1514,7 +1514,7 @@ def reverse_proxy_status() -> dict:
         "https_error": str(result.get("https_error", "")),
         "domain": str(result.get("domain") or saved.get("domain", "")),
         "upstream": str(result.get("upstream") or saved.get("upstream", "")),
-        "managed_upstream": REVERSE_PROXY_UPSTREAM,
+        "managed_upstream": str(result.get("managed_upstream") or ("127.0.0.1:8787" if result.get("backend") == "system_nginx" else REVERSE_PROXY_UPSTREAM)),
     }
 
 
