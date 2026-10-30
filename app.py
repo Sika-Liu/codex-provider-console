@@ -1685,6 +1685,53 @@ def get_reverse_proxy_job(job_id: str) -> dict:
     return reverse_proxy_job_snapshot(job_id)
 
 
+@PROXY_ROUTER.post("/api/reverse-proxy/delete-progress")
+def start_reverse_proxy_delete_progress() -> dict:
+    job_id = uuid.uuid4().hex
+    with REVERSE_PROXY_JOBS_LOCK:
+        if any(job["status"] == "running" for job in REVERSE_PROXY_JOBS.values()):
+            raise HTTPException(409, "已有反向代理任务正在运行")
+        REVERSE_PROXY_JOBS[job_id] = new_background_job("reverse_proxy", {
+            "id": job_id, "status": "running", "progress": 2, "step": 0,
+            "stage": "准备删除代理", "detail": "", "warning": "", "result": None,
+            "updated_at": time.time(),
+        })
+
+    def report(progress: int, step: int, stage: str) -> None:
+        with REVERSE_PROXY_JOBS_LOCK:
+            REVERSE_PROXY_JOBS[job_id].update(progress=progress, step=step, stage=stage, updated_at=time.time())
+
+    def run() -> None:
+        try:
+            with REVERSE_PROXY_LOCK:
+                report(20, 1, "正在检查当前代理配置")
+                saved = _read_auth_overrides().get("reverse_proxy", {})
+                domain = str(saved.get("domain", "")).strip().lower()
+                if not domain:
+                    raise RuntimeError("未找到已保存的反向代理域名")
+                report(45, 2, "正在删除 Nginx 配置和 TLS 文件")
+                run_host_reverse_proxy_script(reverse_proxy_delete_script(domain), "删除", timeout=45)
+                report(75, 3, "正在重载 Nginx")
+                settings = _read_auth_overrides()
+                settings["reverse_proxy"] = {}
+                write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+                audit("reverse_proxy_deleted", domain=domain)
+                report(92, 4, "正在确认删除结果")
+            with REVERSE_PROXY_JOBS_LOCK:
+                REVERSE_PROXY_JOBS[job_id].update(
+                    status="completed", progress=100, step=5, stage="反向代理删除完成",
+                    detail="代理、配置和 TLS 文件已删除；域名保护规则已保留。",
+                    result={"configured": False, "running": False, "domain": domain},
+                    updated_at=time.time(),
+                )
+        except Exception as exc:
+            with REVERSE_PROXY_JOBS_LOCK:
+                REVERSE_PROXY_JOBS[job_id].update(status="failed", detail=str(exc), updated_at=time.time())
+
+    threading.Thread(target=run, name=f"reverse-proxy-delete-{job_id[:8]}", daemon=True).start()
+    return reverse_proxy_job_snapshot(job_id)
+
+
 def delete_reverse_proxy_after_response() -> None:
     """Remove the proxy only after its own HTTP response has been delivered."""
     with REVERSE_PROXY_LOCK:
