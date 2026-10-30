@@ -26,7 +26,7 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn('class ReverseProxyApplyRequest', APP)
         self.assertIn("certificate_pem", APP)
         self.assertIn("private_key_pem", APP)
-        self.assertIn('settings["reverse_proxy"] = {"domain": domain, "upstream": upstream}', APP)
+        self.assertIn('settings["reverse_proxy"] = {"domain": domain, "upstream": upstream, "backend":', APP)
         self.assertIn('audit("reverse_proxy_applied", domain=domain, upstream=upstream)', APP)
 
     def test_reverse_proxy_has_status_apply_and_delete_operations(self):
@@ -40,6 +40,10 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertNotIn('""".format(domain=data["domain"], upstream=data["upstream"])', GATEWAY)
         self.assertIn("resolver 127.0.0.11 ipv6=off valid=30s;", GATEWAY)
         self.assertIn("proxy_pass $proxy_upstream;", GATEWAY)
+        self.assertIn('backend": "system_nginx"', GATEWAY)
+        self.assertIn('127.0.0.1:8787', GATEWAY)
+        self.assertIn('--pid=host', GATEWAY)
+        self.assertIn('nsenter', GATEWAY)
 
     def test_reverse_proxy_ui_accepts_pem_but_does_not_load_it_back(self):
         self.assertIn('id="proxy-certificate"', PAGES)
@@ -61,6 +65,7 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn("function abandonProxyEdit", PAGES)
         self.assertIn("if(target!=='console')abandonProxyEdit()", PAGES)
         self.assertIn("if(result.configured&&!proxyEditing)showProxySuccess(result)", PAGES)
+        self.assertIn("result.backend==='system_nginx'", PAGES)
 
     def test_deleting_proxy_removes_server_files_and_returns_to_configuration(self):
         self.assertIn("def reverse_proxy_delete_script", GATEWAY)

@@ -1505,13 +1505,14 @@ def reverse_proxy_status() -> dict:
     return {
         "configured": bool(result.get("configured")),
         "running": bool(result.get("running")),
+        "backend": str(result.get("backend") or saved.get("backend") or ""),
         "secure_mode": PANEL_BIND in {"127.0.0.1", "localhost", "::1"} and bool(COOKIE_SECURE),
         "panel_bind": PANEL_BIND,
         "cookie_secure": bool(COOKIE_SECURE),
         "mode_mismatch": (PANEL_BIND in {"127.0.0.1", "localhost", "::1"}) != bool(COOKIE_SECURE),
         "https_verified": bool(result.get("https_verified")),
         "https_error": str(result.get("https_error", "")),
-        "domain": str(saved.get("domain", "")),
+        "domain": str(result.get("domain") or saved.get("domain", "")),
         "upstream": str(saved.get("upstream", "")),
         "managed_upstream": REVERSE_PROXY_UPSTREAM,
     }
@@ -1574,7 +1575,7 @@ def apply_reverse_proxy(request: ReverseProxyApplyRequest) -> dict:
             raise HTTPException(502, str(exc)) from exc
     # Keep only non-sensitive deployment metadata in the panel's settings file.
     settings = _read_auth_overrides()
-    settings["reverse_proxy"] = {"domain": domain, "upstream": upstream}
+    settings["reverse_proxy"] = {"domain": domain, "upstream": upstream, "backend": str(result.get("backend", "docker"))}
     write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
     audit("reverse_proxy_applied", domain=domain, upstream=upstream)
     return {
@@ -1636,7 +1637,7 @@ def start_reverse_proxy_apply_progress(request: ReverseProxyApplyRequest) -> dic
                     reverse_proxy_apply_script(domain, upstream, certificate, private_key), "部署", timeout=120
                 ))
                 settings = _read_auth_overrides()
-                settings["reverse_proxy"] = {"domain": domain, "upstream": upstream}
+                settings["reverse_proxy"] = {"domain": domain, "upstream": upstream, "backend": str(deployed.get("backend", "docker"))}
                 write_private(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
                 audit("reverse_proxy_applied", domain=domain, upstream=upstream)
                 report(88, 5, "正在验证 HTTPS 访问")
@@ -1685,7 +1686,8 @@ def delete_reverse_proxy_after_response() -> None:
     """Remove the proxy only after its own HTTP response has been delivered."""
     with REVERSE_PROXY_LOCK:
         try:
-            run_host_reverse_proxy_script(reverse_proxy_delete_script(), "删除", timeout=45)
+            saved = _read_auth_overrides().get("reverse_proxy", {})
+            run_host_reverse_proxy_script(reverse_proxy_delete_script(str(saved.get("domain", ""))), "删除", timeout=45)
         except RuntimeError as exc:
             audit("reverse_proxy_delete_failed", detail=str(exc)[:500])
             return

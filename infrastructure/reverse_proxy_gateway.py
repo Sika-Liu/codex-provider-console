@@ -76,6 +76,73 @@ project = Path(data["project"])
 compose = project / "compose.yml"
 if not compose.is_file():
     raise SystemExit("控制台部署目录或 compose.yml 不存在")
+listeners = subprocess.run(["ss", "-ltn"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+system_nginx = shutil.which("nginx") and ("LISTEN" in listeners) and (":80 " in listeners or ":443 " in listeners)
+if system_nginx:
+    domain = data["domain"]
+    cert_dir = "/etc/nginx/codex-provider-console-certs/" + domain
+    config_path = "/etc/nginx/conf.d/" + domain + ".conf"
+    marker = "server_name " + domain + ";"
+    for directory in (Path("/etc/nginx/conf.d"), Path("/etc/nginx/sites-enabled")):
+        try:
+            for candidate in directory.glob("*.conf"):
+                contents = candidate.read_text(encoding="utf-8", errors="ignore")
+                if marker in contents and ("127.0.0.1:8787" in contents or "codex-provider-console" in contents):
+                    config_path = str(candidate)
+                    break
+        except OSError:
+            pass
+    if data["validate_only"]:
+        print(json.dumps({{"validated": True, "backend": "system_nginx"}}))
+        sys.exit(0)
+    stage = project / (".external-proxy-stage-" + uuid.uuid4().hex)
+    stage.mkdir(mode=0o700)
+    try:
+        (stage / "certificate.pem").write_bytes(base64.b64decode(data["certificate"]))
+        (stage / "private-key.pem").write_bytes(base64.b64decode(data["private_key"]))
+        config = ("server {{\\n"
+            "    listen 80;\\n"
+            "    server_name " + domain + ";\\n"
+            "    return 301 https://$host$request_uri;\\n"
+            "}}\\n\\n"
+            "server {{\\n"
+            "    listen 443 ssl;\\n"
+            "    server_name " + domain + ";\\n"
+            "    ssl_certificate " + cert_dir + "/certificate.pem;\\n"
+            "    ssl_certificate_key " + cert_dir + "/private-key.pem;\\n"
+            "    ssl_protocols TLSv1.2 TLSv1.3;\\n"
+            "    # Managed by codex-provider-console.\\n"
+            "    location / {{\\n"
+            "        proxy_pass http://127.0.0.1:8787;\\n"
+            "        proxy_http_version 1.1;\\n"
+            "        proxy_set_header Host $host;\\n"
+            "        proxy_set_header X-Real-IP $remote_addr;\\n"
+            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\\n"
+            "        proxy_set_header X-Forwarded-Proto $scheme;\\n"
+            "        proxy_read_timeout 300s;\\n"
+            "    }}\\n"
+            "}}\\n")
+        (stage / "default.conf").write_text(config, encoding="utf-8")
+        copy = subprocess.run([
+            "docker", "run", "--rm", "-v", f"{{stage}}:/src:ro", "-v", "/etc/nginx:/target",
+            "nginx:1.27-alpine", "sh", "-c",
+            "set -eu; mkdir -p /target" + cert_dir + "; cp /src/certificate.pem /target" + cert_dir + "/certificate.pem; cp /src/private-key.pem /target" + cert_dir + "/private-key.pem; chmod 600 /target" + cert_dir + "/*; cp /src/default.conf /target" + config_path,
+        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if copy.returncode != 0:
+            raise SystemExit(copy.stdout[-1200:])
+        reload_script = ("set -eu; master=$(ps -eo pid,cmd | awk '$0 ~ /nginx: master process/ {{print $1; exit}}'); "
+            'test -n "$master"; nsenter -t "$master" -m -u -i -n -p -- nginx -t; '
+            'nsenter -t "$master" -m -u -i -n -p -- nginx -s reload')
+        reloaded = subprocess.run([
+            "docker", "run", "--rm", "--pid=host", "--privileged", "nginx:1.27-alpine", "sh", "-c", reload_script,
+        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if reloaded.returncode != 0:
+            raise SystemExit(reloaded.stdout[-1200:])
+        print(json.dumps({{"running": True, "domain": domain, "backend": "system_nginx"}}))
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+    sys.exit(0)
 root = project / "reverse-proxy"
 stage = project / (".reverse-proxy-stage-" + uuid.uuid4().hex)
 previous = project / ".reverse-proxy-previous"
@@ -161,8 +228,34 @@ project = Path({project})
 target = {target}
 root = project / "reverse-proxy"
 result = subprocess.run(["docker", "compose", "--profile", "reverse-proxy", "ps", "--status", "running", "--services"], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-configured = (root / "nginx" / "default.conf").is_file()
-running = "reverse-proxy" in result.stdout.splitlines()
+docker_configured = (root / "nginx" / "default.conf").is_file()
+docker_running = "reverse-proxy" in result.stdout.splitlines()
+system_configured = False
+system_config_path = ""
+for directory in (Path("/etc/nginx/conf.d"), Path("/etc/nginx/sites-enabled"), Path("/etc/nginx/sites-available")):
+    try:
+        for path in directory.glob("*.conf"):
+            if not path.is_file():
+                continue
+            contents = path.read_text(encoding="utf-8", errors="ignore")
+            if target:
+                match = "server_name " + target + ";" in contents
+            else:
+                match = "127.0.0.1:8787" in contents and "server_name " in contents
+            if match:
+                system_configured = True
+                system_config_path = str(path)
+                if not target:
+                    import re
+                    found = re.search(r"server_name\\s+([a-z0-9.-]+)\\s*;", contents, re.IGNORECASE)
+                    if found:
+                        target = found.group(1).lower()
+                break
+    except OSError:
+        pass
+configured = docker_configured or system_configured
+running = docker_running or system_configured
+backend = "system_nginx" if system_configured else ("docker" if docker_configured else "")
 https_verified = False
 https_error = ""
 if configured and running and target:
@@ -182,7 +275,7 @@ elif not configured:
     https_error = "尚未生成 Nginx 配置"
 elif not running:
     https_error = "反向代理容器未运行"
-print(json.dumps({{"configured": configured, "running": running, "https_verified": https_verified, "https_error": https_error}}))
+print(json.dumps({{"configured": configured, "running": running, "backend": backend, "domain": target, "https_verified": https_verified, "https_error": https_error}}))
 '''
 
 
@@ -286,11 +379,40 @@ print(json.dumps({{"secure_mode": False, "panel_bind": "0.0.0.0", "cookie_secure
 """
 
 
-def reverse_proxy_delete_script() -> str:
+def reverse_proxy_delete_script(domain: str = "") -> str:
     project = json.dumps(host_panel_project_path())
+    target = json.dumps(domain.strip().lower())
     return f'''import shutil, subprocess
 from pathlib import Path
 project = Path({project})
+target = {target}
+if target:
+    marker = "server_name " + target + ";"
+    candidates = []
+    for directory in (Path("/etc/nginx/conf.d"), Path("/etc/nginx/sites-enabled")):
+        try:
+            candidates.extend(path for path in directory.glob("*.conf") if path.is_file() and marker in path.read_text(encoding="utf-8", errors="ignore") and ("127.0.0.1:8787" in path.read_text(encoding="utf-8", errors="ignore") or "codex-provider-console" in path.read_text(encoding="utf-8", errors="ignore")))
+        except OSError:
+            pass
+    if candidates:
+        stage = project / (".external-proxy-delete-" + target.replace(".", "_") + ".stage")
+        stage.mkdir(mode=0o700)
+        try:
+            (stage / "paths").write_text("\\n".join(str(path) for path in candidates), encoding="utf-8")
+            remove = subprocess.run(["docker", "run", "--rm", "-v", f"{{stage}}:/src:ro", "-v", "/etc/nginx:/target", "nginx:1.27-alpine", "sh", "-c", "set -eu; while read -r path; do rm -f /target$path; done < /src/paths"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if remove.returncode != 0:
+                raise SystemExit(remove.stdout[-1200:])
+            reload_script = ("set -eu; master=$(ps -eo pid,cmd | awk '$0 ~ /nginx: master process/ {{print $1; exit}}'); "
+                'test -n "$master"; nsenter -t "$master" -m -u -i -n -p -- nginx -t; '
+                'nsenter -t "$master" -m -u -i -n -p -- nginx -s reload')
+            reloaded = subprocess.run(["docker", "run", "--rm", "--pid=host", "--privileged", "nginx:1.27-alpine", "sh", "-c", reload_script], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if reloaded.returncode != 0:
+                raise SystemExit(reloaded.stdout[-1200:])
+            print("deleted system nginx proxy")
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
+        raise SystemExit(0)
 root = project / "reverse-proxy"
 result = subprocess.run(["docker", "compose", "--profile", "reverse-proxy", "rm", "-sf", "reverse-proxy"], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 if result.returncode != 0:
