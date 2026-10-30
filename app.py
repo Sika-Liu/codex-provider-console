@@ -1513,7 +1513,7 @@ def reverse_proxy_status() -> dict:
         "https_verified": bool(result.get("https_verified")),
         "https_error": str(result.get("https_error", "")),
         "domain": str(result.get("domain") or saved.get("domain", "")),
-        "upstream": str(saved.get("upstream", "")),
+        "upstream": str(result.get("upstream") or saved.get("upstream", "")),
         "managed_upstream": REVERSE_PROXY_UPSTREAM,
     }
 

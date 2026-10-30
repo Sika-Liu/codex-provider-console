@@ -258,6 +258,7 @@ for directory in (Path("/etc/nginx/conf.d"), Path("/etc/nginx/sites-enabled"), P
 configured = docker_configured or system_configured
 running = docker_running or system_configured
 backend = "system_nginx" if system_configured else ("docker" if docker_configured else "")
+upstream = "127.0.0.1:8787" if backend == "system_nginx" else ("codex-provider-console:8787" if backend == "docker" else "")
 https_verified = False
 https_error = ""
 if configured and running and target:
@@ -277,7 +278,7 @@ elif not configured:
     https_error = "尚未生成 Nginx 配置"
 elif not running:
     https_error = "反向代理容器未运行"
-print(json.dumps({{"configured": configured, "running": running, "backend": backend, "domain": target, "https_verified": https_verified, "https_error": https_error}}))
+print(json.dumps({{"configured": configured, "running": running, "backend": backend, "domain": target, "upstream": upstream, "https_verified": https_verified, "https_error": https_error}}))
 '''
 
 
