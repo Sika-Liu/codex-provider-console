@@ -132,7 +132,7 @@ if system_nginx:
         ], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if copy.returncode != 0:
             raise SystemExit(copy.stdout[-1200:])
-        reload_script = ("set -eu; master=$(ps -eo pid,cmd | awk '$0 ~ /nginx: master process/ {{print $1; exit}}'); "
+        reload_script = ("set -eu; master=$(ps -eo pid,args | awk '$0 ~ /nginx: master process/ {{print $1; exit}}'); "
             'test -n "$master"; nsenter -t "$master" -m -u -i -n -p -- nginx -t; '
             'nsenter -t "$master" -m -u -i -n -p -- nginx -s reload')
         reloaded = subprocess.run([
@@ -404,7 +404,7 @@ if target:
             remove = subprocess.run(["docker", "run", "--rm", "-v", f"{{stage}}:/src:ro", "-v", "/etc/nginx:/target", "nginx:1.27-alpine", "sh", "-c", "set -eu; while read -r path; do rm -f /target$path; done < /src/paths"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             if remove.returncode != 0:
                 raise SystemExit(remove.stdout[-1200:])
-            reload_script = ("set -eu; master=$(ps -eo pid,cmd | awk '$0 ~ /nginx: master process/ {{print $1; exit}}'); "
+            reload_script = ("set -eu; master=$(ps -eo pid,args | awk '$0 ~ /nginx: master process/ {{print $1; exit}}'); "
                 'test -n "$master"; nsenter -t "$master" -m -u -i -n -p -- nginx -t; '
                 'nsenter -t "$master" -m -u -i -n -p -- nginx -s reload')
             reloaded = subprocess.run(["docker", "run", "--rm", "--pid=host", "--privileged", "nginx:1.27-alpine", "sh", "-c", reload_script], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
