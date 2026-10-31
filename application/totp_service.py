@@ -10,7 +10,7 @@ from typing import Callable
 
 import pyotp
 import qrcode
-from qrcode.image.svg import SvgImage
+from qrcode.image.svg import SvgPathImage
 
 
 class TOTPError(ValueError):
@@ -47,7 +47,7 @@ class TOTPService:
             uri = pyotp.TOTP(self._pending_secret).provisioning_uri(
                 name=account_name, issuer_name=self.issuer
             )
-            qr = qrcode.make(uri, image_factory=SvgImage)
+            qr = qrcode.make(uri, image_factory=SvgPathImage)
             qr_svg = qr.to_string().decode("utf-8")
             return {
                 "account_name": account_name,
