@@ -1308,7 +1308,6 @@ class TOTPCodeRequest(BaseModel):
 
 
 class TOTPRecoveryRequest(BaseModel):
-    username: str = Field(min_length=1, max_length=80)
     code: str = Field(pattern=r"^\d{6}$")
 
 
@@ -1520,7 +1519,7 @@ def complete_password_reset(details: ResetPasswordRequest) -> dict:
 
 @app.post("/api/totp-password-reset/verify")
 def verify_totp_password_reset(details: TOTPRecoveryRequest, request: Request) -> dict:
-    return totp_result(lambda: TOTP_SERVICE.recover(details.username, PANEL_USERNAME, details.code, login_client_key(request)))
+    return totp_result(lambda: TOTP_SERVICE.recover(PANEL_USERNAME, details.code, login_client_key(request)))
 
 
 @app.post("/api/totp-password-reset/complete")

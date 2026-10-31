@@ -31,7 +31,7 @@ class TOTPServiceTests(unittest.TestCase):
     def test_recovery_issues_one_time_reset_token(self):
         secret = pyotp.random_base32()
         self.settings["panel_totp_secret"] = secret
-        result = self.service.recover("admin", "admin", pyotp.TOTP(secret).now(), "client")
+        result = self.service.recover("admin", pyotp.TOTP(secret).now(), "client")
         self.service.complete_reset(result["reset_token"], "new-password")
         self.assertEqual(self.new_password, "new-password")
         with self.assertRaises(TOTPError):
@@ -41,7 +41,7 @@ class TOTPServiceTests(unittest.TestCase):
         secret = pyotp.random_base32()
         self.settings["panel_totp_secret"] = secret
         with self.assertRaises(TOTPError):
-            self.service.recover("admin", "admin", "000000", "client")
+            self.service.recover("admin", "000000", "client")
 
 
 if __name__ == "__main__":

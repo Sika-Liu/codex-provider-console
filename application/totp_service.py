@@ -85,7 +85,7 @@ class TOTPService:
         self.audit("totp_unbound")
         return {"configured": False}
 
-    def recover(self, username: str, expected_username: str, code: str, client_key: str) -> dict:
+    def recover(self, expected_username: str, code: str, client_key: str) -> dict:
         now = time.monotonic()
         with self._lock:
             recent = [stamp for stamp in self._attempts.get(client_key, []) if now - stamp < 15 * 60]
@@ -94,8 +94,8 @@ class TOTPService:
             recent.append(now)
             self._attempts[client_key] = recent
             secret = str(self.read_settings().get("panel_totp_secret") or "")
-            if not hmac_compare(username, expected_username) or not secret or not re.fullmatch(r"\d{6}", code) or not pyotp.TOTP(secret).verify(code, valid_window=1):
-                raise TOTPError(400, "账号或验证器验证码不正确")
+            if not expected_username or not secret or not re.fullmatch(r"\d{6}", code) or not pyotp.TOTP(secret).verify(code, valid_window=1):
+                raise TOTPError(400, "验证器验证码不正确")
             token = secrets.token_urlsafe(32)
             self._reset_grant = {
                 "token": token,
