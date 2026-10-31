@@ -47,6 +47,7 @@ from application.task_store import TaskStore
 from application.session_catalog import SessionCatalog, SessionCatalogPaths
 from application.session_service import SessionError, SessionService
 from application.recovery_service import RecoveryError, RecoveryService
+from application.totp_service import TOTPError, TOTPService
 from application.diagnostic_service import DiagnosticService
 from application.official_login import DeviceLoginSession
 from application.config_service import (
@@ -450,6 +451,7 @@ async def authentication(request: Request, call_next):
     if not AUTH_ENABLED or request.url.path in {
         "/login", "/logout", "/api/password-reset/request",
         "/api/password-reset/verify", "/api/password-reset/complete",
+        "/api/totp-password-reset/verify", "/api/totp-password-reset/complete",
     }:
         return await call_next(request)
     if not auth_configured():
@@ -1301,6 +1303,20 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=256)
 
 
+class TOTPCodeRequest(BaseModel):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class TOTPRecoveryRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class TOTPResetRequest(BaseModel):
+    reset_token: str = Field(min_length=32, max_length=128)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
 class ReverseProxyApplyRequest(BaseModel):
     domain: str = Field(min_length=1, max_length=253)
     certificate_pem: str = Field(min_length=1, max_length=200_000)
@@ -1418,12 +1434,48 @@ RECOVERY_SERVICE = RecoveryService(
     grant_lifetime=RECOVERY_GRANT_LIFETIME,
 )
 
+TOTP_SERVICE = TOTPService(
+    read_settings=_read_auth_overrides,
+    write_settings=_write_recovery_settings,
+    session_secret=lambda: SESSION_SECRET,
+    password_matches=current_password_matches,
+    password_reset=_apply_recovery_password,
+    audit=audit,
+)
+
 
 def recovery_result(operation):
     try:
         return operation()
     except RecoveryError as exc:
         raise HTTPException(exc.status, str(exc)) from exc
+
+
+def totp_result(operation):
+    try:
+        return operation()
+    except TOTPError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
+@ACCOUNT_ROUTER.get("/api/account/totp")
+def get_totp_status() -> dict:
+    return TOTP_SERVICE.status()
+
+
+@ACCOUNT_ROUTER.post("/api/account/totp/setup")
+def setup_totp() -> dict:
+    return totp_result(lambda: TOTP_SERVICE.setup(PANEL_USERNAME))
+
+
+@ACCOUNT_ROUTER.post("/api/account/totp/confirm")
+def confirm_totp(details: TOTPCodeRequest) -> dict:
+    return totp_result(lambda: TOTP_SERVICE.confirm(details.code))
+
+
+@ACCOUNT_ROUTER.delete("/api/account/totp")
+def delete_totp(details: TOTPCodeRequest) -> dict:
+    return totp_result(lambda: TOTP_SERVICE.disable(details.code))
 
 
 @ACCOUNT_ROUTER.get("/api/account/recovery-email")
@@ -1464,6 +1516,16 @@ def verify_password_reset(details: RecoveryCodeRequest) -> dict:
 @ACCOUNT_ROUTER.post("/api/password-reset/complete")
 def complete_password_reset(details: ResetPasswordRequest) -> dict:
     return recovery_result(lambda: RECOVERY_SERVICE.complete_reset(details.reset_token, details.new_password))
+
+
+@app.post("/api/totp-password-reset/verify")
+def verify_totp_password_reset(details: TOTPRecoveryRequest, request: Request) -> dict:
+    return totp_result(lambda: TOTP_SERVICE.recover(details.username, PANEL_USERNAME, details.code, login_client_key(request)))
+
+
+@app.post("/api/totp-password-reset/complete")
+def complete_totp_password_reset(details: TOTPResetRequest) -> dict:
+    return totp_result(lambda: TOTP_SERVICE.complete_reset(details.reset_token, details.new_password))
 
 
 @ACCOUNT_ROUTER.get("/api/common-config")
