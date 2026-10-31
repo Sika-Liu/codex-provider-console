@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import pyotp
+import qrcode
+from qrcode.image.svg import SvgImage
 
 
 class TOTPError(ValueError):
@@ -45,7 +47,16 @@ class TOTPService:
             uri = pyotp.TOTP(self._pending_secret).provisioning_uri(
                 name=account_name, issuer_name=self.issuer
             )
-            return {"secret": self._pending_secret, "provisioning_uri": uri, "expires_in": self.code_lifetime}
+            qr = qrcode.make(uri, image_factory=SvgImage)
+            qr_svg = qr.to_string().decode("utf-8")
+            return {
+                "account_name": account_name,
+                "issuer": self.issuer,
+                "secret": self._pending_secret,
+                "provisioning_uri": uri,
+                "qr_svg": qr_svg,
+                "expires_in": self.code_lifetime,
+            }
 
     def confirm(self, code: str) -> dict:
         with self._lock:
