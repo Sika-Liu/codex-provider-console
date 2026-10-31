@@ -1217,7 +1217,7 @@ class TOTPCodeRequest(BaseModel):
 
 
 class TOTPRecoveryRequest(BaseModel):
-    code: str = Field(pattern=r"^\d{6}$")
+    code: str = Field(min_length=1, max_length=128)
 
 
 class TOTPResetRequest(BaseModel):
@@ -1364,6 +1364,11 @@ def confirm_totp(details: TOTPCodeRequest) -> dict:
 @ACCOUNT_ROUTER.delete("/api/account/totp")
 def delete_totp(details: TOTPCodeRequest) -> dict:
     return totp_result(lambda: TOTP_SERVICE.disable(details.code))
+
+
+@ACCOUNT_ROUTER.post("/api/account/recovery-code")
+def generate_recovery_code() -> dict:
+    return TOTP_SERVICE.generate_recovery_code()
 
 
 @app.post("/api/totp-password-reset/verify")

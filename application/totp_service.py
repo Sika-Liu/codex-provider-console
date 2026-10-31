@@ -1,6 +1,8 @@
 """Local TOTP setup and password recovery without an external delivery service."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
 import secrets
 import threading
@@ -36,7 +38,19 @@ class TOTPService:
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def status(self) -> dict:
-        return {"configured": bool(self.read_settings().get("panel_totp_secret"))}
+        settings = self.read_settings()
+        return {
+            "configured": bool(settings.get("panel_totp_secret")),
+            "recovery_code_configured": bool(settings.get("panel_recovery_code_hash")),
+        }
+
+    def generate_recovery_code(self) -> dict:
+        code = secrets.token_urlsafe(32)
+        settings = self.read_settings()
+        settings["panel_recovery_code_hash"] = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        self.write_settings(settings)
+        self.audit("recovery_code_generated")
+        return {"recovery_code": code}
 
     def setup(self, account_name: str) -> dict:
         with self._lock:
@@ -93,15 +107,25 @@ class TOTPService:
                 raise TOTPError(429, "验证尝试过多，请 15 分钟后重试")
             recent.append(now)
             self._attempts[client_key] = recent
-            secret = str(self.read_settings().get("panel_totp_secret") or "")
-            if not expected_username or not secret or not re.fullmatch(r"\d{6}", code) or not pyotp.TOTP(secret).verify(code, valid_window=1):
-                raise TOTPError(400, "验证器验证码不正确")
+            settings = self.read_settings()
+            secret = str(settings.get("panel_totp_secret") or "")
+            value = code.strip()
+            totp_valid = bool(secret and re.fullmatch(r"\d{6}", value) and pyotp.TOTP(secret).verify(value, valid_window=1))
+            recovery_hash = str(settings.get("panel_recovery_code_hash") or "")
+            recovery_valid = bool(recovery_hash and hmac.compare_digest(
+                recovery_hash, hashlib.sha256(value.encode("utf-8")).hexdigest()
+            ))
+            if not expected_username or not (totp_valid or recovery_valid):
+                raise TOTPError(400, "验证码或恢复码不正确")
             token = secrets.token_urlsafe(32)
             self._reset_grant = {
                 "token": token,
                 "expires": time.time() + self.code_lifetime,
                 "session_secret": self.session_secret(),
             }
+            if recovery_valid:
+                settings.pop("panel_recovery_code_hash", None)
+                self.write_settings(settings)
             return {"reset_token": token, "expires_in": self.code_lifetime}
 
     def complete_reset(self, token: str, new_password: str) -> dict:

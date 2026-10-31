@@ -1,4 +1,5 @@
 import unittest
+import hashlib
 
 import pyotp
 
@@ -36,6 +37,20 @@ class TOTPServiceTests(unittest.TestCase):
         self.assertEqual(self.new_password, "new-password")
         with self.assertRaises(TOTPError):
             self.service.complete_reset(result["reset_token"], "another-password")
+
+    def test_recovery_code_is_generated_hashed_and_one_time(self):
+        self.service.write_settings = lambda value: (self.settings.clear(), self.settings.update(value))
+        result = self.service.generate_recovery_code()
+        self.assertGreaterEqual(len(result["recovery_code"]), 40)
+        self.assertEqual(
+            self.settings["panel_recovery_code_hash"],
+            hashlib.sha256(result["recovery_code"].encode()).hexdigest(),
+        )
+        reset = self.service.recover("admin", result["recovery_code"], "client")
+        self.assertNotIn("panel_recovery_code_hash", self.settings)
+        self.service.complete_reset(reset["reset_token"], "new-password")
+        with self.assertRaises(TOTPError):
+            self.service.recover("admin", result["recovery_code"], "client-2")
 
     def test_wrong_recovery_code_is_rejected(self):
         secret = pyotp.random_base32()
