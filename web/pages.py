@@ -20,7 +20,7 @@ LOGIN_HTML = '''<!doctype html>
     .recovery-close{position:absolute;right:16px;top:12px;width:32px;height:32px;margin:0;padding:0;background:transparent;color:#687078;font-size:24px;font-weight:400;line-height:1}
     .recovery-close:hover{background:#f1f3f5}.recovery-description{margin:8px 0 0}
     #recovery-email{margin-top:18px}.recovery-actions{display:flex;gap:10px;margin-top:18px}.recovery-actions button{margin:0}.recovery-actions .secondary{background:#eef0f2;color:#30343a}
-    .otp-entry{position:relative;width:100%}.otp-slots{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px}.totp-entry .otp-slots{grid-template-columns:repeat(6,minmax(0,1fr))}.otp-slot{height:clamp(36px,8vw,44px);display:grid;place-items:center;border:1px solid #d8dce2;border-radius:9px;background:#f4f5f7;font-size:20px;font-weight:700;color:#202124}.otp-slot.current{border-color:#697583;background:#fff;box-shadow:0 0 0 1px #697583}.otp-entry .otp-input{position:absolute;inset:0;z-index:1;width:100%;height:100%;margin:0;padding:0;border:0;opacity:0;cursor:text}
+    .otp-entry{position:relative;width:100%}.totp-entry{margin-top:16px}.otp-slots{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px}.totp-entry .otp-slots{grid-template-columns:repeat(6,minmax(0,1fr))}.otp-slot{height:auto;aspect-ratio:1;display:grid;place-items:center;border:1px solid #d8dce2;border-radius:9px;background:#f4f5f7;font-size:20px;font-weight:700;color:#202124}.otp-slot.current{border-color:#697583;background:#fff;box-shadow:0 0 0 1px #697583}.otp-entry .otp-input{position:absolute;inset:0;z-index:1;width:100%;height:100%;margin:0;padding:0;border:0;opacity:0;cursor:text}
   </style>
 </head>
 <body>
@@ -66,7 +66,7 @@ LOGIN_HTML = '''<!doctype html>
       <h2 id="totp-recovery-title">输入验证码</h2>
       <div class="otp-entry totp-entry"><input id="totp-recovery-code" class="otp-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" aria-label="验证码"><div class="otp-slots" aria-hidden="true"></div></div>
       <div id="totp-recovery-password" hidden><label>新密码<input id="totp-recovery-new-password" type="password" minlength="8" autocomplete="new-password"></label><label>确认新密码<input id="totp-recovery-confirm-password" type="password" minlength="8" autocomplete="new-password"></label></div>
-      <div class="recovery-actions"><button id="totp-recovery-cancel" class="secondary" type="button">取消</button><button id="totp-recovery-submit" type="button">验证</button></div>
+      <div class="recovery-actions" style="margin-top:22px"><button id="totp-recovery-cancel" class="secondary" type="button">取消</button><button id="totp-recovery-submit" type="button">验证</button></div>
       <div id="totp-recovery-message" class="message" role="alert" aria-live="polite"></div>
     </section>
   </div>
