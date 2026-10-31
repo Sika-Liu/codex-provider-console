@@ -63,8 +63,8 @@ LOGIN_HTML = '''<!doctype html>
   <div id="totp-recovery-mask" class="recovery-mask" hidden>
     <section class="recovery-dialog" role="dialog" aria-modal="true" aria-labelledby="totp-recovery-title">
       <button id="totp-recovery-close" class="recovery-close" type="button" aria-label="关闭">×</button>
-      <h2 id="totp-recovery-title">使用验证器找回密码</h2>
-      <label>验证器验证码</label><div class="otp-entry totp-entry"><input id="totp-recovery-code" class="otp-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6"><div class="otp-slots" aria-hidden="true"></div></div>
+      <h2 id="totp-recovery-title">输入验证码</h2>
+      <div class="otp-entry totp-entry"><input id="totp-recovery-code" class="otp-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" aria-label="验证码"><div class="otp-slots" aria-hidden="true"></div></div>
       <div id="totp-recovery-password" hidden><label>新密码<input id="totp-recovery-new-password" type="password" minlength="8" autocomplete="new-password"></label><label>确认新密码<input id="totp-recovery-confirm-password" type="password" minlength="8" autocomplete="new-password"></label></div>
       <div class="recovery-actions"><button id="totp-recovery-cancel" class="secondary" type="button">取消</button><button id="totp-recovery-submit" type="button">验证</button></div>
       <div id="totp-recovery-message" class="message" role="alert" aria-live="polite"></div>
