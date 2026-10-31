@@ -84,6 +84,8 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn("/api/reverse-proxy/delete-progress", PAGES)
         self.assertIn("删除反向代理", PAGES)
         self.assertIn("正在删除 Nginx 配置和 TLS 文件", APP)
+        self.assertIn("location.reload()", PAGES)
+        self.assertIn("origin's actual 525 response", PAGES)
         self.assertIn("/api/reverse-proxy/delete", APP)
         self.assertIn("删除代理", PAGES)
         self.assertIn("def delete_reverse_proxy_after_response", APP)
