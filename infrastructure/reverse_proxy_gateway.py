@@ -43,20 +43,33 @@ def check_reverse_proxy_upstream(upstream: str) -> None:
         raise HTTPException(422, f"无法连接上游服务 {upstream}：{exc}") from exc
 
 
-def reverse_proxy_certificate_preflight_script(domain: str, certificate_pem: str) -> str:
-    payload = json.dumps({"domain": domain, "certificate": base64.b64encode(certificate_pem.encode()).decode()})
+def reverse_proxy_certificate_preflight_script(domain: str, certificate_pem: str, private_key_pem: str) -> str:
+    payload = json.dumps({
+        "domain": domain,
+        "certificate": base64.b64encode(certificate_pem.encode()).decode(),
+        "private_key": base64.b64encode(private_key_pem.encode()).decode(),
+    })
     return f'''import base64, json, subprocess, tempfile
 from pathlib import Path
 data = json.loads({payload!r})
 with tempfile.TemporaryDirectory(prefix="proxy-cert-check-") as directory:
     certificate = Path(directory) / "certificate.pem"
+    private_key = Path(directory) / "private-key.pem"
     certificate.write_bytes(base64.b64decode(data["certificate"]))
+    private_key.write_bytes(base64.b64decode(data["private_key"]))
     hostname = subprocess.run(["openssl", "x509", "-in", str(certificate), "-noout", "-checkhost", data["domain"]], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if hostname.returncode != 0 or "does match certificate" not in hostname.stdout.lower():
         raise SystemExit("证书不包含输入的域名：" + hostname.stdout.strip()[-300:])
     expiration = subprocess.run(["openssl", "x509", "-in", str(certificate), "-noout", "-checkend", "0"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if expiration.returncode != 0:
         raise SystemExit("证书已过期：" + expiration.stdout.strip()[-300:])
+    certificate_key = subprocess.run(["openssl", "x509", "-in", str(certificate), "-pubkey", "-noout"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+    private_key_public = subprocess.run(["openssl", "pkey", "-in", str(private_key), "-pubout"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+    if certificate_key.returncode != 0 or private_key_public.returncode != 0:
+        detail = (private_key_public.stdout if private_key_public.returncode != 0 else certificate_key.stdout).strip()[-300:]
+        raise SystemExit("无法读取证书或私钥公钥：" + detail)
+    if certificate_key.stdout.strip() != private_key_public.stdout.strip():
+        raise SystemExit("私钥与证书不匹配")
 print("certificate_valid")
 '''
 

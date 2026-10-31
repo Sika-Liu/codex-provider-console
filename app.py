@@ -1625,7 +1625,7 @@ def start_reverse_proxy_apply_progress(request: ReverseProxyApplyRequest) -> dic
                 check_reverse_proxy_upstream(upstream)
                 report(36, 2, "正在校验证书域名与有效期")
                 run_host_reverse_proxy_script(
-                    reverse_proxy_certificate_preflight_script(domain, certificate), "证书预检查", timeout=30
+                    reverse_proxy_certificate_preflight_script(domain, certificate, private_key), "证书预检查", timeout=30
                 )
                 report(52, 3, "正在校验 Nginx 配置")
                 run_host_reverse_proxy_script(

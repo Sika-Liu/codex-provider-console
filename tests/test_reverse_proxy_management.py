@@ -44,6 +44,8 @@ class ReverseProxyManagementTests(unittest.TestCase):
         self.assertIn('backend": "system_nginx"', GATEWAY)
         self.assertIn('127.0.0.1:8787', GATEWAY)
         self.assertIn('managed_upstream', GATEWAY)
+        self.assertIn('"openssl", "pkey"', GATEWAY)
+        self.assertIn('私钥与证书不匹配', GATEWAY)
         self.assertIn('codex-provider-console-nginx-deploy', GATEWAY)
         self.assertNotIn('--pid=host', GATEWAY)
         self.assertNotIn('nsenter', GATEWAY)
