@@ -60,23 +60,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/Sika-Liu/codex-provider-conso
 4. 在“供应商配置”中添加或选择供应商。
 5. 如需官方登录，进入对应供应商后点击“开始官方登录”。
 
-面板左下角的用户名菜单可用于修改账号、修改密码、绑定辅助邮箱和退出登录。
-
-### 辅助邮箱与忘记密码
-
-邮件找回通过 SMTP 发送验证码。部署管理员需在服务器的 `.env` 中配置可发信的邮箱服务器和客户端专用密码；面板用户只需输入要绑定的辅助邮箱：
-
-```text
-SMTP_HOST=smtp.example.com
-SMTP_PORT=465
-SMTP_USERNAME=sender@example.com
-SMTP_PASSWORD=邮箱客户端专用密码
-SMTP_FROM=sender@example.com
-SMTP_FROM_NAME=Codex 控制台
-SMTP_USE_SSL=1
-```
-
-重新创建面板容器后，已登录管理员可在用户名菜单中点击“绑定辅助邮箱”，通过新邮箱收到的 8 位验证码完成验证。登录页的“忘记密码”只向已验证的辅助邮箱发送验证码；验证后可以设置新密码。验证码 10 分钟内有效、最多尝试 5 次；重置成功会使旧登录会话失效。若邮箱不可用，仍可通过服务器 SSH 恢复面板密码。不要把邮箱客户端专用密码写入 Git 或发送给他人。
+面板左下角的用户名菜单可用于修改账号、修改密码和退出登录。
 
 ### 验证器恢复
 

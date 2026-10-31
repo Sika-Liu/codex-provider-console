@@ -7,7 +7,6 @@ import re
 import shutil
 import secrets
 import socket
-import smtplib
 import sqlite3
 import subprocess
 import tomllib
@@ -17,7 +16,6 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
-from email.message import EmailMessage
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -46,7 +44,6 @@ from application.health_service import HealthDependencies, HealthService
 from application.task_store import TaskStore
 from application.session_catalog import SessionCatalog, SessionCatalogPaths
 from application.session_service import SessionError, SessionService
-from application.recovery_service import RecoveryError, RecoveryService
 from application.totp_service import TOTPError, TOTPService
 from application.diagnostic_service import DiagnosticService
 from application.official_login import DeviceLoginSession
@@ -290,21 +287,6 @@ COOKIE_SECURE = os.environ.get("PANEL_COOKIE_SECURE", "false").lower() in {"1", 
 PANEL_BIND = os.environ.get("PANEL_BIND", "127.0.0.1")
 SESSION_COOKIE = "codex_panel_session"
 SESSION_MAX_AGE = 12 * 60 * 60
-SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
-SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "").strip()
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
-SMTP_FROM = os.environ.get("SMTP_FROM", "").strip()
-SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "Codex 控制台").strip()
-SMTP_USE_SSL = os.environ.get("SMTP_USE_SSL", "1").lower() in {"1", "true", "yes"}
-try:
-    SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
-except ValueError:
-    SMTP_PORT = 0
-RECOVERY_CODE_LIFETIME = 10 * 60
-RECOVERY_GRANT_LIFETIME = 5 * 60
-RECOVERY_LOCK = threading.Lock()
-RECOVERY_PENDING: dict[str, dict] = {}
-RECOVERY_SEND_EVENTS: dict[str, list[float]] = {}
 LOGIN_TIMEOUT_SECONDS = 10
 LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
 try:
@@ -347,64 +329,6 @@ AUTH_SERVICE = AuthService(
 
 def current_password_matches(password: str) -> bool:
     return AUTH_SERVICE.current_password_matches(password)
-
-def recovery_email_ready() -> bool:
-    return bool(SMTP_HOST and 1 <= SMTP_PORT <= 65535 and SMTP_USERNAME and SMTP_PASSWORD and SMTP_FROM)
-
-
-def masked_recovery_email(email: str) -> str:
-    if not email or "@" not in email:
-        return ""
-    name, domain = email.rsplit("@", 1)
-    return name[:1] + "***@" + domain
-
-
-def recovery_code_digest(code: str, salt: str) -> str:
-    return hashlib.sha256(f"{salt}:{code}".encode("utf-8")).hexdigest()
-
-
-def new_recovery_code() -> tuple[str, dict]:
-    code = f"{secrets.randbelow(100_000_000):08d}"
-    salt = secrets.token_urlsafe(24)
-    return code, {
-        "salt": salt,
-        "digest": recovery_code_digest(code, salt),
-        "expires": time.time() + RECOVERY_CODE_LIFETIME,
-        "attempts": 0,
-    }
-
-
-def recovery_send_allowed(action: str, client_key: str) -> bool:
-    now = time.monotonic()
-    with RECOVERY_LOCK:
-        for key, limit in ((f"{action}:global", 5), (f"{action}:client:{client_key}", 3)):
-            recent = [sent for sent in RECOVERY_SEND_EVENTS.get(key, []) if now - sent < 15 * 60]
-            RECOVERY_SEND_EVENTS[key] = recent
-            if len(recent) >= limit:
-                return False
-        for key in (f"{action}:global", f"{action}:client:{client_key}"):
-            RECOVERY_SEND_EVENTS[key].append(now)
-    return True
-
-
-def send_recovery_email(recipient: str, subject: str, body: str) -> None:
-    if not recovery_email_ready():
-        raise HTTPException(503, "邮件找回尚未配置，请通过服务器 SSH 恢复")
-    message = EmailMessage()
-    message["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM}>" if SMTP_FROM_NAME else SMTP_FROM
-    message["To"] = recipient
-    message["Subject"] = subject
-    message.set_content(body)
-    try:
-        client = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=10) if SMTP_USE_SSL else smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
-        with client:
-            if not SMTP_USE_SSL:
-                client.starttls()
-            client.login(SMTP_USERNAME, SMTP_PASSWORD)
-            client.send_message(message)
-    except (OSError, smtplib.SMTPException) as error:
-        raise HTTPException(502, "邮件发送失败，请稍后重试") from error
-
 
 DEVICE_LOGIN_LOCK = threading.Lock()
 DEVICE_LOGIN: DeviceLoginSession | None = None
@@ -449,9 +373,7 @@ from web.pages import LOGIN_HTML, index as render_index
 @app.middleware("http")
 async def authentication(request: Request, call_next):
     if not AUTH_ENABLED or request.url.path in {
-        "/login", "/logout", "/api/password-reset/request",
-        "/api/password-reset/verify", "/api/password-reset/complete",
-        "/api/totp-password-reset/verify", "/api/totp-password-reset/complete",
+        "/login", "/logout", "/api/totp-password-reset/verify", "/api/totp-password-reset/complete",
     }:
         return await call_next(request)
     if not auth_configured():
@@ -1290,19 +1212,6 @@ class AccountUsernameRequest(BaseModel):
     username: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
 
 
-class RecoveryEmailRequest(BaseModel):
-    email: str = Field(min_length=3, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-
-
-class RecoveryCodeRequest(BaseModel):
-    code: str = Field(pattern=r"^[0-9]{8}$")
-
-
-class ResetPasswordRequest(BaseModel):
-    reset_token: str = Field(min_length=32, max_length=128)
-    new_password: str = Field(min_length=8, max_length=256)
-
-
 class TOTPCodeRequest(BaseModel):
     code: str = Field(pattern=r"^\d{6}$")
 
@@ -1420,19 +1329,6 @@ def _apply_recovery_password(new_password: str) -> None:
         LOGIN_FAILURES.clear()
 
 
-RECOVERY_SERVICE = RecoveryService(
-    read_settings=_read_auth_overrides,
-    write_settings=_write_recovery_settings,
-    session_secret=lambda: SESSION_SECRET,
-    password_matches=current_password_matches,
-    password_reset=_apply_recovery_password,
-    send_email=send_recovery_email,
-    email_ready=recovery_email_ready,
-    audit=audit,
-    code_lifetime=RECOVERY_CODE_LIFETIME,
-    grant_lifetime=RECOVERY_GRANT_LIFETIME,
-)
-
 TOTP_SERVICE = TOTPService(
     read_settings=_read_auth_overrides,
     write_settings=_write_recovery_settings,
@@ -1441,13 +1337,6 @@ TOTP_SERVICE = TOTPService(
     password_reset=_apply_recovery_password,
     audit=audit,
 )
-
-
-def recovery_result(operation):
-    try:
-        return operation()
-    except RecoveryError as exc:
-        raise HTTPException(exc.status, str(exc)) from exc
 
 
 def totp_result(operation):
@@ -1475,46 +1364,6 @@ def confirm_totp(details: TOTPCodeRequest) -> dict:
 @ACCOUNT_ROUTER.delete("/api/account/totp")
 def delete_totp(details: TOTPCodeRequest) -> dict:
     return totp_result(lambda: TOTP_SERVICE.disable(details.code))
-
-
-@ACCOUNT_ROUTER.get("/api/account/recovery-email")
-def get_recovery_email() -> dict:
-    return RECOVERY_SERVICE.status()
-
-
-@ACCOUNT_ROUTER.post("/api/account/recovery-email/unbind/request")
-def request_recovery_email_unbind(request: Request) -> dict:
-    return recovery_result(lambda: RECOVERY_SERVICE.request_unbind(login_client_key(request)))
-
-
-@ACCOUNT_ROUTER.delete("/api/account/recovery-email")
-def delete_recovery_email(details: RecoveryCodeRequest) -> dict:
-    return recovery_result(lambda: RECOVERY_SERVICE.unbind(details.code))
-
-
-@ACCOUNT_ROUTER.post("/api/account/recovery-email/request")
-def request_recovery_email_binding(details: RecoveryEmailRequest, request: Request) -> dict:
-    return recovery_result(lambda: RECOVERY_SERVICE.request_binding(details.email, login_client_key(request)))
-
-
-@ACCOUNT_ROUTER.post("/api/account/recovery-email/verify")
-def verify_recovery_email_binding(details: RecoveryCodeRequest) -> dict:
-    return recovery_result(lambda: RECOVERY_SERVICE.verify_binding(details.code))
-
-
-@ACCOUNT_ROUTER.post("/api/password-reset/request")
-def request_password_reset(details: RecoveryEmailRequest, request: Request) -> dict:
-    return recovery_result(lambda: RECOVERY_SERVICE.request_reset(details.email, login_client_key(request)))
-
-
-@ACCOUNT_ROUTER.post("/api/password-reset/verify")
-def verify_password_reset(details: RecoveryCodeRequest) -> dict:
-    return recovery_result(lambda: RECOVERY_SERVICE.verify_reset(details.code))
-
-
-@ACCOUNT_ROUTER.post("/api/password-reset/complete")
-def complete_password_reset(details: ResetPasswordRequest) -> dict:
-    return recovery_result(lambda: RECOVERY_SERVICE.complete_reset(details.reset_token, details.new_password))
 
 
 @app.post("/api/totp-password-reset/verify")
