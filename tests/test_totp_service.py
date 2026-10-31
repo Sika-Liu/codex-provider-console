@@ -47,8 +47,10 @@ class TOTPServiceTests(unittest.TestCase):
             hashlib.sha256(result["recovery_code"].encode()).hexdigest(),
         )
         reset = self.service.recover("admin", result["recovery_code"], "client")
+        self.assertIn("panel_recovery_code_hash", self.settings)
+        retry = self.service.recover("admin", result["recovery_code"], "client-2")
+        self.service.complete_reset(retry["reset_token"], "new-password")
         self.assertNotIn("panel_recovery_code_hash", self.settings)
-        self.service.complete_reset(reset["reset_token"], "new-password")
         with self.assertRaises(TOTPError):
             self.service.recover("admin", result["recovery_code"], "client-2")
 

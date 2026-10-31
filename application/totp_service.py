@@ -122,10 +122,8 @@ class TOTPService:
                 "token": token,
                 "expires": time.time() + self.code_lifetime,
                 "session_secret": self.session_secret(),
+                "recovery_code": recovery_valid,
             }
-            if recovery_valid:
-                settings.pop("panel_recovery_code_hash", None)
-                self.write_settings(settings)
             return {"reset_token": token, "expires_in": self.code_lifetime}
 
     def complete_reset(self, token: str, new_password: str) -> dict:
@@ -136,6 +134,10 @@ class TOTPService:
             if self.password_matches(new_password):
                 raise TOTPError(400, "新密码不能与当前密码相同")
             self.password_reset(new_password)
+            if grant.get("recovery_code"):
+                settings = self.read_settings()
+                settings.pop("panel_recovery_code_hash", None)
+                self.write_settings(settings)
             self._reset_grant = None
         self.audit("totp_password_reset")
         return {"reset": True, "sessions_invalidated": True}
